@@ -8,14 +8,20 @@
 //! # Units
 //!
 //! The layout space is dimensionless. Vertically one leaf row is one unit.
-//! Horizontally the tree is normalised *per region*, because the three focus
-//! levels do not share a unit (6.4, 6.9): the backbone is built from sketch
-//! distances in substitutions per site, a Focus 1 cluster tree from counts of
-//! differing difference pieces, a Focus 2 cluster tree from SNP counts. Laying
-//! those out on one shared axis would squash the backbone (values around 1e-3)
-//! against a cluster of SNP counts (values around 1e1) into an invisible
-//! stub. Each region therefore spans a fixed layout width and carries its own
-//! [`Region::unit`], and the scale bar always names the unit it is drawing.
+//! Every branch length arrives here already in SNPs (see
+//! `UiModel::display_tree`): exact inside a Focus 2 cluster, and "≈" elsewhere
+//! (the backbone and Focus 0 trees are sketch distances times the median
+//! genome length, Focus 1 trees count difference pieces).
+//!
+//! Horizontally the tree is still normalised *per region*. Between clusters
+//! the distances are thousands of SNPs, inside a cluster a handful; one shared
+//! axis would squash every cluster into an invisible stub. The backbone
+//! therefore spans a fixed layout width, and opened clusters span another. All
+//! exact (Focus 2) clusters share *one* SNP scale, so a tight outbreak looks
+//! tighter than a loose one; an approximate cluster gets a scale of its own,
+//! because its estimates must not stretch or squash the exact ones. Each
+//! [`Region`] carries its scale and its "≈" flag, and the scale bar always
+//! names what it is drawing.
 
 use std::collections::HashMap;
 
@@ -91,6 +97,25 @@ impl DisplayNode {
     }
 }
 
+impl DisplayNode {
+    /// Multiply every branch length in this subtree by `factor`, which is how a
+    /// tree in substitutions per site is put into (approximate) SNPs.
+    pub fn scale_lengths(&mut self, factor: f64) {
+        let f = if factor.is_finite() && factor > 0.0 {
+            factor
+        } else {
+            0.0
+        };
+        let mut stack: Vec<&mut DisplayNode> = vec![self];
+        while let Some(n) = stack.pop() {
+            n.len *= f;
+            for c in &mut n.children {
+                stack.push(c);
+            }
+        }
+    }
+}
+
 /// Convert an engine tree into display nodes.
 ///
 /// `ids` maps a leaf name to a genome id; a name that is not in it (which
@@ -139,6 +164,8 @@ pub struct Region {
     pub unit: &'static str,
     pub cluster: Option<u32>,
     pub focus: u8,
+    /// True when the lengths in this region are estimates ("≈").
+    pub approximate: bool,
 }
 
 impl Region {
@@ -179,6 +206,18 @@ pub struct LayoutNode {
     /// Identity for the move animation: stable while the leaf set below the
     /// node is stable, and different as soon as it changes.
     pub key: u64,
+    /// The opened cluster this node belongs to: the cluster root itself and
+    /// everything below it. `None` on the backbone.
+    pub cluster: Option<u32>,
+    /// Edges between this node and the root of its region (the cluster root
+    /// inside a cluster, the tree root on the backbone). The unfold animation
+    /// staggers branches by it.
+    pub depth: u32,
+    /// Focus and "≈" of the edge *into* this node. The same as the node's own
+    /// everywhere except at a cluster root, whose edge is a backbone branch: a
+    /// sketch estimate even when the cluster below it is exact, and drawn so.
+    pub edge_focus: u8,
+    pub edge_approximate: bool,
 }
 
 /// A whole laid-out tree.
@@ -224,6 +263,7 @@ pub fn layout(root: &DisplayNode) -> TreeLayout {
             unit: fmt::unit_label(root.focus),
             cluster: None,
             focus: root.focus,
+            approximate: root.approximate,
         }],
         ..Default::default()
     };
@@ -232,18 +272,28 @@ pub fn layout(root: &DisplayNode) -> TreeLayout {
     {
         let mut b = Builder {
             rows: 0.0,
+            exact_raw: shared_exact_raw(root),
             out: &mut out,
         };
-        root_idx = b.build(root, None, 0.0, bb_scale, 0);
+        root_idx = b.build(root, None, 0.0, bb_scale, 0, None, 0);
         rows = b.rows;
     }
     out.root = root_idx;
     out.rows = rows.max(1.0);
+    // A backbone with no length (one cluster drawn on its own) reserves no
+    // width: the cluster then fills the panel like any standard phylogram.
+    let skip_backbone = out.regions.len() > 1 && out.regions[0].raw_max <= 0.0;
     let x_max = out
         .nodes
         .iter()
         .map(|n| n.x)
-        .chain(out.regions.iter().map(|r| r.x0 + r.width))
+        .chain(
+            out.regions
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !(skip_backbone && *i == 0))
+                .map(|(_, r)| r.x0 + r.width),
+        )
         .fold(0.0f64, f64::max);
     out.x_max = x_max;
     out
@@ -275,6 +325,26 @@ fn region_raw(node: &DisplayNode) -> f64 {
     best
 }
 
+/// The widest exact cluster: every Focus 2 cluster is drawn on this one SNP
+/// scale. `None` when no exact cluster is open.
+fn shared_exact_raw(root: &DisplayNode) -> Option<f64> {
+    let mut best: Option<f64> = None;
+    let mut stack: Vec<&DisplayNode> = vec![root];
+    while let Some(n) = stack.pop() {
+        if let NodeKind::ClusterRoot { focus, .. } = n.kind {
+            if focus == fmt::FOCUS_EXACT && !n.approximate {
+                let raw = cluster_raw(n);
+                if raw > 0.0 {
+                    best = Some(best.map_or(raw, |b: f64| b.max(raw)));
+                }
+            }
+            continue;
+        }
+        stack.extend(n.children.iter());
+    }
+    best
+}
+
 /// Deepest accumulated edge length below a cluster root, all of which lies in
 /// the cluster's own region.
 fn cluster_raw(node: &DisplayNode) -> f64 {
@@ -297,10 +367,15 @@ fn finite(v: f64) -> f64 {
 
 struct Builder<'o> {
     rows: f64,
+    /// See [`shared_exact_raw`].
+    exact_raw: Option<f64>,
     out: &'o mut TreeLayout,
 }
 
 impl<'o> Builder<'o> {
+    // The recursion carries the region and cluster context down the tree; a
+    // struct for it would only move the same eight values elsewhere.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         &mut self,
         node: &DisplayNode,
@@ -308,27 +383,47 @@ impl<'o> Builder<'o> {
         x_parent: f64,
         scale: f64,
         region: usize,
+        cluster: Option<u32>,
+        depth: u32,
     ) -> usize {
         let len = finite(node.len);
         let x = x_parent + len * scale;
 
-        // An opened cluster starts a new region with its own unit and scale.
-        let (child_scale, child_region) = if let NodeKind::ClusterRoot { id, focus, .. } = node.kind
-        {
-            let raw = cluster_raw(node);
-            self.out.regions.push(Region {
-                x0: x,
-                width: CLUSTER_W,
-                raw_max: raw,
-                unit: fmt::unit_label(focus),
-                cluster: Some(id),
-                focus,
-            });
-            (scale_for(raw, CLUSTER_W), self.out.regions.len() - 1)
-        } else {
-            (scale, region)
-        };
+        // An opened cluster starts a new region with its own scale: the shared
+        // exact scale when it is exact, one of its own otherwise.
+        let (child_scale, child_region, cluster, depth) =
+            if let NodeKind::ClusterRoot { id, focus, .. } = node.kind {
+                let own = cluster_raw(node);
+                let exact = focus == fmt::FOCUS_EXACT && !node.approximate;
+                let raw = match self.exact_raw {
+                    Some(shared) if exact => shared,
+                    _ => own,
+                };
+                self.out.regions.push(Region {
+                    x0: x,
+                    width: CLUSTER_W,
+                    raw_max: raw,
+                    unit: fmt::unit_label(focus),
+                    cluster: Some(id),
+                    focus,
+                    approximate: node.approximate,
+                });
+                (
+                    scale_for(raw, CLUSTER_W),
+                    self.out.regions.len() - 1,
+                    Some(id),
+                    0,
+                )
+            } else {
+                (scale, region, cluster, depth)
+            };
 
+        let (edge_focus, edge_approximate) = match (&node.kind, parent) {
+            (NodeKind::ClusterRoot { .. }, Some(p)) => {
+                (self.out.nodes[p].focus, self.out.nodes[p].approximate)
+            }
+            _ => (node.focus, node.approximate),
+        };
         let idx = self.out.nodes.len();
         self.out.nodes.push(LayoutNode {
             idx,
@@ -344,6 +439,10 @@ impl<'o> Builder<'o> {
             approximate: node.approximate,
             region: child_region,
             key: 0,
+            cluster,
+            depth,
+            edge_focus,
+            edge_approximate,
         });
 
         if node.children.is_empty() || node.kind.is_terminal() {
@@ -363,7 +462,15 @@ impl<'o> Builder<'o> {
         } else {
             let mut kids: Vec<usize> = Vec::with_capacity(node.children.len());
             for c in &node.children {
-                kids.push(self.build(c, Some(idx), x, child_scale, child_region));
+                kids.push(self.build(
+                    c,
+                    Some(idx),
+                    x,
+                    child_scale,
+                    child_region,
+                    cluster,
+                    depth + 1,
+                ));
             }
             let row_min = self.out.nodes[kids[0]].row_min;
             let row_max = self.out.nodes[kids[kids.len() - 1]].row_max;
@@ -530,8 +637,8 @@ pub fn scale_bar(region: &Region, target: f64) -> Option<ScaleBar> {
         unit: region.unit,
         label: format!(
             "{}{} {}",
-            fmt::approx_mark(fmt::is_approximate_focus(region.focus)),
-            fmt::sci(value),
+            fmt::approx_mark(region.approximate || fmt::is_approximate_focus(region.focus)),
+            fmt::snps(value),
             region.unit
         ),
     })
@@ -662,7 +769,8 @@ mod tests {
         let bb = &l.regions[0];
         // Deepest backbone leaf is the cluster root at 0.4, not b2 at 0.7.
         assert!((bb.raw_max - 0.4).abs() < 1e-9);
-        assert_eq!(bb.unit, "subs/site");
+        assert_eq!(bb.unit, "SNPs");
+        assert!(bb.approximate, "the backbone is a sketch estimate");
         assert_eq!(bb.cluster, None);
         assert!(l.x_max >= c_x_max(&l));
     }
@@ -734,15 +842,16 @@ mod tests {
         let r = Region {
             x0: 0.0,
             width: 1.0,
-            raw_max: 0.0047,
-            unit: "subs/site",
+            raw_max: 4700.0,
+            unit: "SNPs",
             cluster: None,
             focus: 0,
+            approximate: true,
         };
         let b = scale_bar(&r, 0.25).expect("a positive region always gives a bar");
-        assert!((b.value - 0.001).abs() < 1e-12, "got {}", b.value);
+        assert!((b.value - 1000.0).abs() < 1e-9, "got {}", b.value);
         assert!(b.layout_width <= 0.25 + 1e-12);
-        assert!(b.label.contains("subs/site"));
+        assert_eq!(b.label, "≈ 1\u{2009}000 SNPs");
         // The bar's width, converted back, is exactly its value.
         assert!((b.layout_width * r.units_per_layout() - b.value).abs() < 1e-12);
     }
@@ -756,10 +865,106 @@ mod tests {
             unit: fmt::unit_label(1),
             cluster: Some(3),
             focus: 1,
+            approximate: true,
         };
         let b = scale_bar(&r, 0.3).unwrap();
         assert!(b.label.starts_with('≈'), "got {:?}", b.label);
-        assert_eq!(b.unit, "diff pieces");
+        assert_eq!(b.unit, "SNPs");
+        // An exact cluster's bar is a plain count of SNPs.
+        let exact = Region {
+            focus: 2,
+            approximate: false,
+            ..r
+        };
+        assert_eq!(scale_bar(&exact, 0.3).unwrap().label, "2 SNPs");
+    }
+
+    /// Two opened exact clusters, one ten times wider than the other.
+    fn two_exact_clusters(approx_second: bool) -> DisplayNode {
+        let mut a = DisplayNode::new(
+            NodeKind::ClusterRoot {
+                id: 0,
+                members: 2,
+                focus: 2,
+            },
+            100.0,
+            2,
+            false,
+        );
+        a.children = vec![leaf("a1", 1.0), leaf("a2", 2.0)];
+        let mut b = DisplayNode::new(
+            NodeKind::ClusterRoot {
+                id: 1,
+                members: 2,
+                focus: if approx_second { 1 } else { 2 },
+            },
+            100.0,
+            2,
+            approx_second,
+        );
+        b.children = vec![leaf("b1", 10.0), leaf("b2", 20.0)];
+        let mut root = DisplayNode::new(NodeKind::Root, 0.0, 0, true);
+        root.children = vec![a, b];
+        root
+    }
+
+    #[test]
+    fn exact_clusters_share_one_snp_scale() {
+        let l = layout(&two_exact_clusters(false));
+        let ra = l.regions.iter().find(|r| r.cluster == Some(0)).unwrap();
+        let rb = l.regions.iter().find(|r| r.cluster == Some(1)).unwrap();
+        assert_eq!(ra.units_per_layout(), rb.units_per_layout());
+        // So the tight cluster is drawn ten times narrower than the loose one.
+        let x = |name: &str| {
+            let n = l
+                .nodes
+                .iter()
+                .find(|n| n.kind.name() == Some(name))
+                .unwrap();
+            n.x - l.regions[n.region].x0
+        };
+        assert!((x("b2") / x("a2") - 10.0).abs() < 1e-9);
+        // Nodes know their cluster and their depth below its root.
+        let a1 = l
+            .nodes
+            .iter()
+            .find(|n| n.kind.name() == Some("a1"))
+            .unwrap();
+        assert_eq!(a1.cluster, Some(0));
+        assert_eq!(a1.depth, 1);
+        assert_eq!(l.nodes[l.root].cluster, None);
+        // The edge into an exact cluster is still a backbone estimate.
+        let root_a = l
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::ClusterRoot { id: 0, .. }))
+            .unwrap();
+        assert_eq!(root_a.focus, 2);
+        assert_eq!(root_a.edge_focus, 0);
+        assert!(root_a.edge_approximate && !root_a.approximate);
+        assert_eq!(a1.edge_focus, 2);
+    }
+
+    #[test]
+    fn an_approximate_cluster_keeps_a_scale_of_its_own() {
+        let l = layout(&two_exact_clusters(true));
+        let ra = l.regions.iter().find(|r| r.cluster == Some(0)).unwrap();
+        let rb = l.regions.iter().find(|r| r.cluster == Some(1)).unwrap();
+        assert!(rb.approximate && !ra.approximate);
+        // Each fills the cluster width with its own deepest leaf.
+        assert!((ra.raw_max - 2.0).abs() < 1e-9);
+        assert!((rb.raw_max - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scaling_lengths_reaches_every_branch() {
+        let mut t = sample();
+        t.scale_lengths(1000.0);
+        assert!((t.children[0].len - 200.0).abs() < 1e-9);
+        assert!((t.children[1].children[1].len - 300.0).abs() < 1e-9);
+        // A nonsense factor zeroes rather than poisoning the layout.
+        t.scale_lengths(f64::NAN);
+        assert_eq!(t.children[1].children[1].len, 0.0);
     }
 
     #[test]

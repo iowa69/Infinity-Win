@@ -85,6 +85,18 @@ pub struct InfinityApp {
     pub(crate) show_notes: bool,
     /// Whether the "add genomes" input area under the toolbar is open.
     pub(crate) show_inputs: bool,
+    /// Whether the right-hand panel is open.
+    pub(crate) show_side: bool,
+    /// Whether the Settings window is open.
+    pub(crate) show_settings: bool,
+    /// The SNP threshold being typed in Settings, and why it was refused.
+    pub(crate) threshold_text: String,
+    pub(crate) threshold_error: Option<String>,
+    /// Set once the theme has been installed into the egui context.
+    theme_installed: bool,
+    /// Whether the last frame was drawn in the dark theme (for exports that
+    /// draw "like the screen" without a `Ui` at hand).
+    pub(crate) dark: bool,
     /// The cluster distance the slider last sent, so dragging it does not queue
     /// a re-clustering per pixel.
     last_dist_sent: f64,
@@ -112,6 +124,23 @@ pub struct TreeView {
     pub zoom_request: Option<f32>,
     /// A layout point the next frame must put in the middle of the panel.
     pub centre: Option<(f64, f64)>,
+    /// The whole picture, or the selected cluster on its own.
+    pub mode: TreeMode,
+    /// SNP counts written on the branches.
+    pub branch_labels: bool,
+    /// Tip labels lined up in one column, with dotted leaders to the tips.
+    pub aligned_tips: bool,
+    /// A strip of cluster colour next to every tip label.
+    pub color_strip: bool,
+}
+
+/// What the tree panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeMode {
+    /// The backbone with clusters collapsed or opened.
+    All,
+    /// The selected cluster alone, as a standard phylogram in SNPs.
+    Cluster,
 }
 
 impl Default for TreeView {
@@ -127,6 +156,10 @@ impl Default for TreeView {
             search_hit: None,
             zoom_request: None,
             centre: None,
+            mode: TreeMode::All,
+            branch_labels: false,
+            aligned_tips: false,
+            color_strip: true,
         }
     }
 }
@@ -183,6 +216,12 @@ impl InfinityApp {
             // Open at start: the first thing a user has to do is get genomes in,
             // and there is no file dialog to discover.
             show_inputs: true,
+            show_side: true,
+            show_settings: false,
+            threshold_text: String::new(),
+            threshold_error: None,
+            theme_installed: false,
+            dark: true,
             last_dist_sent: params.cluster_dist,
         };
         app.validate_params();
@@ -213,7 +252,20 @@ impl InfinityApp {
     }
 
     pub(crate) fn validate_params(&mut self) {
-        self.params_error = self.prefs.params.validate().err();
+        self.params_error = self
+            .prefs
+            .params
+            .validate()
+            .and_then(|()| self.prefs.resolution.validate())
+            .err();
+    }
+
+    /// The parameter set a run starts with: the edited parameters, with the
+    /// Resolution and SNP-rule settings written in.
+    pub(crate) fn run_params(&self) -> infinity_core::params::Parameters {
+        let mut params = self.prefs.params.clone();
+        self.prefs.resolution.apply_to(&mut params);
+        params
     }
 
     // --- selection ---------------------------------------------------------
@@ -301,7 +353,7 @@ impl InfinityApp {
             self.status = "choose an output folder first".to_string();
             return;
         }
-        let params = self.prefs.params.clone();
+        let params = self.run_params();
         match run::start(self.inputs.clone(), params, outdir.clone(), ctx.clone()) {
             Ok(handle) => {
                 if let Some(note) = &handle.startup_note {
@@ -390,6 +442,13 @@ impl InfinityApp {
         self.prefs.export_dir = self.export_text.clone();
         self.save_prefs();
         let mut notes = Vec::new();
+        let run_dir = self.run_dir();
+        let ctx = export::ExportCtx {
+            run_dir: run_dir.as_deref(),
+            layout: self.tree_layout.as_ref(),
+            svg: self.svg_options(),
+            ..export::ExportCtx::new(&self.model, self.results.as_ref())
+        };
         let report = match item {
             Some(i) => {
                 let mut r = export::Report::default();
@@ -401,20 +460,14 @@ impl InfinityApp {
                         .push(format!("cannot create {}: {e}", dir.display()));
                     r
                 } else {
-                    match export::write_item(
-                        i,
-                        &dir,
-                        &self.model,
-                        self.results.as_ref(),
-                        &mut notes,
-                    ) {
+                    match export::write_item(i, &dir, &ctx, &mut notes) {
                         Ok(paths) => r.written.extend(paths),
                         Err(e) => r.errors.push(format!("{}: {e}", i.label())),
                     }
                     r
                 }
             }
-            None => export::write_all(&dir, &self.model, self.results.as_ref()),
+            None => export::write_all_with(&dir, &ctx),
         };
         for n in &report.notes {
             self.model.push_local_note(n.clone());
@@ -426,6 +479,56 @@ impl InfinityApp {
         if !report.ok() {
             self.model.push_local_note(report.errors.join("; "));
             self.show_notes = true;
+        }
+    }
+
+    /// Carry out an export asked for by the menu or the Run panel. "Everything"
+    /// writes every file and then captures the PNG as well.
+    pub(crate) fn run_export(&mut self, action: crate::chrome::ExportAction, ctx: &Context) {
+        use crate::chrome::ExportAction;
+        match action {
+            ExportAction::Item(export::Item::Png) => self.export_png(ctx),
+            ExportAction::Item(item) => self.export_files(Some(item)),
+            ExportAction::All => {
+                self.export_files(None);
+                let summary = self.status.clone();
+                if self.tree_rect.is_some() && self.tree_layout.is_some() {
+                    self.export_png(ctx);
+                    self.status = format!("{summary}; capturing tree.png ...");
+                }
+            }
+        }
+    }
+
+    /// The folder the model came from: where a live run writes, or the output
+    /// folder that was opened. Engine-written exports are copied from here.
+    pub(crate) fn run_dir(&self) -> Option<PathBuf> {
+        match &self.model.source {
+            crate::state::Source::Folder(p) => Some(p.clone()),
+            crate::state::Source::Live => {
+                self.run_handle.as_ref().map(|h| h.outdir().to_path_buf())
+            }
+            crate::state::Source::Empty => None,
+        }
+    }
+
+    /// The SVG looks like the tree panel: same theme, same decorations, a row
+    /// height that is readable whatever the zoom on screen.
+    pub(crate) fn svg_options(&self) -> crate::svg::SvgOptions {
+        let dark = self.dark;
+        let width = self
+            .tree_rect
+            .map(|(r, _)| (r.width() * 0.68).max(480.0))
+            .unwrap_or(760.0);
+        crate::svg::SvgOptions {
+            dark,
+            legend: self.tree.show_legend,
+            branch_labels: self.tree.branch_labels,
+            aligned_tips: self.tree.aligned_tips,
+            color_strip: self.tree.color_strip,
+            tree_width: width,
+            row_px: self.tree.px_per_row.clamp(14.0, 24.0),
+            selected_cluster: self.selected_cluster,
         }
     }
 
@@ -521,7 +624,8 @@ impl InfinityApp {
 
     // --- layout and animation ----------------------------------------------
 
-    /// A cheap signature of the set of opened clusters.
+    /// A cheap signature of what the tree panel shows: the set of opened
+    /// clusters, or, in single-cluster mode, which cluster.
     fn expanded_signature(&self) -> u64 {
         let mut ids: Vec<u32> = self.expanded.iter().copied().collect();
         ids.sort_unstable();
@@ -529,7 +633,26 @@ impl InfinityApp {
         for id in ids {
             h = h.rotate_left(5) ^ u64::from(id).wrapping_mul(0x100_0000_01b3);
         }
+        if let Some(c) = self.single_cluster() {
+            h = h.rotate_left(17) ^ (u64::from(c) + 1).wrapping_mul(0xff51_afd7_ed55_8ccd);
+        }
         h
+    }
+
+    /// The cluster drawn on its own, when the tree panel is in that mode.
+    pub(crate) fn single_cluster(&self) -> Option<u32> {
+        match self.tree.mode {
+            TreeMode::Cluster => self.selected_cluster,
+            TreeMode::All => None,
+        }
+    }
+
+    /// The display tree for the current mode.
+    pub(crate) fn current_display_tree(&self) -> Option<layout::DisplayNode> {
+        match self.single_cluster() {
+            Some(c) => self.model.cluster_display_tree(c),
+            None => self.model.display_tree(&self.expanded),
+        }
     }
 
     /// Rebuild the tree layout only when the model or the opened set changed,
@@ -542,7 +665,7 @@ impl InfinityApp {
         {
             return;
         }
-        let Some(display) = self.model.display_tree(&self.expanded) else {
+        let Some(display) = self.current_display_tree() else {
             self.tree_layout = None;
             self.positions.clear();
             self.laid_out_version = self.model.version;
@@ -735,6 +858,11 @@ impl eframe::App for InfinityApp {
     /// hidden, so a long run keeps being folded into the model even when the
     /// user has minimised the window.
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if !self.theme_installed {
+            crate::theme::install(ctx);
+            ctx.set_theme(crate::theme::preference(&self.prefs.theme));
+            self.theme_installed = true;
+        }
         let now = ctx.input(|i| i.time);
         let more = self.drain_events();
         self.poll_run();
@@ -759,14 +887,35 @@ impl eframe::App for InfinityApp {
         // mock-up of section 8 lays it out: the full-width bars first, then the
         // two sides, then the map across what is left, and the tree in the
         // middle.
-        egui::CentralPanel::default().show(ui, |ui| {
-            crate::chrome::toolbar(ui, self);
-            crate::chrome::status_bar(ui, self);
-            crate::genome_panel::show(ui, self);
-            crate::side_panel::show(ui, self);
-            crate::map_panel::show(ui, self);
-            crate::tree_panel::show(ui, self);
-        });
+        //
+        // The side panels are carved straight out of the root `Ui`, and the
+        // tree and the map live inside a `CentralPanel`. That panel's child
+        // `Ui` is bounded *and clipped* to what the side panels left over, so
+        // a header that is wider than the space it gets can never spill over
+        // a neighbouring panel: it wraps or is clipped instead. (Before, all
+        // five were shown inside one `CentralPanel`, so the tree header and
+        // canvas could widen past the right-hand panel and paint over it.)
+        self.dark = ui.visuals().dark_mode;
+        crate::chrome::toolbar(ui, self);
+        crate::chrome::status_bar(ui, self);
+        let total_w = ui.available_width();
+        crate::genome_panel::show(ui, self, total_w);
+        crate::side_panel::show(ui, self, total_w);
+        let p = crate::theme::palette(ui);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::central_panel(ui.style())
+                    .inner_margin(egui::Margin::same(6))
+                    .fill(p.panel),
+            )
+            .show(ui, |ui| {
+                crate::map_panel::show(ui, self);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| crate::tree_panel::show(ui, self));
+            });
+        let ctx = ui.ctx().clone();
+        crate::settings_panel::show(&ctx, self);
     }
 }
 

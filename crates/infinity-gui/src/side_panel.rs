@@ -1,301 +1,150 @@
-//! The right-hand panel: every parameter of section 6.1, the live counters of
-//! section 7, the warnings, and the export folder.
+//! The right-hand "Run" panel: the live counters of section 7, the run's result,
+//! the warnings, and the exports.
 //!
-//! Only the cluster distance acts while a run is going, and that slider lives in
-//! the toolbar where it cannot be missed. Everything here applies at the next
-//! run, which is stated on the panel rather than left for the user to discover.
+//! The parameters that used to live here are in the Settings window now (see
+//! `settings_panel`), so this panel is about the run in front of the user, not
+//! about the next one. It can be closed from the toolbar (or dragged shut) and
+//! its contents scroll rather than overflow, so at the smallest window size it
+//! costs the tree nothing but its own width.
 
 use eframe::egui;
 use egui::RichText;
 
 use crate::app::InfinityApp;
-use crate::fmt;
+use crate::chrome::ExportAction;
+use crate::export::Item;
 use crate::state::Note;
+use crate::{fmt, theme};
 
-pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    egui::Panel::right("parameters")
-        .default_size(292.0)
-        .min_size(236.0)
+pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
+    let max_w = (total_w * 0.30).max(220.0);
+    let mut open = app.show_side;
+    egui::Panel::right("run-panel")
+        .default_size(250.0)
+        .size_range(210.0..=max_w)
         .resizable(true)
-        .show(ui, |ui| {
+        .show_collapsible(ui, &mut open, |ui| {
+            theme::panel_header(ui, "Run", |ui| {
+                let p = theme::palette(ui);
+                let state = if app.running() {
+                    "running"
+                } else if app.model.finished {
+                    "finished"
+                } else if app.model.genome_count() > 0 {
+                    "stopped"
+                } else {
+                    "idle"
+                };
+                ui.label(RichText::new(state).small().color(p.text_weak));
+            });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    parameters(ui, app);
-                    ui.separator();
                     counters(ui, app);
-                    ui.separator();
                     summary(ui, app);
-                    ui.separator();
                     notes(ui, app);
-                    ui.separator();
                     export_area(ui, app);
                 });
         });
-}
-
-fn parameters(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    ui.label(RichText::new("PARAMETERS").strong());
-    ui.weak("applied at the next run, except the cluster distance");
-    let mut changed = false;
-
-    ui.horizontal(|ui| {
-        ui.label("k");
-        changed |= ui
-            .add(egui::DragValue::new(&mut app.prefs.params.k).range(1..=31))
-            .changed();
-        ui.weak("odd, ≤ 31");
-    });
-
-    ui.label("densities (levels 1/2/3)");
-    ui.horizontal(|ui| {
-        for (i, d) in app.prefs.params.densities.iter_mut().enumerate() {
-            changed |= ui
-                .add(egui::DragValue::new(d).range(1..=1_000_000).speed(16))
-                .on_hover_text(format!(
-                    "one anchor per this many k-mers at level {}",
-                    i + 1
-                ))
-                .changed();
-        }
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("sketch level");
-        changed |= ui
-            .add(egui::DragValue::new(&mut app.prefs.params.sketch_level).range(1..=3))
-            .changed();
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("cluster dist");
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut app.prefs.params.cluster_dist)
-                    .range(0.000_01..=0.99)
-                    .speed(0.0001)
-                    .fixed_decimals(5),
-            )
-            .changed();
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("max span ratio");
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut app.prefs.params.max_span_ratio)
-                    .range(1.0..=1000.0)
-                    .speed(0.1),
-            )
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("max span extra");
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut app.prefs.params.max_span_extra)
-                    .range(0..=10_000_000)
-                    .speed(1000),
-            )
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("dp max len");
-        changed |= ui
-            .add(egui::DragValue::new(&mut app.prefs.params.dp_max_len).range(1..=1_000_000))
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("min identity");
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut app.prefs.params.min_identity)
-                    .range(0.01..=1.0)
-                    .speed(0.01)
-                    .fixed_decimals(2),
-            )
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("xdrop");
-        changed |= ui
-            .add(egui::DragValue::new(&mut app.prefs.params.xdrop).range(1..=1000))
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("threads");
-        changed |= ui
-            .add(egui::DragValue::new(&mut app.prefs.params.threads).range(0..=512))
-            .changed();
-        if app.prefs.params.threads == 0 {
-            ui.weak("all cores");
-        }
-    });
-
-    ui.add_space(4.0);
-    ui.label(RichText::new("Experiment switches").underline());
-    for (flag, label, hint) in [
-        (
-            &mut app.prefs.params.block_skip,
-            "block skip",
-            "hash blocks and skip the identical ones (6.6 A)",
-        ),
-        (
-            &mut app.prefs.params.hierarchical,
-            "hierarchical",
-            "use the nested levels top-down instead of leaf blocks only (6.10)",
-        ),
-        (
-            &mut app.prefs.params.piece_cache,
-            "piece cache",
-            "resolve an identical difference piece once (6.10)",
-        ),
-        (
-            &mut app.prefs.params.profile_grouping,
-            "profile grouping",
-            "handle members with identical profiles once (6.9)",
-        ),
-        (
-            &mut app.prefs.params.single_cluster,
-            "single cluster",
-            "compare everything to one pivot instead of clustering first",
-        ),
-    ] {
-        changed |= ui.checkbox(flag, label).on_hover_text(hint).changed();
-    }
-    ui.horizontal(|ui| {
-        ui.label("memory budget");
-        let mut mib = (app.prefs.params.memory_budget_bytes / (1 << 20)) as i64;
-        if ui
-            .add(
-                egui::DragValue::new(&mut mib)
-                    .range(0..=1_000_000)
-                    .suffix(" MiB"),
-            )
-            .changed()
-        {
-            app.prefs.params.memory_budget_bytes = (mib.max(0) as u64) << 20;
-            changed = true;
-        }
-        ui.weak(if app.prefs.params.memory_budget_bytes == 0 {
-            "a quarter of RAM"
-        } else {
-            ""
-        });
-    });
-
-    if changed {
-        app.validate_params();
-        app.save_prefs();
-    }
-    if let Some(e) = &app.params_error {
-        ui.colored_label(ui.visuals().error_fg_color, e);
-    }
+    app.show_side = open;
 }
 
 fn counters(ui: &mut egui::Ui, app: &InfinityApp) {
-    ui.label(RichText::new("LIVE COUNTERS").strong());
+    theme::section(ui, "Live counters");
     let c = &app.model.counters;
     // "blocks identical 99.7 %" is the number the whole idea is judged on, so it
     // goes first and gets a bar.
     let identity = c.block_identity();
-    ui.horizontal(|ui| {
-        ui.label("blocks identical");
-        ui.strong(fmt::pct(identity));
-    });
+    theme::stat_row(ui, "blocks identical", &fmt::pct(identity));
     if let Some(f) = identity {
-        ui.add(egui::ProgressBar::new(f as f32).show_percentage());
+        ui.add(egui::ProgressBar::new(f as f32).desired_height(6.0));
     }
-    row(ui, "blocks looked up", fmt::count(c.blocks_looked_up));
-    row(
+    theme::stat_row(ui, "blocks looked up", &fmt::count(c.blocks_looked_up));
+    theme::stat_row(
         ui,
         "matched L1/L2/L3",
-        format!(
+        &format!(
             "{} / {} / {}",
             fmt::count(c.blocks_matched[0]),
             fmt::count(c.blocks_matched[1]),
             fmt::count(c.blocks_matched[2])
         ),
     );
-    row(ui, "pieces compared", fmt::count(c.pieces_compared));
-    row(ui, "cache hits", fmt::count(c.cache_hits));
-    row(ui, "alignments run", fmt::count(c.alignments_run));
-    row(ui, "bases aligned", fmt::count(c.bases_aligned));
-    row(ui, "k-mers scanned", fmt::count(c.kmers_scanned));
-    row(ui, "genomes scanned", fmt::count(c.genomes_scanned));
-    row(ui, "end extensions", fmt::count(c.end_extensions));
-    row(
+    theme::stat_row(ui, "pieces compared", &fmt::count(c.pieces_compared));
+    theme::stat_row(ui, "cache hits", &fmt::count(c.cache_hits));
+    theme::stat_row(ui, "alignments run", &fmt::count(c.alignments_run));
+    theme::stat_row(ui, "bases aligned", &fmt::count(c.bases_aligned));
+    theme::stat_row(ui, "k-mers scanned", &fmt::count(c.kmers_scanned));
+    theme::stat_row(ui, "genomes scanned", &fmt::count(c.genomes_scanned));
+    theme::stat_row(ui, "end extensions", &fmt::count(c.end_extensions));
+    theme::stat_row(
         ui,
         "stray points dropped",
-        fmt::count(c.stray_points_dropped),
+        &fmt::count(c.stray_points_dropped),
     );
-    row(ui, "breakpoints", fmt::count(c.breakpoints));
-}
-
-fn row(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).weak());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(value);
-        });
-    });
+    theme::stat_row(ui, "breakpoints", &fmt::count(c.breakpoints));
 }
 
 fn summary(ui: &mut egui::Ui, app: &InfinityApp) {
     let Some(s) = &app.model.summary else {
         return;
     };
-    ui.label(RichText::new(if s.cancelled { "STOPPED" } else { "FINISHED" }).strong());
-    row(ui, "genomes", fmt::count(u64::from(s.genomes)));
-    row(ui, "clusters", fmt::count(u64::from(s.clusters)));
-    row(
+    theme::section(ui, if s.cancelled { "Stopped" } else { "Result" });
+    theme::stat_row(ui, "genomes", &fmt::count(u64::from(s.genomes)));
+    theme::stat_row(ui, "clusters", &fmt::count(u64::from(s.clusters)));
+    theme::stat_row(
         ui,
         "focus 0/1/2",
-        format!(
+        &format!(
             "{}/{}/{}",
             s.focus_counts[0], s.focus_counts[1], s.focus_counts[2]
         ),
     );
-    row(
+    theme::stat_row(
         ui,
         "first tree",
-        s.timings
+        &s.timings
             .first_tree_ms
             .map(fmt::secs)
             .unwrap_or_else(|| "not reached".to_string()),
     );
-    row(
+    theme::stat_row(
         ui,
         "exact tree",
-        s.timings
+        &s.timings
             .exact_tree_ms
             .map(fmt::secs)
             .unwrap_or_else(|| "not reached".to_string()),
     );
     if let Some(t) = s.timings.total_ms {
-        row(ui, "total", fmt::secs(t));
+        theme::stat_row(ui, "total", &fmt::secs(t));
     }
     match s.peak_memory_bytes {
         // An unknown peak is reported as unknown, never as zero.
-        Some(b) => row(ui, "peak RSS", fmt::bytes(b)),
-        None => row(ui, "peak RSS", "unknown".to_string()),
+        Some(b) => theme::stat_row(ui, "peak RSS", &fmt::bytes(b)),
+        None => theme::stat_row(ui, "peak RSS", "unknown"),
     }
     for n in &s.notes {
-        ui.weak(n);
+        theme::hint(ui, n);
     }
 }
 
 fn notes(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let count = app.model.notes.len();
-    let header = RichText::new(format!("WARNINGS AND NOTES ({count})")).strong();
-    ui.checkbox(&mut app.show_notes, header);
-    if !app.show_notes || count == 0 {
+    theme::section(ui, &format!("Warnings and notes ({count})"));
+    if count == 0 {
+        theme::hint(ui, "none");
+        return;
+    }
+    ui.checkbox(&mut app.show_notes, "show");
+    if !app.show_notes {
         return;
     }
     let notes: Vec<Note> = app.model.notes.clone();
     egui::ScrollArea::vertical()
+        .id_salt("notes-scroll")
         .max_height(160.0)
-        .auto_shrink([false, false])
+        .auto_shrink([false, true])
         .stick_to_bottom(true)
         .show(ui, |ui| {
             for n in notes.iter().rev() {
@@ -304,50 +153,58 @@ fn notes(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 } else {
                     ui.visuals().weak_text_color()
                 };
-                ui.colored_label(colour, format!("[{:7.2}s] {}", n.t_ms / 1000.0, n.text));
+                ui.label(
+                    RichText::new(format!("[{:7.2}s] {}", n.t_ms / 1000.0, n.text))
+                        .small()
+                        .color(colour),
+                );
             }
         });
 }
 
 fn export_area(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    ui.label(RichText::new("EXPORT").strong());
+    theme::section(ui, "Export");
     ui.add(
         egui::TextEdit::singleline(&mut app.export_text)
             .desired_width(f32::INFINITY)
             .hint_text("folder to write into"),
     );
     let has_data = app.model.genome_count() > 0;
+    let mut action: Option<ExportAction> = None;
     ui.add_enabled_ui(has_data, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for item in crate::export::Item::files() {
-                if ui.button(short_label(item)).clicked() {
-                    app.export_files(Some(item));
+        for (group, items) in Item::groups() {
+            ui.label(
+                RichText::new(*group)
+                    .small()
+                    .color(theme::palette(ui).text_weak),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for item in items.iter() {
+                    if ui
+                        .small_button(item.short_label())
+                        .on_hover_text(item.label())
+                        .clicked()
+                    {
+                        action = Some(ExportAction::Item(*item));
+                    }
                 }
-            }
-            if ui.button("PNG").clicked() {
-                app.export_png(ui.ctx());
-            }
-            if ui.button("all").clicked() {
-                app.export_files(None);
-            }
-        });
+            });
+        }
+        ui.add_space(2.0);
+        let p = theme::palette(ui);
+        if ui
+            .add(theme::primary_button("Export everything", &p))
+            .on_hover_text("every file above, into the export folder")
+            .clicked()
+        {
+            action = Some(ExportAction::All);
+        }
     });
     if !has_data {
-        ui.weak("nothing to export yet");
+        theme::hint(ui, "nothing to export yet");
     }
-    if let Some(cid) = app.selected_cluster {
-        ui.weak(format!("cluster {cid} is the one the map shows"));
-    }
-}
-
-/// A button-sized name for an export item.
-fn short_label(item: crate::export::Item) -> &'static str {
-    match item {
-        crate::export::Item::Tree => "tree.nwk",
-        crate::export::Item::Clusters => "clusters",
-        crate::export::Item::Genomes => "genomes",
-        crate::export::Item::Distances => "distances",
-        crate::export::Item::Variants => "variants",
-        crate::export::Item::Png => "PNG",
+    if let Some(a) = action {
+        let ctx = ui.ctx().clone();
+        app.run_export(a, &ctx);
     }
 }

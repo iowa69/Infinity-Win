@@ -29,7 +29,7 @@ use infinity_core::variant::VariantKind;
 use crate::app::InfinityApp;
 use crate::map::{self, Axis};
 use crate::state::UiModel;
-use crate::{colors, fmt};
+use crate::{colors, fmt, theme};
 
 /// The largest cluster for which the panel will draw every member when nothing
 /// is selected: more rows than this cannot be read in a panel a few centimetres
@@ -103,13 +103,25 @@ struct Row<'a> {
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    // Never more than about 60 % of the height, so the tree always keeps the
+    // larger share of the middle of the window.
+    let max_h = (ui.available_height() * 0.6).max(90.0);
     egui::Panel::bottom("map")
         .resizable(true)
-        .default_size(196.0)
-        .min_size(74.0)
+        .default_size(170.0)
+        .size_range(74.0..=max_h)
+        .frame(
+            egui::Frame::NONE
+                .inner_margin(egui::Margin {
+                    left: 0,
+                    right: 0,
+                    top: 6,
+                    bottom: 0,
+                })
+                .fill(theme::palette(ui).panel),
+        )
         .show(ui, |ui| {
             header(ui, app);
-            ui.separator();
             body(ui, app);
         });
 }
@@ -119,16 +131,16 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mut zoom_by: Option<f64> = None;
     let title = match app.selected_cluster.and_then(|c| app.model.cluster(c)) {
         Some(c) => format!(
-            "MAP  (cluster {}, pivot {}, {}{})",
+            "cluster {} · pivot {} · {}{}",
             c.id,
             c.pivot_name,
             fmt::focus_word(c.focus),
             if c.approximate { " ≈" } else { "" }
         ),
-        None => "MAP  (no cluster selected)".to_string(),
+        None => "no cluster selected".to_string(),
     };
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).strong());
+    theme::panel_header(ui, "Map", |ui| {
+        ui.label(egui::RichText::new(title).color(theme::palette(ui).text));
         ui.separator();
         if ui.button("−").clicked() {
             zoom_by = Some(1.0 / 1.4);
@@ -183,13 +195,19 @@ fn no_data_hint(model: &UiModel, cluster: Option<u32>) -> String {
 }
 
 fn body(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    let size = ui.available_size_before_wrap();
-    let (rect, resp) =
-        ui.allocate_exact_size(size.max(Vec2::new(80.0, 40.0)), Sense::click_and_drag());
+    let rect = crate::tree_panel::remaining_rect(ui);
+    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     let dark = ui.visuals().dark_mode;
     let weak = ui.visuals().weak_text_color();
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 0, ui.visuals().panel_fill);
+    let pal = theme::palette(ui);
+    painter.rect_filled(rect, 6, pal.canvas);
+    painter.rect_stroke(
+        rect,
+        6,
+        Stroke::new(1.0, pal.border),
+        egui::StrokeKind::Inside,
+    );
 
     let cluster = app.selected_cluster.unwrap_or(u32::MAX);
     let plan = map::plan_rows(&app.model, app.selected_cluster, &app.selection, ROW_CAP);

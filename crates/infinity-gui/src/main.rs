@@ -17,13 +17,18 @@
 //! | [`fmt`] | number formatting and the 0-based to 1-based conversion |
 //! | [`colors`] | the visual vocabulary of focus levels, clusters and variants |
 //! | [`prefs`] | remembered folders and parameters, as JSON in the config dir |
-//! | [`export`] | the files of section 9, written from the UI model |
+//! | [`export`] | the files of section 9, written from the UI model or copied from the run |
+//! | [`annotate`] | the annotated tree for FigTree (NEXUS) and iTOL datasets |
+//! | [`svg`] | the tree view as a vector picture |
 //! | [`run`] | starting the engine and waking the interface from its threads |
 //! | [`open`] | reading a finished output folder back through the same fold |
+//! | [`settings`] | the Resolution and SNP-rule settings, mirrored for the engine |
+//! | [`theme`] | palette, spacing, typography and the shared building blocks |
 //!
 //! The remaining modules are renderers over that model: [`chrome`] (toolbar and
-//! status bar), [`genome_panel`], [`tree_panel`], [`map_panel`] and
-//! [`side_panel`]. [`app`] holds them together and owns the repaint policy.
+//! status bar), [`genome_panel`], [`tree_panel`], [`map_panel`],
+//! [`side_panel`] (the Run panel) and [`settings_panel`] (the Settings window).
+//! [`app`] holds them together and owns the repaint policy.
 //!
 //! # Responsiveness
 //!
@@ -48,6 +53,7 @@
 
 use eframe::egui;
 
+mod annotate;
 mod app;
 mod chrome;
 mod colors;
@@ -61,8 +67,12 @@ mod open;
 mod pairwise;
 mod prefs;
 mod run;
+mod settings;
+mod settings_panel;
 mod side_panel;
 mod state;
+mod svg;
+mod theme;
 mod tree_panel;
 
 fn main() -> eframe::Result {
