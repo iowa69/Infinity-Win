@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use mtato_core::engine::RunResults;
 use mtato_core::tree::{graft, to_newick, Tree};
 
+use crate::fmt;
 use crate::pairwise::{self, MemberProfile};
 use crate::state::UiModel;
-use crate::fmt;
 
 /// Above this many members per cluster, pairwise distances are taken from the
 /// engine's matrix only. Deriving them here is quadratic in the members, and an
@@ -195,9 +195,7 @@ fn cluster_ids(model: &UiModel) -> Vec<u32> {
 }
 
 fn derived_needed(model: &UiModel, results: Option<&RunResults>, cluster: u32) -> bool {
-    results
-        .and_then(|r| r.matrices.get(&cluster))
-        .is_none()
+    results.and_then(|r| r.matrices.get(&cluster)).is_none()
         && !model.mapped_members(cluster).is_empty()
 }
 
@@ -206,11 +204,13 @@ fn write_file<F>(path: &Path, body: F) -> Result<usize, String>
 where
     F: FnOnce(&mut RowCount) -> io::Result<()>,
 {
-    let file = std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
+    let file =
+        std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
     let mut w = BufWriter::new(file);
     let mut rc = RowCount::new(&mut w);
     body(&mut rc).map_err(|e| format!("writing {}: {e}", path.display()))?;
-    rc.finish().map_err(|e| format!("writing {}: {e}", path.display()))
+    rc.finish()
+        .map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// A writer that counts the data rows it produced, so an empty export can be
@@ -301,7 +301,8 @@ pub fn genomes_tsv(w: &mut RowCount<'_>, model: &UiModel) -> io::Result<()> {
     for g in &model.genomes {
         let n = g.numbers.as_ref();
         let num = |f: fn(&mtato_core::events::MemberNumbers) -> u64| -> String {
-            n.map(|x| f(x).to_string()).unwrap_or_else(|| "NA".to_string())
+            n.map(|x| f(x).to_string())
+                .unwrap_or_else(|| "NA".to_string())
         };
         w.line(format_args!(
             "{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -311,7 +312,9 @@ pub fn genomes_tsv(w: &mut RowCount<'_>, model: &UiModel) -> io::Result<()> {
             g.contigs,
             g.n50,
             g.gc,
-            g.cluster.map(|c| c.to_string()).unwrap_or_else(|| "NA".into()),
+            g.cluster
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "NA".into()),
             g.is_pivot,
             g.focus,
             num(|m| m.diff_pieces),
@@ -453,7 +456,13 @@ fn name_of(model: &UiModel, results: Option<&RunResults>, id: u32) -> String {
 /// A cell that cannot break the tab-separated layout.
 pub fn cell(s: &str) -> String {
     s.chars()
-        .map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c == '\t' || c == '\n' || c == '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -502,14 +511,16 @@ pub fn write_png(
         rgba.extend_from_slice(&[r, g, b, a]);
     }
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "the captured size does not match the pixels")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the captured size does not match the pixels",
+        )
     })?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    buf.save(path).map_err(|e| {
-        io::Error::other(format!("writing {}: {e}", path.display()))
-    })
+    buf.save(path)
+        .map_err(|e| io::Error::other(format!("writing {}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -566,7 +577,17 @@ mod tests {
                 focus: 2,
                 approximate: false,
                 newick: "(g0:1,g1:2);".into(),
-                members: vec![],
+                members: (0..members)
+                    .map(|i| mtato_core::events::MemberNumbers {
+                        id: i,
+                        name: format!("g{i}"),
+                        diff_pieces: u64::from(i),
+                        snps: u64::from(i) * 2,
+                        indels: 0,
+                        uncovered_bp: 50,
+                        novel_bp: 0,
+                    })
+                    .collect(),
             }),
         );
         for i in 1..members {
@@ -625,9 +646,29 @@ mod tests {
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines.len(), 4, "header plus three genomes");
         assert!(lines[0].starts_with("id\tname\tlength\tcontigs\tn50\tgc\tcluster"));
-        assert!(lines[1].starts_with("0\tg0\t1000\t1\t1000\t0.500000\t0\ttrue\t2"));
-        // A member has variant counts, the pivot does not.
-        assert!(lines[2].contains("\t1\t0\t"), "{}", lines[2]);
+        // The pivot: exact, no differences against itself.
+        assert_eq!(
+            lines[1],
+            "0\tg0\t1000\t1\t1000\t0.500000\t0\ttrue\t2\t0\t0\t0\t50\t0"
+        );
+        // A member: its numbers came with the ClusterFocus event.
+        assert_eq!(
+            lines[2],
+            "1\tg1\t1000\t1\t1000\t0.500000\t0\tfalse\t2\t1\t2\t0\t50\t0"
+        );
+    }
+
+    #[test]
+    fn a_genome_the_engine_never_reported_numbers_for_stays_na() {
+        let mut m = model_with_maps(2);
+        m.genomes[1].numbers = None;
+        let s = render(|w| genomes_tsv(w, &m));
+        let lines: Vec<&str> = s.lines().collect();
+        assert!(
+            lines[2].ends_with("\tNA\tNA\tNA\tNA\tNA"),
+            "an unknown number must not be written as zero: {}",
+            lines[2]
+        );
     }
 
     #[test]
@@ -727,7 +768,8 @@ mod tests {
 
     #[test]
     fn exporting_nothing_reports_nothing_rather_than_an_empty_folder() {
-        let dir = std::env::temp_dir().join(format!("mtato-gui-export-empty-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mtato-gui-export-empty-{}", std::process::id()));
         let m = UiModel::default();
         let report = write_all(&dir, &m, None);
         assert!(!report.ok());

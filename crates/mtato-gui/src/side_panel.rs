@@ -52,7 +52,10 @@ fn parameters(ui: &mut egui::Ui, app: &mut MtatoApp) {
         for (i, d) in app.prefs.params.densities.iter_mut().enumerate() {
             changed |= ui
                 .add(egui::DragValue::new(d).range(1..=1_000_000).speed(16))
-                .on_hover_text(format!("one anchor per this many k-mers at level {}", i + 1))
+                .on_hover_text(format!(
+                    "one anchor per this many k-mers at level {}",
+                    i + 1
+                ))
                 .changed();
         }
     });
@@ -164,7 +167,11 @@ fn parameters(ui: &mut egui::Ui, app: &mut MtatoApp) {
         ui.label("memory budget");
         let mut mib = (app.prefs.params.memory_budget_bytes / (1 << 20)) as i64;
         if ui
-            .add(egui::DragValue::new(&mut mib).range(0..=1_000_000).suffix(" MiB"))
+            .add(
+                egui::DragValue::new(&mut mib)
+                    .range(0..=1_000_000)
+                    .suffix(" MiB"),
+            )
             .changed()
         {
             app.prefs.params.memory_budget_bytes = (mib.max(0) as u64) << 20;
@@ -217,7 +224,11 @@ fn counters(ui: &mut egui::Ui, app: &MtatoApp) {
     row(ui, "k-mers scanned", fmt::count(c.kmers_scanned));
     row(ui, "genomes scanned", fmt::count(c.genomes_scanned));
     row(ui, "end extensions", fmt::count(c.end_extensions));
-    row(ui, "stray points dropped", fmt::count(c.stray_points_dropped));
+    row(
+        ui,
+        "stray points dropped",
+        fmt::count(c.stray_points_dropped),
+    );
     row(ui, "breakpoints", fmt::count(c.breakpoints));
 }
 
@@ -234,18 +245,16 @@ fn summary(ui: &mut egui::Ui, app: &MtatoApp) {
     let Some(s) = &app.model.summary else {
         return;
     };
-    ui.label(RichText::new(if s.cancelled {
-        "STOPPED"
-    } else {
-        "FINISHED"
-    })
-    .strong());
+    ui.label(RichText::new(if s.cancelled { "STOPPED" } else { "FINISHED" }).strong());
     row(ui, "genomes", fmt::count(u64::from(s.genomes)));
     row(ui, "clusters", fmt::count(u64::from(s.clusters)));
     row(
         ui,
         "focus 0/1/2",
-        format!("{}/{}/{}", s.focus_counts[0], s.focus_counts[1], s.focus_counts[2]),
+        format!(
+            "{}/{}/{}",
+            s.focus_counts[0], s.focus_counts[1], s.focus_counts[2]
+        ),
     );
     row(
         ui,

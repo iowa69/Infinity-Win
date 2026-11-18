@@ -64,8 +64,11 @@ impl OpenHandle {
         &self.dir
     }
 
+    /// True once the reader has finished, without consuming the result.
     pub fn is_done(&self) -> bool {
-        self.done().is_some()
+        let model_ready = self.model.lock().map(|g| g.is_some()).unwrap_or(false);
+        let error_ready = self.error.lock().map(|g| g.is_some()).unwrap_or(false);
+        model_ready || error_ready
     }
 
     /// `Some(Ok(model))` or `Some(Err(message))` once the reader has finished,
@@ -204,7 +207,11 @@ mod tests {
             }));
         }
         sink.warn("a recorded warning");
-        sink.progress(mtato_core::events::stage::SCAN, genomes as u64, genomes as u64);
+        sink.progress(
+            mtato_core::events::stage::SCAN,
+            genomes as u64,
+            genomes as u64,
+        );
         sink.flush_log();
     }
 
@@ -264,7 +271,11 @@ mod tests {
         let dir = tmp_dir("run-json");
         write_recording(&dir, 1);
         let s = RunSummary::new("test", mtato_core::params::Parameters::default());
-        std::fs::write(dir.join(RUN_JSON), serde_json::to_string_pretty(&s).unwrap()).unwrap();
+        std::fs::write(
+            dir.join(RUN_JSON),
+            serde_json::to_string_pretty(&s).unwrap(),
+        )
+        .unwrap();
         let counter = AtomicU64::new(0);
         let model = read_folder(&dir, &counter, &Context::default()).unwrap();
         assert!(model.summary.is_some());

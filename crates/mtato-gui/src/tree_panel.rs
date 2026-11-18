@@ -157,10 +157,19 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
         if ui.button("+").on_hover_text("zoom in").clicked() {
             zoom_by = Some(1.25);
         }
-        if ui.button("Fit").on_hover_text("fit the whole tree").clicked() {
+        if ui
+            .button("Fit")
+            .on_hover_text("fit the whole tree")
+            .clicked()
+        {
             fit_now = true;
         }
         ui.checkbox(&mut app.tree.show_legend, "legend");
+        // Branch-length units differ per focus level (6.4, 6.9), so the panel
+        // says which one it is drawing rather than leaving it to be guessed.
+        if let Some(c) = app.selected_cluster.and_then(|c| app.model.cluster(c)) {
+            ui.weak(format!("branch lengths in {}", fmt::marked_unit(c.focus)));
+        }
 
         ui.separator();
         pair_readout(ui, app);
@@ -183,18 +192,25 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
 fn pair_readout(ui: &mut egui::Ui, app: &MtatoApp) {
     match app.pair_view() {
         Some(p) => {
-            let na = app.model.genome(p.a).map(|g| g.name.as_str()).unwrap_or("?");
-            let nb = app.model.genome(p.b).map(|g| g.name.as_str()).unwrap_or("?");
-            let nums = if p.available() {
-                format!(
-                    "{}SNPs {} | indels {}",
-                    fmt::approx_mark(p.approximate),
-                    fmt::count(p.snps),
+            let na = app
+                .model
+                .genome(p.a)
+                .map(|g| g.name.as_str())
+                .unwrap_or("?");
+            let nb = app
+                .model
+                .genome(p.b)
+                .map(|g| g.name.as_str())
+                .unwrap_or("?");
+            let nums = format!(
+                "{} SNPs | indels {}",
+                p.snps_text(),
+                if p.available() {
                     fmt::count(p.indels)
-                )
-            } else {
-                "not measured yet".to_string()
-            };
+                } else {
+                    "n/a".to_string()
+                }
+            );
             ui.label(
                 egui::RichText::new(format!(
                     "{na} × {nb}:  {nums} | d = {} | {}",
@@ -227,7 +243,7 @@ fn centre_on(app: &mut MtatoApp, genome: u32) {
     let coords = app
         .tree_layout
         .as_ref()
-        .and_then(|l| l.by_name.get(&name).map(|&i| (l.nodes[i].x, l.nodes[i].y)));
+        .and_then(|l| l.find(&name).map(|i| (l.nodes[i].x, l.nodes[i].y)));
     match coords {
         Some(c) => app.tree.centre = Some(c),
         None => {
@@ -450,8 +466,7 @@ fn fit_view(app: &mut MtatoApp, rect: Rect, rows: f64, x_max: f64) {
     let h = (rect.height() - 2.0 * MARGIN).max(10.0);
     let w = ((rect.width() - 2.0 * MARGIN) * (1.0 - LABEL_FRACTION)).max(10.0);
     app.tree.px_per_row = (h / rows.max(1.0) as f32).clamp(MIN_PX_PER_ROW, MAX_PX_PER_ROW);
-    app.tree.px_per_unit =
-        (w / x_max.max(1e-6) as f32).clamp(MIN_PX_PER_UNIT, MAX_PX_PER_UNIT);
+    app.tree.px_per_unit = (w / x_max.max(1e-6) as f32).clamp(MIN_PX_PER_UNIT, MAX_PX_PER_UNIT);
     app.tree.offset = Vec2::ZERO;
 }
 
@@ -564,7 +579,8 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                         Pos2::new(d.rect.left(), y - d.view.px_per_row * 0.5),
                         Vec2::new(d.rect.width(), d.view.px_per_row),
                     );
-                    d.painter.rect_filled(r, 0, colors::wash(colors::SELECTED, 46));
+                    d.painter
+                        .rect_filled(r, 0, colors::wash(colors::SELECTED, 46));
                 }
                 d.painter.circle_filled(s, 2.0, colour);
                 if Some(*id) == d.search_hit {
@@ -591,15 +607,15 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                 ));
             }
             NodeKind::ClusterCollapsed { id, members, .. } => {
-                let half = (layout::collapsed_half_rows(*members) * f64::from(d.view.px_per_row))
-                    as f32;
-                let base_x = s.x + layout::COLLAPSED_SPREAD as f32 * d.view.px_per_unit;
-                let colour = colors::cluster_color(*id, d.dark);
+                // The triangle geometry lives in `layout`, where it is tested.
+                let pts = layout::triangle(p.0, p.1, layout::collapsed_half_rows(*members));
                 let tri = [
-                    s,
-                    Pos2::new(base_x, y - half),
-                    Pos2::new(base_x, y + half),
+                    d.view.screen(pts[0]),
+                    d.view.screen(pts[1]),
+                    d.view.screen(pts[2]),
                 ];
+                let base_x = tri[1].x;
+                let colour = colors::cluster_color(*id, d.dark);
                 d.painter.add(egui::Shape::convex_polygon(
                     tri.to_vec(),
                     colors::wash(colour, 110),
@@ -656,7 +672,8 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                 }
             }
             NodeKind::Internal | NodeKind::Root => {
-                if show_approx && n.approximate && n.focus == fmt::FOCUS_BLOCKS && n.leaf_count > 1 {
+                if show_approx && n.approximate && n.focus == fmt::FOCUS_BLOCKS && n.leaf_count > 1
+                {
                     d.painter.text(
                         Pos2::new(s.x + 3.0, y - d.view.px_per_row * 0.45),
                         Align2::LEFT_BOTTOM,
@@ -682,7 +699,7 @@ fn draw_scale_bar(d: &Draw<'_>, l: &TreeLayout, pointer: Option<Pos2>) {
         return;
     };
     let px = bar.layout_width as f32 * d.view.px_per_unit;
-    if !(px > 4.0) {
+    if !px.is_finite() || px <= 4.0 {
         return;
     }
     let x0 = d.rect.left() + MARGIN;
@@ -705,17 +722,8 @@ fn draw_scale_bar(d: &Draw<'_>, l: &TreeLayout, pointer: Option<Pos2>) {
     );
 }
 
-fn draw_legend(
-    painter: &egui::Painter,
-    rect: Rect,
-    dark: bool,
-    bg: Color32,
-    border: Stroke,
-) {
-    let box_rect = Rect::from_min_size(
-        rect.left_top() + Vec2::splat(6.0),
-        Vec2::new(232.0, 62.0),
-    );
+fn draw_legend(painter: &egui::Painter, rect: Rect, dark: bool, bg: Color32, border: Stroke) {
+    let box_rect = Rect::from_min_size(rect.left_top() + Vec2::splat(6.0), Vec2::new(232.0, 62.0));
     painter.rect_filled(
         box_rect,
         4,
@@ -857,8 +865,10 @@ mod tests {
     #[test]
     fn a_view_round_trips_through_the_pan_offset() {
         let rect = Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(400.0, 300.0));
-        let mut tree = crate::app::TreeView::default();
-        tree.offset = Vec2::new(13.0, -7.0);
+        let tree = crate::app::TreeView {
+            offset: Vec2::new(13.0, -7.0),
+            ..Default::default()
+        };
         let v = View {
             origin: rect.min + Vec2::splat(MARGIN) + tree.offset,
             px_per_row: tree.px_per_row,

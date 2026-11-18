@@ -140,12 +140,7 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
             fit_now = true;
         }
         ui.separator();
-        let plan = map::plan_rows(
-            &app.model,
-            app.selected_cluster,
-            &app.selection,
-            ROW_CAP,
-        );
+        let plan = map::plan_rows(&app.model, app.selected_cluster, &app.selection, ROW_CAP);
         match plan.reason {
             map::RowReason::Selection => {
                 ui.weak(format!("{} selected member(s)", plan.genomes.len()));
@@ -222,9 +217,13 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
         app.map_view.span = total;
     }
     app.map_view.needs_fit = false;
-    if !(app.map_view.span > 0.0) || app.map_view.span > total {
+    let span = app.map_view.span;
+    if !span.is_finite() || span <= 0.0 || span > total {
         app.map_view.span = total;
-        app.map_view.start = app.map_view.start.clamp(0.0, (total - app.map_view.span).max(0.0));
+        app.map_view.start = app
+            .map_view
+            .start
+            .clamp(0.0, (total - app.map_view.span).max(0.0));
     }
     if let Some(f) = app.map_view.zoom_request.take() {
         let centre = app.map_view.start + app.map_view.span / 2.0;
@@ -232,7 +231,8 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
         app.map_view.user_moved = true;
     }
     if resp.dragged() {
-        let d = f64::from(resp.drag_delta().x) / f64::from(rect.width().max(1.0)) * app.map_view.span;
+        let d =
+            f64::from(resp.drag_delta().x) / f64::from(rect.width().max(1.0)) * app.map_view.span;
         app.map_view.start =
             (app.map_view.start - d).clamp(0.0, (total - app.map_view.span).max(0.0));
         app.map_view.user_moved = true;
@@ -288,10 +288,8 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
             if top > rect.bottom() {
                 break;
             }
-            let band = Rect::from_min_size(
-                Pos2::new(rect.left(), top),
-                Vec2::new(rect.width(), ROW_H),
-            );
+            let band =
+                Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), ROW_H));
             draw_row(&painter, row, &view, band, plot, dark, weak);
             if let Some(p) = pointer {
                 if band.contains(p) {
@@ -379,7 +377,10 @@ fn draw_ruler(
         if x < plot.left() || x > plot.right() {
             continue;
         }
-        painter.line_segment([Pos2::new(x, y), Pos2::new(x, y + 3.0)], Stroke::new(1.0, weak));
+        painter.line_segment(
+            [Pos2::new(x, y), Pos2::new(x, y + 3.0)],
+            Stroke::new(1.0, weak),
+        );
         painter.text(
             Pos2::new(x, y - 5.0),
             Align2::CENTER_BOTTOM,
@@ -427,7 +428,10 @@ fn draw_row(
         colour,
     );
     painter.line_segment(
-        [Pos2::new(plot.left(), band.top()), Pos2::new(plot.right(), band.top())],
+        [
+            Pos2::new(plot.left(), band.top()),
+            Pos2::new(plot.right(), band.top()),
+        ],
         Stroke::new(0.5, colors::wash(weak, 40)),
     );
 
@@ -480,7 +484,10 @@ fn draw_row(
         };
         if r.width() < 1.0 {
             painter.line_segment(
-                [Pos2::new(r.center().x, r.top()), Pos2::new(r.center().x, r.bottom())],
+                [
+                    Pos2::new(r.center().x, r.top()),
+                    Pos2::new(r.center().x, r.bottom()),
+                ],
                 Stroke::new(
                     1.0,
                     if p.resolved {
@@ -529,7 +536,10 @@ fn draw_row(
                 let x = x0.max(plot.left()).min(plot.right());
                 let w = (x1 - x0).max(1.0);
                 painter.rect_filled(
-                    Rect::from_min_max(Pos2::new(x, cy - h * 0.45), Pos2::new(x + w, cy + h * 0.45)),
+                    Rect::from_min_max(
+                        Pos2::new(x, cy - h * 0.45),
+                        Pos2::new(x + w, cy + h * 0.45),
+                    ),
                     0,
                     colour,
                 );
@@ -559,10 +569,7 @@ fn draw_row(
 /// alleles of the variant underneath.
 fn hover_text(row: &Row<'_>, axis: &Axis, flat: f64) -> Vec<String> {
     let pos = flat.max(0.0) as u64;
-    let mut out = vec![
-        row.name.clone(),
-        format!("position {}", axis.label(pos)),
-    ];
+    let mut out = vec![row.name.clone(), format!("position {}", axis.label(pos))];
     let mut found = false;
     for v in &row.map.variants {
         let off = axis
@@ -576,11 +583,12 @@ fn hover_text(row: &Row<'_>, axis: &Axis, flat: f64) -> Vec<String> {
         if pos >= s && pos < e {
             found = true;
             out.push(format!(
-                "{}   {} → {}   at pivot {}   member contig {} base {}   strand {}",
+                "{}   {} → {}   pivot {} [{}]   member contig {} base {}   strand {}",
                 v.kind.as_str(),
                 fmt::or_dash(&v.ref_allele),
                 fmt::or_dash(&v.alt_allele),
                 axis.label(s),
+                fmt::one_based_range(v.pivot_start, v.pivot_end, v.kind),
                 v.genome_contig,
                 fmt::one_based(v.genome_start, v.kind),
                 v.strand,
@@ -635,6 +643,7 @@ mod tests {
             span: 2000.0,
             needs_fit: false,
             user_moved: true,
+            zoom_request: None,
         }
     }
 
@@ -642,19 +651,29 @@ mod tests {
     fn the_axis_maps_bases_to_pixels_and_back() {
         let v = view();
         let r = rect();
-        assert_eq!(x_of(1000.0, &v, r), 100.0, "the window starts at the left edge");
+        assert_eq!(
+            x_of(1000.0, &v, r),
+            100.0,
+            "the window starts at the left edge"
+        );
         assert_eq!(x_of(3000.0, &v, r), 500.0, "and ends at the right edge");
         assert_eq!(x_of(2000.0, &v, r), 300.0, "the middle is in the middle");
         for flat in [0.0, 999.5, 1000.0, 2500.0, 3000.0, 5000.0] {
             let back = flat_of(x_of(flat, &v, r), &v, r);
-            assert!((back - flat).abs() < 1e-6, "{flat} -> {back}");
+            // Pixels are f32, so the round trip loses a little precision; the
+            // tolerance is a thousandth of a base, far below anything visible.
+            assert!((back - flat).abs() < 1e-3, "{flat} -> {back}");
         }
     }
 
     #[test]
     fn zooming_keeps_the_anchor_base_under_the_pointer() {
         let v = view();
-        for f in [0.5, 2.0, 0.1, 10.0] {
+        // Factors that leave the window inside the pivot. Zooming past either end
+        // is clamped, and a clamped window cannot also hold the anchor: keeping
+        // the base under the pointer loses to never showing bases that do not
+        // exist. `zoom_is_clamped_to_the_pivot` covers that side.
+        for f in [0.5, 2.0, 0.25, 1.5] {
             let z = zoomed_about(v, 2000.0, f, 10_000.0);
             let frac_before = (2000.0 - v.start) / v.span;
             let frac_after = (2000.0 - z.start) / z.span;
@@ -671,7 +690,10 @@ mod tests {
         let tiny = (0..40).fold(v, |a, _| zoomed_about(a, 2000.0, 0.5, 10_000.0));
         assert!(tiny.span >= MIN_SPAN);
         let huge = (0..40).fold(v, |a, _| zoomed_about(a, 2000.0, 2.0, 10_000.0));
-        assert!((huge.span - 10_000.0).abs() < 1e-9, "never wider than the pivot");
+        assert!(
+            (huge.span - 10_000.0).abs() < 1e-9,
+            "never wider than the pivot"
+        );
         assert!(huge.start >= 0.0);
         assert!(tiny.start + tiny.span <= 10_000.0 + 1e-9);
     }
@@ -683,6 +705,7 @@ mod tests {
             span: 1000.0,
             needs_fit: false,
             user_moved: true,
+            zoom_request: None,
         };
         // Dragging right moves the window left; the clamp keeps it inside.
         let moved = zoomed_about(v, 9999.0, 1.0, 10_000.0);

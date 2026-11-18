@@ -109,7 +109,11 @@ pub fn hsv(h: f32, s: f32, v: f32) -> Color32 {
         4 => (t, p, v),
         _ => (v, p, q),
     };
-    Color32::from_rgb((r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8)
+    Color32::from_rgb(
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
 }
 
 /// The golden-ratio hue step, so that neighbouring cluster ids never look alike.
@@ -165,7 +169,11 @@ mod tests {
 
     #[test]
     fn the_three_focus_styles_differ_in_every_channel() {
-        let light = (focus_style(0, false), focus_style(1, false), focus_style(2, false));
+        let light = (
+            focus_style(0, false),
+            focus_style(1, false),
+            focus_style(2, false),
+        );
         assert_ne!(light.0.color, light.1.color);
         assert_ne!(light.1.color, light.2.color);
         assert_ne!(light.0.width, light.1.width);

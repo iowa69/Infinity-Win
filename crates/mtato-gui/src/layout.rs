@@ -50,33 +50,10 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
-    pub fn cluster(&self) -> Option<u32> {
-        match self {
-            NodeKind::ClusterCollapsed { id, .. } | NodeKind::ClusterRoot { id, .. } => Some(*id),
-            _ => None,
-        }
-    }
-
-    pub fn genome(&self) -> Option<u32> {
-        match self {
-            NodeKind::Genome { id, .. } => Some(*id),
-            _ => None,
-        }
-    }
-
     pub fn name(&self) -> Option<&str> {
         match self {
             NodeKind::Genome { name, .. } => Some(name),
             _ => None,
-        }
-    }
-
-    pub fn members(&self) -> usize {
-        match self {
-            NodeKind::ClusterCollapsed { members, .. } | NodeKind::ClusterRoot { members, .. } => {
-                *members
-            }
-            _ => 0,
         }
     }
 
@@ -119,7 +96,12 @@ impl DisplayNode {
 /// `ids` maps a leaf name to a genome id; a name that is not in it (which
 /// happens when `unique_names` had to de-duplicate two identical file names)
 /// gets `u32::MAX`, meaning "no genome behind this label".
-pub fn from_core(t: &Tree, focus: u8, approximate: bool, ids: &HashMap<String, u32>) -> DisplayNode {
+pub fn from_core(
+    t: &Tree,
+    focus: u8,
+    approximate: bool,
+    ids: &HashMap<String, u32>,
+) -> DisplayNode {
     match t {
         Tree::Leaf { name, len } => {
             let id = ids.get(name).copied().unwrap_or(u32::MAX);
@@ -215,10 +197,6 @@ pub struct TreeLayout {
 }
 
 impl TreeLayout {
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-
     /// The region a layout x falls in, preferring a cluster over the backbone
     /// (a cluster region starts at a backbone x, so the two overlap there).
     pub fn region_at(&self, x: f64) -> Option<&Region> {
@@ -335,21 +313,21 @@ impl<'o> Builder<'o> {
         let x = x_parent + len * scale;
 
         // An opened cluster starts a new region with its own unit and scale.
-        let (child_scale, child_region) =
-            if let NodeKind::ClusterRoot { id, focus, .. } = node.kind {
-                let raw = cluster_raw(node);
-                self.out.regions.push(Region {
-                    x0: x,
-                    width: CLUSTER_W,
-                    raw_max: raw,
-                    unit: fmt::unit_label(focus),
-                    cluster: Some(id),
-                    focus,
-                });
-                (scale_for(raw, CLUSTER_W), self.out.regions.len() - 1)
-            } else {
-                (scale, region)
-            };
+        let (child_scale, child_region) = if let NodeKind::ClusterRoot { id, focus, .. } = node.kind
+        {
+            let raw = cluster_raw(node);
+            self.out.regions.push(Region {
+                x0: x,
+                width: CLUSTER_W,
+                raw_max: raw,
+                unit: fmt::unit_label(focus),
+                cluster: Some(id),
+                focus,
+            });
+            (scale_for(raw, CLUSTER_W), self.out.regions.len() - 1)
+        } else {
+            (scale, region)
+        };
 
         let idx = self.out.nodes.len();
         self.out.nodes.push(LayoutNode {
@@ -466,12 +444,23 @@ pub fn triangle(x: f64, y: f64, half_rows: f64) -> [(f64, f64); 3] {
 // Animation
 // ---------------------------------------------------------------------------
 
-/// Node positions of a layout, keyed by animation identity.
+/// Node positions keyed by animation identity.
 pub type Positions = HashMap<u64, (f64, f64)>;
+
+/// Key a list of positions (parallel to `l.nodes`) by animation identity. This
+/// is how an interrupted animation hands its current positions to the next one.
+pub fn positions_map(l: &TreeLayout, positions: &[(f64, f64)]) -> Positions {
+    l.nodes
+        .iter()
+        .zip(positions.iter())
+        .map(|(n, p)| (n.key, *p))
+        .collect()
+}
 
 /// Remember where every node of a layout is, to animate away from it.
 pub fn snapshot(l: &TreeLayout) -> Positions {
-    l.nodes.iter().map(|n| (n.key, (n.x, n.y))).collect()
+    let target: Vec<(f64, f64)> = l.nodes.iter().map(|n| (n.x, n.y)).collect();
+    positions_map(l, &target)
 }
 
 /// The ease used for the move: slow at both ends, which reads as a physical
@@ -485,26 +474,29 @@ pub fn smoothstep(t: f64) -> f64 {
 ///
 /// `t` is the raw fraction of the animation that has elapsed; it is eased here.
 /// A node that has no counterpart in `from` (a genome that just appeared)
-/// starts at its parent's previous position, so it grows out of the branch it
-/// belongs to instead of popping into existence.
+/// starts at its parent's *starting* position, so a whole new subtree grows out
+/// of a fixed place instead of chasing its parent across the screen. Every node
+/// therefore interpolates between two fixed points and never overshoots.
 pub fn animated(target: &TreeLayout, from: &Positions, t: f64) -> Vec<(f64, f64)> {
-    let t = smoothstep(t);
-    let mut out: Vec<(f64, f64)> = Vec::with_capacity(target.nodes.len());
+    // Parents come before children in `target.nodes`, so one pass resolves the
+    // start of a node whose parent was itself unmatched.
+    let mut starts: Vec<(f64, f64)> = Vec::with_capacity(target.nodes.len());
     for n in &target.nodes {
-        let goal = (n.x, n.y);
-        let start = match from.get(&n.key) {
+        let s = match from.get(&n.key) {
             Some(p) => *p,
             None => match n.parent {
-                Some(p) if p < out.len() => out[p],
-                _ => goal,
+                Some(p) if p < starts.len() => starts[p],
+                _ => (n.x, n.y),
             },
         };
-        out.push((
-            start.0 + (goal.0 - start.0) * t,
-            start.1 + (goal.1 - start.1) * t,
-        ));
+        starts.push(s);
     }
-    out
+    let t = smoothstep(t);
+    starts
+        .iter()
+        .zip(target.nodes.iter())
+        .map(|(s, n)| (s.0 + (n.x - s.0) * t, s.1 + (n.y - s.1) * t))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +518,8 @@ pub struct ScaleBar {
 /// a number a reader can divide by in their head.
 pub fn scale_bar(region: &Region, target: f64) -> Option<ScaleBar> {
     let per = region.units_per_layout();
-    if !(per > 0.0) || !per.is_finite() || !(target > 0.0) {
+    let usable = per.is_finite() && per > 0.0 && target.is_finite() && target > 0.0;
+    if !usable {
         return None;
     }
     let value = nice_below(per * target)?;
@@ -546,13 +539,19 @@ pub fn scale_bar(region: &Region, target: f64) -> Option<ScaleBar> {
 
 /// The largest 1/2/5 x 10^n that is not greater than `v`.
 pub fn nice_below(v: f64) -> Option<f64> {
-    if !(v > 0.0) || !v.is_finite() {
+    if !v.is_finite() || v <= 0.0 {
         return None;
     }
     let e = v.log10().floor();
     let base = 10f64.powf(e);
     let m = v / base;
-    let step = if m >= 5.0 { 5.0 } else if m >= 2.0 { 2.0 } else { 1.0 };
+    let step = if m >= 5.0 {
+        5.0
+    } else if m >= 2.0 {
+        2.0
+    } else {
+        1.0
+    };
     Some(step * base)
 }
 
@@ -575,13 +574,25 @@ mod tests {
     /// Backbone of two clusters: `a` collapsed with 3 members, `b` opened into
     /// two genomes.
     fn sample() -> DisplayNode {
-        let mut b =
-            DisplayNode::new(NodeKind::ClusterRoot { id: 1, members: 2, focus: 2 }, 0.4, 0, true);
+        let mut b = DisplayNode::new(
+            NodeKind::ClusterRoot {
+                id: 1,
+                members: 2,
+                focus: 2,
+            },
+            0.4,
+            0,
+            true,
+        );
         b.children = vec![leaf("b1", 0.1), leaf("b2", 0.3)];
         let mut root = DisplayNode::new(NodeKind::Root, 0.0, 0, true);
         root.children = vec![
             DisplayNode::new(
-                NodeKind::ClusterCollapsed { id: 0, members: 3, focus: 0 },
+                NodeKind::ClusterCollapsed {
+                    id: 0,
+                    members: 3,
+                    focus: 0,
+                },
                 0.2,
                 0,
                 true,
@@ -606,7 +617,7 @@ mod tests {
         let b = l
             .nodes
             .iter()
-            .find(|n| n.kind.cluster() == Some(1))
+            .find(|n| matches!(n.kind, NodeKind::ClusterRoot { id: 1, .. }))
             .expect("cluster root");
         assert_eq!(b.row_min, 1.0);
         assert_eq!(b.row_max, 2.0);
@@ -637,7 +648,11 @@ mod tests {
         // The cluster's deepest leaf is 0.3 units from its root, and the region
         // is CLUSTER_W wide, so 0.3 maps onto the full width.
         assert!((c.raw_max - 0.3).abs() < 1e-9);
-        let b2 = l.nodes.iter().find(|n| n.kind.name() == Some("b2")).unwrap();
+        let b2 = l
+            .nodes
+            .iter()
+            .find(|n| n.kind.name() == Some("b2"))
+            .unwrap();
         assert!((b2.x - (c.x0 + CLUSTER_W)).abs() < 1e-9);
     }
 
@@ -692,7 +707,10 @@ mod tests {
     fn region_lookup_prefers_the_cluster_over_the_backbone() {
         let l = layout(&sample());
         let c = l.regions[1].clone();
-        assert_eq!(l.region_at(c.x0 + CLUSTER_W * 0.5).unwrap().cluster, Some(1));
+        assert_eq!(
+            l.region_at(c.x0 + CLUSTER_W * 0.5).unwrap().cluster,
+            Some(1)
+        );
         // On the backbone, left of every cluster.
         assert_eq!(l.region_at(-0.1).unwrap().cluster, None);
     }
@@ -833,14 +851,38 @@ mod tests {
         assert_ne!(a, b, "children are visited in row order");
         assert_eq!(a, node_key(&NodeKind::Internal, &[10, 20]));
         assert_ne!(
-            node_key(&NodeKind::Genome { id: 1, name: "x".into() }, &[]),
-            node_key(&NodeKind::Genome { id: 2, name: "y".into() }, &[])
+            node_key(
+                &NodeKind::Genome {
+                    id: 1,
+                    name: "x".into()
+                },
+                &[]
+            ),
+            node_key(
+                &NodeKind::Genome {
+                    id: 2,
+                    name: "y".into()
+                },
+                &[]
+            )
         );
         // The genome id must not leak into the key: a renumbered genome is the
         // same leaf and should animate, not jump.
         assert_eq!(
-            node_key(&NodeKind::Genome { id: 1, name: "x".into() }, &[]),
-            node_key(&NodeKind::Genome { id: 9, name: "x".into() }, &[])
+            node_key(
+                &NodeKind::Genome {
+                    id: 1,
+                    name: "x".into()
+                },
+                &[]
+            ),
+            node_key(
+                &NodeKind::Genome {
+                    id: 9,
+                    name: "x".into()
+                },
+                &[]
+            )
         );
     }
 
@@ -849,8 +891,14 @@ mod tests {
         let t = Tree::Internal {
             len: 0.0,
             children: vec![
-                Tree::Leaf { name: "a".into(), len: 0.1 },
-                Tree::Leaf { name: "b".into(), len: 0.2 },
+                Tree::Leaf {
+                    name: "a".into(),
+                    len: 0.1,
+                },
+                Tree::Leaf {
+                    name: "b".into(),
+                    len: 0.2,
+                },
             ],
         };
         let mut ids = HashMap::new();
@@ -859,7 +907,10 @@ mod tests {
         assert_eq!(d.children.len(), 2);
         assert_eq!(
             d.children[0].kind,
-            NodeKind::Genome { id: 7, name: "a".into() }
+            NodeKind::Genome {
+                id: 7,
+                name: "a".into()
+            }
         );
         // "b" is not in the map: it gets the sentinel rather than a wrong id.
         assert_eq!(

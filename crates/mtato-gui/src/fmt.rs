@@ -31,9 +31,7 @@ pub fn approx_mark(approximate: bool) -> &'static str {
 pub fn one_based(start: u64, kind: VariantKind) -> u64 {
     match kind {
         VariantKind::Insertion => start,
-        VariantKind::Snp | VariantKind::Deletion | VariantKind::Complex => {
-            start.saturating_add(1)
-        }
+        VariantKind::Snp | VariantKind::Deletion | VariantKind::Complex => start.saturating_add(1),
     }
 }
 
@@ -158,7 +156,11 @@ pub fn is_approximate_focus(focus: u8) -> bool {
 
 /// A unit name with its marker: "≈ diff pieces" at Focus 1, "SNPs" at Focus 2.
 pub fn marked_unit(focus: u8) -> String {
-    format!("{}{}", approx_mark(is_approximate_focus(focus)), unit_label(focus))
+    format!(
+        "{}{}",
+        approx_mark(is_approximate_focus(focus)),
+        unit_label(focus)
+    )
 }
 
 /// An empty allele is written as a dash, as the output files do.
@@ -212,7 +214,10 @@ mod tests {
         // A single-base SNP is one position, not a range.
         assert_eq!(one_based_range(10, 11, VariantKind::Snp), "11".to_string());
         // An empty interval (an insertion) does not produce an inverted range.
-        assert_eq!(one_based_range(10, 10, VariantKind::Insertion), "10".to_string());
+        assert_eq!(
+            one_based_range(10, 10, VariantKind::Insertion),
+            "10".to_string()
+        );
     }
 
     #[test]

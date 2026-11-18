@@ -84,7 +84,11 @@ impl PairView {
         if !self.available() {
             return "not measured yet".to_string();
         }
-        format!("{}{}", fmt::approx_mark(self.approximate), fmt::count(self.snps))
+        format!(
+            "{}{}",
+            fmt::approx_mark(self.approximate),
+            fmt::count(self.snps)
+        )
     }
 }
 
@@ -242,9 +246,7 @@ pub fn pair_from_profiles(a: &MemberProfile, b: &MemberProfile, focus: u8) -> Pa
 
     let indels = symmetric_difference(&a.indels, &b.indels)
         .into_iter()
-        .filter(|k| {
-            k.0 < plen && !(in_any(&a.uncovered, k.0) || in_any(&b.uncovered, k.0))
-        })
+        .filter(|k| k.0 < plen && !(in_any(&a.uncovered, k.0) || in_any(&b.uncovered, k.0)))
         .count() as u64;
 
     let dist = if comparable > 0 {
@@ -287,7 +289,14 @@ pub fn symmetric_difference<T: Ord + Clone>(a: &[T], b: &[T]) -> Vec<T> {
 }
 
 /// Read a pair straight out of the engine's matrix, when the run has finished.
-pub fn pair_from_matrix(m: &DistanceMatrix, ia: usize, ib: usize, a_id: u32, b_id: u32, focus: u8) -> PairView {
+pub fn pair_from_matrix(
+    m: &DistanceMatrix,
+    ia: usize,
+    ib: usize,
+    a_id: u32,
+    b_id: u32,
+    focus: u8,
+) -> PairView {
     let dist = if m.comparable[ia][ib] > 0 {
         Some(m.dist[ia][ib])
     } else {
@@ -391,8 +400,16 @@ mod tests {
 
     #[test]
     fn the_same_position_with_different_alts_counts_once() {
-        let a = member("a", vec![variant(VariantKind::Snp, 0, 10, 11, "A", "G")], vec![]);
-        let b = member("b", vec![variant(VariantKind::Snp, 0, 10, 11, "A", "T")], vec![]);
+        let a = member(
+            "a",
+            vec![variant(VariantKind::Snp, 0, 10, 11, "A", "G")],
+            vec![],
+        );
+        let b = member(
+            "b",
+            vec![variant(VariantKind::Snp, 0, 10, 11, "A", "T")],
+            vec![],
+        );
         assert_eq!(pair_from_maps(&a, &b, 1, 2, 2).snps, 1);
     }
 
@@ -400,8 +417,16 @@ mod tests {
     fn positions_span_contigs_through_the_offsets() {
         // A SNP at contig 1 position 0 and one at contig 0 position 100 would
         // collide without the offsets; they must not.
-        let a = member("a", vec![variant(VariantKind::Snp, 1, 0, 1, "A", "G")], vec![]);
-        let b = member("b", vec![variant(VariantKind::Snp, 0, 99, 100, "A", "G")], vec![]);
+        let a = member(
+            "a",
+            vec![variant(VariantKind::Snp, 1, 0, 1, "A", "G")],
+            vec![],
+        );
+        let b = member(
+            "b",
+            vec![variant(VariantKind::Snp, 0, 99, 100, "A", "G")],
+            vec![],
+        );
         assert_eq!(pair_from_maps(&a, &b, 1, 2, 2).snps, 2);
         assert_eq!(snp_map(&a).keys().copied().collect::<Vec<_>>(), vec![100]);
         assert_eq!(snp_map(&b).keys().copied().collect::<Vec<_>>(), vec![99]);
@@ -428,7 +453,11 @@ mod tests {
             vec![(70, 72)],
         );
         let p = pair_from_maps(&a, &b, 1, 2, 2);
-        assert_eq!(p.comparable, 150 - (60 - 50) - (72 - 70), "union of the gaps");
+        assert_eq!(
+            p.comparable,
+            150 - (60 - 50) - (72 - 70),
+            "union of the gaps"
+        );
         // The SNP at 10 differs, the one at 55 is not comparable.
         assert_eq!(p.snps, 1);
         // The deletion at 40 is only in a; the one at 70 is inside b's gap.

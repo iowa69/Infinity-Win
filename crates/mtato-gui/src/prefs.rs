@@ -21,7 +21,7 @@ pub const FILE: &str = "gui_prefs.json";
 pub const MAX_RECENT: usize = 12;
 
 /// Everything the interface remembers between sessions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
     /// Genome files or folders, most recent first.
@@ -32,17 +32,6 @@ pub struct Prefs {
     pub export_dir: String,
     /// Last parameter set, so a re-run does not mean re-typing.
     pub params: Parameters,
-}
-
-impl Default for Prefs {
-    fn default() -> Self {
-        Self {
-            recent_inputs: Vec::new(),
-            recent_outputs: Vec::new(),
-            export_dir: String::new(),
-            params: Parameters::default(),
-        }
-    }
 }
 
 /// The platform's configuration directory, resolved without a `dirs` crate so
@@ -82,10 +71,25 @@ pub fn load() -> Prefs {
 /// Read preferences from an explicit path. Split out from [`load`] so the
 /// fallback behaviour can be tested.
 pub fn load_from(path: &Path) -> Prefs {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => Prefs::default(),
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Prefs::default();
+    };
+    if let Ok(p) = serde_json::from_str::<Prefs>(&text) {
+        return p;
     }
+    // A file written by a version whose `Parameters` had different fields cannot
+    // be read whole. The remembered paths are still valid and worth keeping, so
+    // drop just the parameter set and fall back to the defaults for it, rather
+    // than throwing the whole file away.
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("params");
+            if let Ok(p) = serde_json::from_value::<Prefs>(v) {
+                return p;
+            }
+        }
+    }
+    Prefs::default()
 }
 
 /// Write the preferences. Failure is not fatal and is reported by the caller.
@@ -175,23 +179,27 @@ mod tests {
         std::fs::write(&broken, "{ not json").unwrap();
         assert_eq!(load_from(&broken), Prefs::default());
 
-        // A file from a version that knew fewer fields still loads, and one
-        // with an unknown field falls back rather than failing.
+        // A file from a version that knew fewer fields still loads.
         let partial = tmp("partial");
         std::fs::write(&partial, r#"{"recent_inputs":["/x"]}"#).unwrap();
         let p = load_from(&partial);
         assert_eq!(p.recent_inputs, vec!["/x".to_string()]);
         assert_eq!(p.params, Parameters::default());
 
-        let unknown = tmp("unknown");
-        std::fs::write(&unknown, r#"{"params":{"k":30}}"#).unwrap();
-        // k = 30 is even, so the stored set is invalid; the reader must not
-        // panic, and the caller validates before running.
-        let p = load_from(&unknown);
-        assert_eq!(p.params.k, 30);
-        assert!(p.params.validate().is_err());
+        // A parameter set from a different schema cannot be read; the remembered
+        // paths survive and only the parameters fall back.
+        let foreign = tmp("foreign-params");
+        std::fs::write(
+            &foreign,
+            r#"{"recent_inputs":["/data/x"],"params":{"k":30,"nope":1}}"#,
+        )
+        .unwrap();
+        let p = load_from(&foreign);
+        assert_eq!(p.recent_inputs, vec!["/data/x".to_string()]);
+        assert_eq!(p.params, Parameters::default());
+        p.params.validate().expect("the fallback must be valid");
 
-        for f in [broken, partial, unknown] {
+        for f in [broken, partial, foreign] {
             std::fs::remove_file(f).ok();
         }
     }

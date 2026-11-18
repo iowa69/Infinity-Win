@@ -21,7 +21,6 @@ use eframe::egui;
 use egui::Context;
 
 use mtato_core::engine::RunResults;
-use mtato_core::params::Parameters;
 
 use crate::layout::{self, Positions, TreeLayout, ANIM_SECS};
 use crate::open::OpenHandle;
@@ -190,14 +189,6 @@ impl MtatoApp {
         app
     }
 
-    pub(crate) fn params(&self) -> &Parameters {
-        &self.prefs.params
-    }
-
-    pub(crate) fn params_mut(&mut self) -> &mut Parameters {
-        &mut self.prefs.params
-    }
-
     pub(crate) fn running(&self) -> bool {
         self.run_handle.as_ref().is_some_and(|r| r.is_running())
     }
@@ -340,8 +331,8 @@ impl MtatoApp {
     pub(crate) fn stop_run(&mut self) {
         if let Some(r) = &self.run_handle {
             r.cancel();
-            self.status = "cancellation requested; the engine stops after the current genome"
-                .to_string();
+            self.status =
+                "cancellation requested; the engine stops after the current genome".to_string();
         }
     }
 
@@ -360,8 +351,7 @@ impl MtatoApp {
                 self.status = format!("cluster distance {v}: re-clustering from the sketches");
             }
             _ => {
-                self.status =
-                    format!("cluster distance {v} will be used by the next run");
+                self.status = format!("cluster distance {v} will be used by the next run");
             }
         }
     }
@@ -411,8 +401,13 @@ impl MtatoApp {
                         .push(format!("cannot create {}: {e}", dir.display()));
                     r
                 } else {
-                    match export::write_item(i, &dir, &self.model, self.results.as_ref(), &mut notes)
-                    {
+                    match export::write_item(
+                        i,
+                        &dir,
+                        &self.model,
+                        self.results.as_ref(),
+                        &mut notes,
+                    ) {
                         Ok(paths) => r.written.extend(paths),
                         Err(e) => r.errors.push(format!("{}: {e}", i.label())),
                     }
@@ -428,7 +423,7 @@ impl MtatoApp {
             self.model.push_local_note(n.clone());
         }
         self.status = report.summary();
-        if !report.errors.is_empty() {
+        if !report.ok() {
             self.model.push_local_note(report.errors.join("; "));
             self.show_notes = true;
         }
@@ -461,11 +456,7 @@ impl MtatoApp {
 
     /// Collect the result of an earlier screenshot request.
     fn poll_png(&mut self) {
-        let taken = self
-            .png_result
-            .lock()
-            .ok()
-            .and_then(|mut g| g.take());
+        let taken = self.png_result.lock().ok().and_then(|mut g| g.take());
         if let Some(res) = taken {
             match res {
                 Ok(p) => self.status = format!("wrote {}", p.display()),
@@ -568,12 +559,13 @@ impl MtatoApp {
         // Chain an interrupted animation: start from the positions on screen,
         // not from the previous target.
         let from: Positions = match &self.tree_layout {
-            Some(old) if !self.positions.is_empty() => old
-                .nodes
-                .iter()
-                .zip(self.positions.iter())
-                .map(|(n, p)| (n.key, *p))
-                .collect(),
+            Some(old) if !self.positions.is_empty() => {
+                if self.anim_start.is_none() {
+                    layout::snapshot(old)
+                } else {
+                    layout::positions_map(old, &self.positions)
+                }
+            }
             _ => Positions::new(),
         };
         let animate = !from.is_empty();
@@ -668,14 +660,20 @@ impl MtatoApp {
         let Some(handle) = &self.opening else {
             return;
         };
-        if let Some(p) = handle.progress() {
-            self.status = format!("reading {} ... {:.0} %", handle.dir().display(), p * 100.0);
+        if !handle.is_done() {
+            if let Some(p) = handle.progress() {
+                self.status = format!("reading {} … {:.0} %", handle.dir().display(), p * 100.0);
+            }
+            return;
         }
         match handle.done() {
             Some(Ok(model)) => {
                 let n = model.genome_count();
                 let c = model.cluster_count();
-                self.status = format!("opened {}: {n} genomes in {c} clusters", handle.dir().display());
+                self.status = format!(
+                    "opened {}: {n} genomes in {c} clusters",
+                    handle.dir().display()
+                );
                 self.model = model;
                 self.results = None;
                 self.run_handle = None;
@@ -940,11 +938,7 @@ mod tests {
         for i in 1..=10 {
             app.step_animation(1.0 + ANIM_SECS * i as f64 / 10.0);
             let cur: Vec<f64> = app.positions.iter().map(|p| p.1).collect();
-            for (j, (c, target)) in cur
-                .iter()
-                .zip(l.nodes.iter().map(|n| n.y))
-                .enumerate()
-            {
+            for (j, (c, target)) in cur.iter().zip(l.nodes.iter().map(|n| n.y)).enumerate() {
                 let before = last[j];
                 // Each step is closer to (or at) the target than the one before.
                 assert!(

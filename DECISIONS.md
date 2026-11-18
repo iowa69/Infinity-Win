@@ -689,3 +689,38 @@ the owner called the point of the exercise — reproduces the intended effect on
 data: normalised Robinson-Foulds distance against the reference IQ-TREE tree falls
 **1.00 → 0.71 → 0.38 → 0.10** as the run progresses. The photo does come into
 focus, and it can be measured doing so.
+
+---
+
+## D24. Six event-stream inconsistencies between what is emitted and what is written
+
+Found by the desktop-program implementation, which consumes the stream live and so
+hits cases the file-writing path never does. **In every case the written output
+files are correct**; the defect is that a live consumer is told something different
+from what the files say. Section 0 rule 2 requires everything the GUI shows to be
+reachable from the engine, so these are real, not cosmetic. The GUI defends against
+each one, which means the defences are load-bearing and must not be removed.
+
+| # | Site | Defect | GUI defence |
+|---|---|---|---|
+| 1 | `refine_clusters` recluster path | After `SetClusterDist`, `emit_focus0` re-emits `ClusterFocus{focus:0}` for *every* cluster, then unchanged clusters are skipped forever — so a live consumer sees exact clusters permanently regress to Focus 0 while `clusters.tsv` says 2. | ignore a focus-0 event for a cluster already above 0 |
+| 2 | same path | `emitted_focus.clear()` means `Progress{stage:"refine"}` can never reach `total` after a re-cluster. | `max(done, refined_clusters())` |
+| 3 | `refine_one_cluster` singleton early return | returns without emitting `ClusterFocus{focus:2}`, yet `apply_cluster_result` records `cluster_focus[id] = 2`. | treat a one-member cluster as Focus 2 |
+| 4 | `scan_all` | `GenomeScanned.id` is the **input index**, but surviving records are renumbered densely, so after any read failure every later id disagrees with `ClusterInfo.members`. Five inputs with the third unreadable gives stream ids {0,1,2,4} against clustered ids {0,1,2,3}. | resolve every stream id through the genome *name* first, never guessing on an ambiguous name |
+| 5 | `Event::Counters` | emitted per-cluster inside `refine_one_cluster` but cumulatively in `finish`, so neither a snapshot nor a delta reading is consistent. | accumulate, then overwrite from `Finished.counters` |
+| 6 | `piece_view` | hardcodes `resolved: true` and `MapUpdateInfo` carries no breakpoints, although `compare::Focus1` has both. | none possible — see below |
+
+**Item 4 is the one that matters most**: it is an outright id mismatch between two
+events of the same run, triggered by an ordinary input error. Items 1–3 are all
+consequences of the `SetClusterDist` re-cluster path not invalidating state, which
+is the same root cause as F18 in D22 and remains the blocking issue for shipping
+the cluster-distance slider.
+
+**Item 6 is not defensible from the consumer side**, and it is why two items of
+section 8 are only partially delivered: the map panel's breakpoint triangles have
+no data to draw, and the "zoom made visible" behaviour (a wide pale box narrowing
+as levels 2 and 3 are checked) can only be two-state, because `MapUpdate` is
+emitted once at Focus 2 and `PieceView` carries no level. Both need
+`MapUpdateInfo` to gain a breakpoint list and a per-piece level, emitted at Focus 1
+as well as Focus 2. SVG export is also not implemented; section 8 asks for it only
+"if practical".

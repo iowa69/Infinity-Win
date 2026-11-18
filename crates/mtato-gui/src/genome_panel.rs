@@ -34,6 +34,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut MtatoApp) {
 
 fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
     let mut found: Option<u32> = None;
+    let mut clear_sel = false;
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!(
@@ -44,6 +45,13 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
         );
         if !app.selection.is_empty() {
             ui.weak(format!("{} selected", app.selection.len()));
+            if ui
+                .small_button("clear")
+                .on_hover_text("clear the selection")
+                .clicked()
+            {
+                clear_sel = true;
+            }
         }
     });
     ui.horizontal(|ui| {
@@ -77,6 +85,9 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
     }
     column_headers(ui, app);
     ui.separator();
+    if clear_sel {
+        app.clear_selection();
+    }
     if let Some(id) = found {
         app.select_genome(id, false);
     }
@@ -87,9 +98,14 @@ fn column_headers(ui: &mut egui::Ui, app: &mut MtatoApp) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         header_button(ui, &mut clicked, app.sort, SortColumn::Id, "#", W_ID);
-        ui.add_sized(
-            Vec2::new(W_SWATCH, ROW_H),
-            egui::Label::new(RichText::new("c").weak()),
+        // The cluster swatch column doubles as the "group by cluster" sort.
+        header_button(
+            ui,
+            &mut clicked,
+            app.sort,
+            SortColumn::Cluster,
+            "c",
+            W_SWATCH,
         );
         header_button(
             ui,
@@ -123,6 +139,18 @@ fn column_headers(ui: &mut egui::Ui, app: &mut MtatoApp) {
             "focus",
             W_FOCUS,
         );
+        // N50 and GC are in the model but not worth a column of their own; they
+        // stay reachable as sort keys.
+        ui.menu_button("⋮", |ui| {
+            if ui.button("sort by N50").clicked() {
+                clicked = Some(SortColumn::N50);
+                ui.close();
+            }
+            if ui.button("sort by GC").clicked() {
+                clicked = Some(SortColumn::Gc);
+                ui.close();
+            }
+        });
     });
     if let Some(c) = clicked {
         app.sort = app.sort.toggled(c);
@@ -149,7 +177,10 @@ fn header_button(
         text = text.strong();
     }
     let resp = if width.is_finite() {
-        ui.add_sized(Vec2::new(width, ROW_H), egui::Button::new(text).frame(false))
+        ui.add_sized(
+            Vec2::new(width, ROW_H),
+            egui::Button::new(text).frame(false),
+        )
     } else {
         ui.add(egui::Button::new(text).frame(false))
     };
@@ -341,7 +372,9 @@ fn pos(x: f32, y: f32) -> egui::Pos2 {
 /// generous: the list is redrawn every frame, so a character-by-character scan
 /// would cost more than the rest of the row together.
 pub(crate) fn clip(painter: &egui::Painter, text: &str, width: f32, font: egui::FontId) -> String {
-    if !(width > 0.0) {
+    // `width` comes from a panel the user can resize, so NaN and negatives are
+    // both possible and both mean "no room at all".
+    if !width.is_finite() || width <= 0.0 {
         return String::new();
     }
     let measure = |s: &str| {
@@ -372,44 +405,74 @@ pub(crate) fn clip(painter: &egui::Painter, text: &str, width: f32, font: egui::
 mod tests {
     use super::*;
 
-    /// A painter that needs no window, so text metrics can be tested headless.
-    fn painter() -> egui::Painter {
-        egui::Context::default().debug_painter()
+    /// Run `f` against a real painter with no window. Fonts only exist inside a
+    /// pass, so the callback runs inside `Context::run_ui`.
+    fn with_painter<R>(f: impl FnOnce(&egui::Painter) -> R) -> R {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        // `run_ui` takes an `FnMut`, so the one-shot callback is handed over
+        // through an `Option`.
+        let mut f = Some(f);
+        let mut out: Option<R> = None;
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            if let Some(f) = f.take() {
+                out = Some(f(ui.painter()));
+            }
+        });
+        full.drop_without_applying_deltas();
+        out.expect("the callback ran")
     }
 
     #[test]
     fn a_short_name_is_left_alone() {
-        let p = painter();
-        let font = egui::FontId::proportional(11.5);
-        assert_eq!(clip(&p, "strainA01", 200.0, font.clone()), "strainA01");
+        let out = with_painter(|p| {
+            let font = egui::FontId::proportional(11.5);
+            clip(p, "strainA01", 200.0, font)
+        });
+        assert_eq!(out, "strainA01");
     }
 
     #[test]
     fn a_long_name_is_cut_to_fit_and_ends_in_an_ellipsis() {
-        let p = painter();
-        let font = egui::FontId::proportional(11.5);
         let text = "Salmonella_enterica_serovar_Typhimurium_strain_LT2_assembly_0042";
         let width = 80.0;
-        let out = clip(&p, text, width, font.clone());
-        assert!(out.ends_with('…'), "{out}");
-        assert!(out.len() < text.len());
-        let w = p
-            .layout_no_wrap(out, font, egui::Color32::BLACK)
-            .size()
-            .x;
-        assert!(w <= width + 0.5, "the clipped label is {w} px, over {width}");
+        let out = with_painter(|p| {
+            let font = egui::FontId::proportional(11.5);
+            let cut = clip(p, text, width, font.clone());
+            let w = p
+                .layout_no_wrap(cut.clone(), font, egui::Color32::BLACK)
+                .size()
+                .x;
+            (cut, w)
+        });
+        assert!(out.0.ends_with('…'), "{:?}", out.0);
+        assert!(out.0.len() < text.len());
+        assert!(
+            out.1 <= width + 0.5,
+            "the clipped label is {} px, over {width}",
+            out.1
+        );
+        // And it kept a real prefix of the name, not a mangled middle.
+        assert!(text.starts_with(out.0.trim_end_matches('…')));
     }
 
     #[test]
-    fn a_width_that_cannot_hold_anything_yields_nothing_rather_than_a_overflow() {
-        let p = painter();
-        let font = egui::FontId::proportional(11.5);
-        assert_eq!(clip(&p, "anything", 0.0, font.clone()), "");
-        assert_eq!(clip(&p, "anything", -5.0, font), "");
-        // One pixel is too narrow for even a single character plus ellipsis, so
-        // the shortest possible answer is returned rather than looping.
-        assert!(clip(&p, "anything", 1.0, font).chars().count() <= 2);
+    fn a_width_that_cannot_hold_anything_yields_nothing_rather_than_an_overflow() {
+        with_painter(|p| {
+            let font = egui::FontId::proportional(11.5);
+            assert_eq!(clip(p, "anything", 0.0, font.clone()), "");
+            assert_eq!(clip(p, "anything", -5.0, font.clone()), "");
+            assert_eq!(clip(p, "anything", f32::NAN, font.clone()), "");
+            // One pixel is too narrow for even a single character plus ellipsis,
+            // so the shortest possible answer comes back rather than a loop.
+            assert!(clip(p, "anything", 1.0, font).chars().count() <= 2);
+        });
+    }
+
+    #[test]
+    fn a_wide_column_keeps_the_whole_name_even_when_it_is_long() {
+        let text = "a_really_quite_long_genome_name_that_goes_on";
+        let out = with_painter(|p| clip(p, text, 1000.0, egui::FontId::proportional(11.5)));
+        assert_eq!(out, text);
     }
 }
-
-

@@ -43,7 +43,10 @@ impl Axis {
             return None;
         }
         // Last contig whose offset is not past the position.
-        let i = self.offsets.partition_point(|&o| o <= flat).saturating_sub(1);
+        let i = self
+            .offsets
+            .partition_point(|&o| o <= flat)
+            .saturating_sub(1);
         if i >= self.lens.len() {
             return None;
         }
@@ -296,7 +299,10 @@ mod tests {
         }
         m.apply(0.0, crate::state::clustered_event(&[(0, 0, &[0, 1, 2, 3])]));
         for g in 0..4 {
-            m.apply(0.0, mtato_core::events::Event::MapUpdate(Box::new(member(0, g, vec![]))));
+            m.apply(
+                0.0,
+                mtato_core::events::Event::MapUpdate(Box::new(member(0, g, vec![]))),
+            );
         }
         let plan = plan_rows(&m, Some(0), &[2], 10);
         assert_eq!(plan.genomes, vec![2]);
@@ -310,9 +316,15 @@ mod tests {
         for g in 0..6 {
             m.apply(0.0, crate::state::scan_event(g, &format!("g{g}"), 100, 1));
         }
-        m.apply(0.0, crate::state::clustered_event(&[(0, 0, &[0, 1, 2, 3, 4, 5])]));
+        m.apply(
+            0.0,
+            crate::state::clustered_event(&[(0, 0, &[0, 1, 2, 3, 4, 5])]),
+        );
         for g in 0..6 {
-            m.apply(0.0, mtato_core::events::Event::MapUpdate(Box::new(member(0, g, vec![]))));
+            m.apply(
+                0.0,
+                mtato_core::events::Event::MapUpdate(Box::new(member(0, g, vec![]))),
+            );
         }
         let plan = plan_rows(&m, Some(0), &[], 4);
         assert_eq!(plan.genomes, vec![0, 1, 2, 3]);

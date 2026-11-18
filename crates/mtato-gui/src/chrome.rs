@@ -90,9 +90,7 @@ pub fn toolbar(ui: &mut egui::Ui, app: &mut MtatoApp) {
             ui.separator();
             ui.label("output");
             let out = ui
-                .add(
-                    egui::TextEdit::singleline(&mut app.outdir_text).desired_width(160.0),
-                )
+                .add(egui::TextEdit::singleline(&mut app.outdir_text).desired_width(160.0))
                 .on_hover_text("Where the run writes its files, including events.jsonl");
             if out.changed() {
                 params_changed = true;
@@ -147,8 +145,7 @@ fn menu_bar(
                         .hint_text("/path/to/mtato-out"),
                 );
                 let go = ui.button("Open").clicked()
-                    || (resp.lost_focus()
-                        && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)));
+                    || (resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)));
                 if go {
                     *open_now = Some(app.open_text.clone());
                     ui.close();
@@ -300,7 +297,7 @@ pub fn status_bar(ui: &mut egui::Ui, app: &MtatoApp) {
         ui.horizontal(|ui| {
             for stage in &app.model.stages {
                 let text = match stage.fraction() {
-                    Some(f) => format!(
+                    Some(_) => format!(
                         "{} {}/{} {}",
                         stage.name,
                         fmt::count(stage.done),
@@ -332,8 +329,9 @@ pub fn status_bar(ui: &mut egui::Ui, app: &MtatoApp) {
         });
         ui.horizontal(|ui| {
             ui.weak(format!(
-                "{} genomes | {} clusters | focus 0/1/2 = {}/{}/{} | events {}",
+                "{} genomes ({}) | {} clusters | focus 0/1/2 = {}/{}/{} | events {}",
                 fmt::count(app.model.genome_count() as u64),
+                fmt::bp(app.model.total_length()),
                 fmt::count(app.model.cluster_count() as u64),
                 app.model
                     .genomes

@@ -251,10 +251,17 @@ mod tests {
     #[test]
     fn a_parameter_set_the_engine_would_reject_is_caught_before_a_thread_starts() {
         let ctx = Context::default();
-        let mut params = Parameters::default();
-        params.k = 30;
-        let err = start(vec![PathBuf::from("/tmp")], params, PathBuf::from("/tmp/out"), ctx)
-            .expect_err("k must be odd");
+        let params = Parameters {
+            k: 30,
+            ..Default::default()
+        };
+        let err = start(
+            vec![PathBuf::from("/tmp")],
+            params,
+            PathBuf::from("/tmp/out"),
+            ctx,
+        )
+        .expect_err("k must be odd");
         assert!(err.contains("k must be odd"), "{err}");
     }
 
@@ -269,5 +276,250 @@ mod tests {
         )
         .expect_err("no inputs");
         assert!(err.contains("nothing to compare"), "{err}");
+    }
+
+    // -- an end-to-end run ---------------------------------------------------
+    //
+    // This exercises the whole chain the window depends on: the real engine on
+    // its own threads, the relay thread, the pump, the fold in `state`, the files
+    // in the output folder, and reading that folder back. It generates its own
+    // genomes, so it needs no dataset and no display.
+
+    /// A deterministic xorshift, so the test is reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn base(&mut self) -> u8 {
+            b"ACGT"[(self.next() % 4) as usize]
+        }
+    }
+
+    /// Write `n` nearly identical genomes of `len` bases, each `snps` mutations
+    /// away from a shared reference.
+    fn write_genomes(dir: &Path, n: usize, len: usize, snps: usize) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        let reference: Vec<u8> = (0..len).map(|_| rng.base()).collect();
+        for g in 0..n {
+            let mut seq = reference.clone();
+            for _ in 0..snps {
+                let pos = (rng.next() as usize) % len;
+                let old = seq[pos];
+                let mut new = rng.base();
+                while new == old {
+                    new = rng.base();
+                }
+                seq[pos] = new;
+            }
+            let mut text = format!(">genome{g}_contig0\n");
+            for chunk in seq.chunks(70) {
+                text.push_str(std::str::from_utf8(chunk).unwrap());
+                text.push('\n');
+            }
+            std::fs::write(dir.join(format!("genome{g}.fa")), text).unwrap();
+        }
+    }
+
+    /// Drive the pump exactly the way the update loop does, until the engine
+    /// hands its results back.
+    fn drain_to_completion(
+        handle: &RunHandle,
+        model: &mut crate::state::UiModel,
+    ) -> Result<mtato_core::engine::RunResults, String> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            for env in handle.pump().drain(BATCH) {
+                model.apply_envelope(env);
+            }
+            if let Some(res) = handle.take_results() {
+                return res;
+            }
+            if Instant::now() >= deadline {
+                return Err("the engine did not finish in time".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_live_run_reaches_the_model_and_can_be_reopened_from_disk() {
+        let dir = std::env::temp_dir().join(format!("mtato-gui-e2e-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let genomes = dir.join("genomes");
+        let out = dir.join("out");
+        write_genomes(&genomes, 4, 40_000, 6);
+
+        let handle = start(
+            vec![genomes],
+            Parameters {
+                threads: 2,
+                ..Default::default()
+            },
+            out.clone(),
+            Context::default(),
+        )
+        .expect("the run starts");
+        assert!(handle.startup_note.is_none(), "{:?}", handle.startup_note);
+
+        let mut model = crate::state::UiModel::new(crate::state::Source::Live);
+        let results = drain_to_completion(&handle, &mut model).expect("the engine succeeded");
+        assert!(!results.cancelled);
+
+        // The model the window would show.
+        assert_eq!(model.genome_count(), 4);
+        assert!(model.finished, "a Finished event arrived");
+        assert!(model.summary.is_some());
+        assert_eq!(model.cluster_count(), results.clusters.len());
+        assert_eq!(
+            model.counters, results.counters,
+            "the counters agree with the engine once the run is over"
+        );
+        assert!(model.backbone.is_some(), "the blurry tree arrived");
+        assert!(
+            model.clusters.iter().all(|c| c.focus == 2),
+            "every cluster sharpened to Focus 2: {:?}",
+            model
+                .clusters
+                .iter()
+                .map(|c| (c.id, c.focus))
+                .collect::<Vec<_>>()
+        );
+        assert!(!model.maps.is_empty(), "the map panel has data to draw");
+        assert!(model.events_seen > 0);
+        assert!(model.highest_seq + 1 >= model.events_seen);
+
+        // Every cluster has a tree, and every pivot is a member of its cluster.
+        for c in &model.clusters {
+            assert!(c.members.contains(&c.pivot));
+            assert!(c.tree.is_some(), "cluster {} has no tree", c.id);
+        }
+        assert_eq!(
+            model.genomes.iter().filter(|g| g.is_pivot).count(),
+            model.cluster_count()
+        );
+
+        // The display tree, fully opened, has one leaf row per genome.
+        let all: std::collections::HashSet<u32> = model.clusters.iter().map(|c| c.id).collect();
+        let display = model.display_tree(&all).expect("a backbone exists");
+        let laid = crate::layout::layout(&display);
+        assert_eq!(laid.rows as usize, 4);
+        assert!(laid
+            .nodes
+            .iter()
+            .all(|n| n.x.is_finite() && n.y.is_finite()));
+
+        // Section 9's files are on disk, and `events.jsonl` folds back into the
+        // same picture without recomputing anything.
+        for f in [
+            "genomes.tsv",
+            "clusters.tsv",
+            "tree.nwk",
+            "run.json",
+            "events.jsonl",
+        ] {
+            assert!(
+                out.join(f).is_file(),
+                "{f} is missing from the output folder"
+            );
+        }
+        let reopened = crate::open::read_folder(
+            &out,
+            &std::sync::atomic::AtomicU64::new(0),
+            &Context::default(),
+        )
+        .expect("the folder opens");
+        assert_eq!(reopened.genome_count(), model.genome_count());
+        assert_eq!(reopened.cluster_count(), model.cluster_count());
+        assert_eq!(reopened.counters, model.counters);
+        assert_eq!(
+            reopened
+                .clusters
+                .iter()
+                .map(|c| c.focus)
+                .collect::<Vec<_>>(),
+            model.clusters.iter().map(|c| c.focus).collect::<Vec<_>>()
+        );
+        assert_eq!(reopened.maps.len(), model.maps.len());
+
+        // Export works from a reopened folder, with the engine's own matrices.
+        let exp = dir.join("export");
+        let report = crate::export::write_all(&exp, &reopened, Some(&results));
+        assert!(report.ok(), "{:?}", report.errors);
+        assert!(exp.join("tree.nwk").is_file());
+        assert!(exp.join("genomes.tsv").is_file());
+        assert!(exp.join("clusters.tsv").is_file());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cancelled_run_still_reports_honestly() {
+        let dir = std::env::temp_dir().join(format!("mtato-gui-cancel-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let genomes = dir.join("genomes");
+        write_genomes(&genomes, 3, 30_000, 4);
+        let handle = start(
+            vec![genomes],
+            Parameters {
+                threads: 1,
+                ..Default::default()
+            },
+            dir.join("out"),
+            Context::default(),
+        )
+        .expect("starts");
+        // Cancelled straight away; whether the engine notices before it finishes
+        // depends on timing, so only the plumbing is asserted here.
+        assert!(handle.cancel());
+        let mut model = crate::state::UiModel::new(crate::state::Source::Live);
+        let res = drain_to_completion(&handle, &mut model);
+        assert!(res.is_ok(), "a cancellation is not an error: {res:?}");
+        assert!(!handle.is_running());
+        assert!(model.finished, "the window still learns the run is over");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cluster_distance_change_reaches_the_engine_and_reclusters() {
+        let dir = std::env::temp_dir().join(format!("mtato-gui-dist-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let genomes = dir.join("genomes");
+        write_genomes(&genomes, 4, 40_000, 40);
+        let handle = start(
+            vec![genomes],
+            Parameters {
+                threads: 2,
+                cluster_dist: 0.0001,
+                ..Default::default()
+            },
+            dir.join("out"),
+            Context::default(),
+        )
+        .expect("starts");
+        // Send the new threshold immediately, as dragging the slider does.
+        assert!(handle.set_cluster_dist(0.5));
+        let mut model = crate::state::UiModel::new(crate::state::Source::Live);
+        let res = drain_to_completion(&handle, &mut model);
+        assert!(res.is_ok(), "{res:?}");
+        // The engine echoes the change as a warning and re-clusters; whatever the
+        // outcome, the model must end up consistent and finished.
+        assert!(model.finished);
+        assert_eq!(model.genome_count(), 4);
+        assert!(
+            model.notes.iter().any(|n| n.text.contains("cluster_dist"))
+                || model.threshold != 0.0001,
+            "the slider change left no trace"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

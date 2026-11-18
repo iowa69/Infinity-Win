@@ -248,7 +248,10 @@ impl UiModel {
         self.events_seen += 1;
         match event {
             Event::GenomeScanned(g) => self.on_scanned(g),
-            Event::Clustered { threshold, clusters } => self.on_clustered(t_ms, threshold, clusters),
+            Event::Clustered {
+                threshold,
+                clusters,
+            } => self.on_clustered(t_ms, threshold, clusters),
             Event::BackboneTree { newick, pivots } => self.on_backbone(t_ms, newick, pivots),
             Event::ClusterFocus(info) => self.on_cluster_focus(t_ms, info),
             Event::MapUpdate(info) => self.on_map_update(*info),
@@ -588,11 +591,20 @@ impl UiModel {
     pub fn display_tree(&self, expanded: &HashSet<u32>) -> Option<DisplayNode> {
         let bb = self.backbone.as_ref()?;
         let ids = self.tree_name_index();
-        let mut root = layout::from_core(bb, fmt::FOCUS_SKETCH, true, &ids);
-        self.graft_clusters(&mut root, expanded, &ids);
-        root.kind = NodeKind::Root;
-        root.len = 0.0;
-        Some(root)
+        let mut top = layout::from_core(bb, fmt::FOCUS_SKETCH, true, &ids);
+        self.graft_clusters(&mut top, expanded, &ids);
+        Some(if matches!(top.kind, NodeKind::Internal) {
+            top.kind = NodeKind::Root;
+            top.len = 0.0;
+            top
+        } else {
+            // A run with one cluster has a single-leaf backbone, so the pivot
+            // leaf *is* the root. Wrap it: overwriting its kind would throw away
+            // the cluster's own node, its triangle and its length region.
+            let mut root = DisplayNode::new(NodeKind::Root, 0.0, fmt::FOCUS_SKETCH, true);
+            root.children = vec![top];
+            root
+        })
     }
 
     fn graft_clusters(
@@ -616,7 +628,8 @@ impl UiModel {
                         // A cluster of one genome is trivially exact and the
                         // engine emits no tree for it, so draw the pivot itself.
                         None if opened && single => {
-                            let mut s = DisplayNode::new(NodeKind::Internal, 0.0, focus, approximate);
+                            let mut s =
+                                DisplayNode::new(NodeKind::Internal, 0.0, focus, approximate);
                             s.children = vec![DisplayNode::new(
                                 NodeKind::Genome {
                                     id: c.pivot,
@@ -664,7 +677,10 @@ impl UiModel {
 
     /// Members of a cluster that have map data, in id order.
     pub fn mapped_members(&self, cluster: u32) -> Vec<u32> {
-        let mut v: Vec<u32> = self.maps.get(&cluster).map(|m| m.keys().copied().collect())
+        let mut v: Vec<u32> = self
+            .maps
+            .get(&cluster)
+            .map(|m| m.keys().copied().collect())
             .unwrap_or_default();
         v.sort_unstable();
         v
@@ -717,7 +733,10 @@ impl SortSpec {
             // interesting end is the large one.
             Self {
                 column,
-                ascending: !matches!(column, SortColumn::Length | SortColumn::Contigs | SortColumn::N50),
+                ascending: !matches!(
+                    column,
+                    SortColumn::Length | SortColumn::Contigs | SortColumn::N50
+                ),
             }
         }
     }
@@ -757,7 +776,10 @@ pub fn sorted_indices(genomes: &[GenomeRow], filter: &str, spec: &SortSpec) -> V
             SortColumn::Length => ga.length.cmp(&gb.length),
             SortColumn::Contigs => ga.contigs.cmp(&gb.contigs),
             SortColumn::N50 => ga.n50.cmp(&gb.n50),
-            SortColumn::Gc => ga.gc.partial_cmp(&gb.gc).unwrap_or(std::cmp::Ordering::Equal),
+            SortColumn::Gc => ga
+                .gc
+                .partial_cmp(&gb.gc)
+                .unwrap_or(std::cmp::Ordering::Equal),
             SortColumn::Focus => ga.focus.cmp(&gb.focus),
         };
         let ord = if spec.ascending { ord } else { ord.reverse() };
@@ -911,15 +933,34 @@ mod tests {
                 approximate: true,
                 newick: "(aaa:1,bbb:2);".to_string(),
                 members: vec![
-                    MemberNumbers { id: 0, name: "aaa".into(), diff_pieces: 3, snps: 0, indels: 0, uncovered_bp: 0, novel_bp: 0 },
-                    MemberNumbers { id: 1, name: "bbb".into(), diff_pieces: 5, snps: 0, indels: 0, uncovered_bp: 10, novel_bp: 2 },
+                    MemberNumbers {
+                        id: 0,
+                        name: "aaa".into(),
+                        diff_pieces: 3,
+                        snps: 0,
+                        indels: 0,
+                        uncovered_bp: 0,
+                        novel_bp: 0,
+                    },
+                    MemberNumbers {
+                        id: 1,
+                        name: "bbb".into(),
+                        diff_pieces: 5,
+                        snps: 0,
+                        indels: 0,
+                        uncovered_bp: 10,
+                        novel_bp: 2,
+                    },
                 ],
             }),
         );
         assert_eq!(m.cluster(0).unwrap().focus, 1);
         assert!(m.cluster(0).unwrap().approximate);
         assert!(m.cluster(0).unwrap().tree.is_some());
-        assert_eq!(m.genome(1).unwrap().numbers.as_ref().unwrap().diff_pieces, 5);
+        assert_eq!(
+            m.genome(1).unwrap().numbers.as_ref().unwrap().diff_pieces,
+            5
+        );
         assert_eq!(m.genome(1).unwrap().focus, 1);
         // Cluster 1 is a singleton, which is exact from the start, so it counts
         // as refined too.
@@ -1000,26 +1041,38 @@ mod tests {
             },
         );
         assert_eq!(m.threshold, 0.01);
-        assert_eq!(m.cluster(0).unwrap().focus, 2, "cached by the engine, so kept");
+        assert_eq!(
+            m.cluster(0).unwrap().focus,
+            2,
+            "cached by the engine, so kept"
+        );
         assert!(m.cluster(0).unwrap().tree.is_some());
     }
 
     #[test]
     fn counters_accumulate_and_the_summary_overrides_them() {
         let mut m = UiModel::new(Source::Live);
-        let mut c1 = Counters::default();
-        c1.pieces_compared = 10;
-        let mut c2 = Counters::default();
-        c2.pieces_compared = 5;
+        let c1 = Counters {
+            pieces_compared: 10,
+            ..Default::default()
+        };
+        let c2 = Counters {
+            pieces_compared: 5,
+            ..Default::default()
+        };
         m.apply(0.0, Event::Counters(c1));
         m.apply(0.0, Event::Counters(c2));
         // The engine emits one Counters event per cluster, so the interface sums
         // them; the summary then carries the authoritative total.
         assert_eq!(m.counters.pieces_compared, 15);
-        let mut total = Counters::default();
-        total.pieces_compared = 15;
-        let mut s = RunSummary::new("test", Parameters::default());
-        s.counters = total;
+        let total = Counters {
+            pieces_compared: 15,
+            ..Default::default()
+        };
+        let s = RunSummary {
+            counters: total,
+            ..RunSummary::new("test", Parameters::default())
+        };
         m.apply(1.0, Event::Finished(Box::new(s)));
         assert_eq!(m.counters.pieces_compared, 15, "not 30");
         assert!(m.finished);
@@ -1188,14 +1241,21 @@ mod tests {
         assert_eq!(collapsed.children.len(), 2);
         assert!(matches!(
             collapsed.children[0].kind,
-            NodeKind::ClusterCollapsed { id: 0, members: 2, .. }
+            NodeKind::ClusterCollapsed {
+                id: 0,
+                members: 2,
+                ..
+            }
         ));
         // The singleton cluster is opened, so its genome becomes a leaf.
         let mut open = HashSet::new();
         open.insert(1u32);
         let t = m.display_tree(&open).unwrap();
-        let c = t.children.iter().find(|c| c.kind.cluster() == Some(1)).unwrap();
-        assert!(matches!(c.kind, NodeKind::ClusterRoot { id: 1, .. }));
+        let c = t
+            .children
+            .iter()
+            .find(|c| matches!(c.kind, NodeKind::ClusterRoot { id: 1, .. }))
+            .unwrap();
         assert_eq!(c.children.len(), 1);
         assert_eq!(c.children[0].kind.name(), Some("ccc"));
         // The cluster's own focus, not the backbone's, travels with the subtree.
@@ -1210,23 +1270,98 @@ mod tests {
     }
 
     #[test]
+    fn a_single_cluster_backbone_keeps_its_cluster_node() {
+        // One cluster means a one-leaf backbone, so the pivot leaf is the root.
+        // It must still come out as a cluster node, or the tree loses its
+        // triangle and its own length region.
+        let mut m = UiModel::new(Source::Live);
+        for i in 0..3u32 {
+            m.apply(0.0, scan_event(i, &format!("g{i}"), 1000, 1));
+        }
+        m.apply(0.0, clustered_event(&[(0, 0, &[0, 1, 2])]));
+        m.apply(
+            0.0,
+            Event::BackboneTree {
+                newick: "g0;".to_string(),
+                pivots: vec!["g0".into()],
+            },
+        );
+        m.apply(
+            0.0,
+            Event::ClusterFocus(ClusterFocusInfo {
+                cluster: 0,
+                focus: 2,
+                approximate: false,
+                newick: "(g0:1,(g1:2,g2:3));".to_string(),
+                members: vec![],
+            }),
+        );
+
+        let collapsed = m.display_tree(&HashSet::new()).unwrap();
+        assert_eq!(collapsed.kind, NodeKind::Root);
+        assert_eq!(collapsed.children.len(), 1);
+        assert!(matches!(
+            collapsed.children[0].kind,
+            NodeKind::ClusterCollapsed {
+                id: 0,
+                members: 3,
+                focus: 2
+            }
+        ));
+        let l = layout::layout(&collapsed);
+        assert_eq!(l.rows, 1.0);
+
+        let mut open = HashSet::new();
+        open.insert(0u32);
+        let opened = m.display_tree(&open).unwrap();
+        assert!(matches!(
+            opened.children[0].kind,
+            NodeKind::ClusterRoot {
+                id: 0,
+                members: 3,
+                focus: 2
+            }
+        ));
+        let l = layout::layout(&opened);
+        assert_eq!(l.rows, 3.0, "all three genomes become leaves");
+        assert_eq!(l.regions.len(), 2, "the backbone and the opened cluster");
+        assert_eq!(l.regions[1].unit, "SNPs");
+        assert_eq!(l.regions[1].cluster, Some(0));
+    }
+
+    #[test]
     fn filtering_is_case_insensitive_and_substring_based() {
         let m = three_genomes();
-        assert_eq!(sorted_indices(&m.genomes, "", &SortSpec::default()).len(), 3);
-        assert_eq!(sorted_indices(&m.genomes, "BB", &SortSpec::default()).len(), 1);
-        assert_eq!(sorted_indices(&m.genomes, "zz", &SortSpec::default()).len(), 0);
+        assert_eq!(
+            sorted_indices(&m.genomes, "", &SortSpec::default()).len(),
+            3
+        );
+        assert_eq!(
+            sorted_indices(&m.genomes, "BB", &SortSpec::default()).len(),
+            1
+        );
+        assert_eq!(
+            sorted_indices(&m.genomes, "zz", &SortSpec::default()).len(),
+            0
+        );
     }
 
     #[test]
     fn sorting_orders_by_the_chosen_column_and_breaks_ties_by_id() {
         let m = three_genomes();
-        let by_len = SortSpec { column: SortColumn::Length, ascending: false };
+        let by_len = SortSpec {
+            column: SortColumn::Length,
+            ascending: false,
+        };
         let ids: Vec<u32> = sorted_indices(&m.genomes, "", &by_len)
             .iter()
             .map(|&i| m.genomes[i].id)
             .collect();
         assert_eq!(ids, vec![2, 1, 0]);
-        let by_len_asc = SortSpec { column: SortColumn::Length, ascending: true };
+        let by_len_asc = SortSpec {
+            column: SortColumn::Length,
+            ascending: true,
+        };
         let ids: Vec<u32> = sorted_indices(&m.genomes, "", &by_len_asc)
             .iter()
             .map(|&i| m.genomes[i].id)
@@ -1237,7 +1372,10 @@ mod tests {
         let mut rows = m.genomes.clone();
         rows[0].contigs = 5;
         rows[1].contigs = 5;
-        let spec = SortSpec { column: SortColumn::Contigs, ascending: true };
+        let spec = SortSpec {
+            column: SortColumn::Contigs,
+            ascending: true,
+        };
         let ids: Vec<u32> = sorted_indices(&rows, "", &spec)
             .iter()
             .map(|&i| rows[i].id)
@@ -1260,7 +1398,11 @@ mod tests {
         assert!(s.toggled(SortColumn::Name).ascending);
         assert!(s.toggled(SortColumn::Focus).ascending);
         // Clicking the same new column again flips it.
-        assert!(s.toggled(SortColumn::Length).toggled(SortColumn::Length).ascending);
+        assert!(
+            s.toggled(SortColumn::Length)
+                .toggled(SortColumn::Length)
+                .ascending
+        );
     }
 
     #[test]
