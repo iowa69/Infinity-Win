@@ -1,446 +1,160 @@
 # Infinity-Win
 
-**Progressive, cluster-first, position-aware comparison of nearly identical
-genomes, with a live tree that sharpens while the computation runs.**
+**Compare hundreds of nearly identical bacterial genomes down to single SNPs, in
+seconds to minutes, and watch the tree sharpen while it works.**
 
-Infinity-Win takes a set of assembled genomes and answers, in that order and as fast as
-it can: *which genomes are near each other* → *where do they differ* → *what
-exactly differs, base by base*. Every number it shows carries a **focus level**,
-so you always know whether you are looking at a sketch estimate or an exact count.
+### [⬇ Download for Windows (portable zip)](https://github.com/iowa69/Infinity-Win/releases/latest/download/Infinity-Win-windows-x64.zip) · [Linux](https://github.com/iowa69/Infinity-Win/releases/latest/download/Infinity-Win-linux-x64.zip)
 
-```
-Focus 0   sketch only          seconds    "these 41 genomes form a cluster"
-Focus 1   blocks compared      ~10x more  "this member differs in 8 places"
-Focus 2   exact, base level     minutes    "2 SNPs, at these positions, these bases"
-```
-
-It is designed for bacterial assemblies of 0.5–15 Mb, from tens up to a few
-thousand genomes, that are **already close** — outbreak investigation,
-transmission clustering, within-host evolution. It is not a phylogenetics package
-and it is not a read mapper.
-
-Infinity-Win was developed under the working name **M-Tato**; older commits and
-`DECISIONS.md` entries use that name.
-
-## What's new in 0.2
-
-- **SNP rules that make the counts match read-based pipelines.** Every
-  difference is still reported, but only differences in the **core genome**
-  that pass the rules count towards distances and trees. Rejected calls are
-  *masked*, so they leave the denominator too:
-
-  | rule | what it removes |
-  |---|---|
-  | core genome | bases that any genome of the cluster does not cover |
-  | short contigs | pivot contigs under 5 kb (collapsed repeats, plasmid fragments) |
-  | contig ends | 150 bp at each end of every pivot contig |
-  | high-copy contigs | pivot contigs with more than 1.8x the typical coverage (when the assembler wrote coverage into the contig names) |
-  | engine flags | calls the engine itself marked uncertain (`repeat`, `end_ext`, ...) |
-  | SNP clusters | more SNPs in a 1 kb or 100 bp window than a Poisson process allows (recombination, misassembly) |
-  | four-gamete test | sites whose alleles form all four combinations with two or more neighbours: they cannot be single clonal mutations (recombination, collapsed repeats) |
-
-  Every file keeps both: `snps` (after the rules) and `raw_snps` (everything).
-  Each variant row says `PASS` or why it does not count.
-- **A contig-end bug fixed.** Extension at contig ends started from the wrong
-  end of a matched block, leaving about 800 bp per contig uncompared on
-  fragmented assemblies and occasionally inventing SNPs. Now about 70 bp.
-- **Resolution setting.** `--resolution sketch | blocks | exact` decides how far
-  iterative refinement goes, and `--snp-thresholds 5,10,20` groups genomes into
-  SNP clusters (single linkage) at each cut-off.
-- **Trees in SNPs.** `tree.nwk` now has branch lengths in SNPs. Clusters whose
-  pivots are within 1% of each other are compared exactly, so the branches
-  between them are SNP counts too.
-- **New result files:** `results.xlsx` (Excel workbook), square SNP matrices,
-  `snp_clusters.tsv`, a VCF and a core-SNP alignment per cluster, `tree.svg`.
-- **Desktop program:** panels no longer overlap on laptop screens, the tree is
-  drawn in SNPs with a scale bar, a Settings window groups the parameters, and
-  the look was reworked.
-- **Portable Windows build:** a zip with `Infinity-Win.exe` and `infinity.exe`
-  that needs nothing installed.
-
-## Validation on real data
-
-Details and commands are in `docs/VALIDATION.md`. In short, against SKA2 run on
-the **reads** (the closest available truth):
-
-| dataset | genomes | result |
-|---|---|---|
-| *Salmonella* Heidelberg outbreak trio | 3 | exactly 2 / 0 / 2 SNPs, as published (0.1: 17 / 4 / 2) |
-| *Salmonella* NCBI Pathogen Detection cluster | 32 | 494 of 496 pairs within 5 SNPs, worst 6, correlation 0.977 (0.1: 0.41) in 1.8 s |
-| *S. aureus* bloodstream cohort, the 4 transmission pairs | 137 | Infinity-Win 8, 8, 14, 15 SNPs; SKA2 on reads 6, 8, 8, 15; checked base by base in the raw reads: 8, (not checked), 8 + 2 unclear, 14. All 137 genomes in 28 s |
-| real *S. aureus* genomes, simulated descendants cut into 60 contigs, known truth | 150 | no pair over-reported; 93% of true SNPs inside the core |
-
-Where Infinity-Win still over-counts, the reads show collapsed repeats: both
-alleles present in each isolate, which an assembly cannot reveal. For pairs
-hundreds of SNPs apart, the rules remove recombination-dense windows, so counts
-are lower than SKA2's; use `raw_snps` there.
-
-## Screenshots
-
-**During a run.** 180 simulated genomes in 6 clusters. Two clusters are already
-exact ("sharp"); the other four still show their sketch estimate (dotted,
-"blurry ≈"). Distances are drawn in SNPs, with an approximate scale between
-clusters.
-
-![Infinity-Win during a run](docs/screenshots/live-run.png)
-
-**Finished.** Two clusters opened into their exact SNP trees with a scale bar in
-SNPs, two genomes selected (17 SNPs and 7 indels apart, shown above the tree),
-and the map of one cluster: each row is a genome against the cluster's pivot,
-red ticks are SNPs and blue ticks are insertions and deletions. The Run panel on
-the right exports trees (Newick, NEXUS for FigTree, iTOL), tables, the Excel
-workbook, SNP matrices, the VCF, the SNP alignment and pictures (SVG, PNG).
+Nothing to install: unzip and double-click `Infinity-Win.exe`. While this
+repository is private, the links work only when you are signed in to GitHub with
+access to it.
 
 ![Infinity-Win after a run](docs/screenshots/finished-run.png)
 
-**Settings.** How far to refine (Sketch, Blocks or Exact SNPs), the cluster
-distance as % identity, whether to sharpen the distances between clusters, the
-SNP thresholds for SNP clusters, and the SNP rules.
+## What it does
 
-![Infinity-Win settings](docs/screenshots/settings.png)
+- **Groups your genomes into clusters** of close relatives, from a quick sketch
+  of each genome (seconds).
+- **Compares the genomes inside each cluster base by base** and counts the SNPs
+  between every pair, ignoring the kinds of differences that are usually
+  assembly artefacts (repeats, contig ends, recombination).
+- **Shows a tree that starts blurry and becomes exact** while it runs, and
+  writes an Excel workbook, SNP matrices, trees, a VCF and pictures.
 
-## Install
+Input: assembled genomes (`.fasta`, `.fa`, `.fna`, optionally `.gz`), one file
+per genome, contigs are fine.
 
-### From source (Linux and Windows)
+## Start in three steps
 
-You need a stable Rust toolchain. There is no C toolchain requirement, no
-Python runtime, and no external bioinformatics tool to install: the aligner, the
-neighbour-joining tree code, the Newick reader/writer and the Robinson–Foulds
-distance are all implemented in the project.
+1. Unzip the download anywhere and double-click **Infinity-Win.exe**. (Windows
+   may warn that the program is not signed: *More info → Run anyway*.)
+2. Click **+ Genomes**, or drag a folder of genomes onto the window.
+3. Click **Run**.
 
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone <this repository> && cd Infinity-Win
-cargo build --release
-```
+Clusters appear within seconds as blurry triangles and turn into exact SNP
+trees one by one. Click a cluster to open it, select two genomes to see their
+SNP distance, and use the **Run** panel on the right to export.
 
-Two binaries land in `target/release/`:
+## The one setting that matters: cluster distance
 
-| Binary | What it is |
+**What it does.** Infinity-Win only compares genomes base by base when they are
+in the same cluster. The cluster distance decides how similar two genomes must
+be to share a cluster:
+
+- Genomes **in the same cluster** get **exact SNP distances** to each other.
+- Genomes **in different clusters** only get an estimate (exact SNPs between
+  clusters only when their representative genomes are within 1%).
+
+So the cluster distance must be **wide enough** to put every pair you care
+about in the same cluster, and **narrow enough** that one cluster does not mix
+distant lineages.
+
+| if the cluster distance is | what happens |
 |---|---|
-| `infinity` | the command-line tool: `run`, `simulate`, `bench` |
-| `Infinity-Win` | the desktop program |
+| **too small** | close genomes end up in different clusters, so you get no exact SNP distance between them; many single-genome clusters |
+| **too large** | different lineages share a cluster: the run is slower, and the core genome (the part every member shares, where SNPs are counted) shrinks, so fewer SNPs are counted |
 
-On Windows the same commands work in PowerShell or `cmd`. Prebuilt binaries for
-Windows x86-64 and Linux x86-64 are produced by `.github/workflows/release.yml`
-and attached to the release; see `DECISIONS.md` D4 for why cross-compiling from
-Linux is not part of the local build.
+**What the numbers mean.** The distance is roughly the fraction of bases that
+differ (1 − identity):
 
----
+| cluster distance | identity | ≈ SNPs apart, 2.8 Mb genome (*S. aureus*) | ≈ SNPs apart, 5 Mb genome (*E. coli*, *Salmonella*) |
+|---|---|---|---|
+| 0.001 | 99.9% | 2,800 | 5,000 |
+| 0.003 | 99.7% | 8,400 | 15,000 |
+| **0.005 (default)** | **99.5%** | **14,000** | **25,000** |
+| 0.01 | 99.0% | 28,000 | 50,000 |
 
-## Quick start
+Outbreak and transmission thresholds are usually 5–50 SNPs, far below all of
+these, so even 0.001 keeps a transmission pair together. The question is how
+much **context** you want in each cluster: the default 0.005 groups roughly a
+sequence type or clonal complex.
 
-Point it at a folder of assemblies. One file is one genome; `.fa`, `.fasta` and
-`.fna`, plain or gzipped, are accepted.
-
-```sh
-infinity run ./assemblies -o ./results
-```
-
-```
-[    0.00s] discover  312/312
-[    2.14s] scan      312/312
-[    2.31s] clustered 312 genomes into 12 clusters at d<=0.005 (largest 88)
-[    2.34s] backbone tree ready over 12 clusters  <-- first blurry tree
-[   41.87s] refine    12/12
-genomes 312 | clusters 12 | focus 0/1/2 = 0/0/312 | first tree 2.34s | exact 41.90s
-output written to ./results
-```
-
-Then look at the results:
-
-```sh
-column -t -s$'\t' results/clusters.tsv      # which genomes cluster together
-less results/cluster_3.variants.tsv         # every difference, with positions
-cat results/tree.nwk                        # the full tree
-```
-
-Or open the folder in the GUI, which reads a finished run without recomputing it:
-
-```sh
-Infinity-Win
-```
-
-### A worked example with known truth
-
-The simulator produces genomes together with the answer, which is the fastest way
-to see whether the tool is behaving:
-
-```sh
-infinity simulate -o /tmp/sim --seed 42 --length 2000000 -m 1 -n 50 --mean-snps 3
-infinity run /tmp/sim/genomes -o /tmp/out
-infinity bench --output /tmp/out --truth /tmp/sim/truth
-```
+**How to choose for your data.** Let the data decide, in seconds:
 
 ```
-  distances:
-    pairs in truth 1225 | compared 1225 | missing 0
-    exact 1225 | max |error| 0 | mean |error| 0.000
-    fraction exact 1.0000 | sum reported / sum true 1.0000
-  clusters:
-    true 1 | reported 1 | recovered exactly 1 | pairwise F1 1.0000
-  trees:
-    cluster_0  vs tree_c00  leaves 50  RF 0  normalised 0.0000
+infinity thresholds <your genome folder>
 ```
 
----
-
-## `infinity run`
+It sketches the genomes and shows, for each candidate distance, how many
+clusters you would get and how many genome pairs sit right at the cut. A
+distance with few pairs near the cut lies in a natural gap of your data, so the
+clusters will not change with small differences. On the 137-genome *S. aureus*
+bloodstream cohort of the validation it printed:
 
 ```
-infinity run <files or folders...> -o <outdir> [options]
+ distance   identity  ~SNPs apart  clusters  singletons  largest  near the cut
+    0.001     99.90%         2743        46          25       15          418
+    0.003     99.70%         8228        24          11       19           73
+    0.005     99.50%        13714        24          11       19          948
+     0.01     99.00%        27428        10           4       68         3706
+Suggested cluster distance: 0.003 (99.70% identity, 24 clusters).
 ```
 
-### Parameters (defaults from section 6.1 of the design outline)
+**Rules of thumb**
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--k` | 31 | Anchor k-mer length. Must be odd, at most 31. |
-| `--densities` | `16384,2048,256` | One anchor per this many k-mers at levels 1, 2, 3. Each must divide the previous. |
-| `--sketch-level` | 2 | Level whose anchors form the sketch used for clustering. |
-| `--cluster-dist` | 0.005 | Sketch distance threshold for joining a cluster (≈99.5% identity). |
-| `--max-span-ratio` | 10 | Collinearity limit on span ratio. |
-| `--max-span-extra` | 50000 | Collinearity limit slack, in bases. |
-| `--dp-max-len` | 5000 | Longest trimmed piece aligned by dynamic programming. |
-| `--min-identity` | 0.70 | Below this, a piece is reported as one `complex` variant. |
-| `--xdrop` | 15 | Stop rule for ungapped extension at contig ends. |
-| `--threads` | all cores | Worker threads. `0` means all. |
-| `--memory-budget` | ¼ of RAM | Bytes of non-pivot sequence kept before re-reading from disk. |
+- **Outbreak, transmission, within-host:** keep the default 0.005, or use the
+  suggestion from `infinity thresholds`.
+- **Population structure of one species:** 0.003–0.005 gives roughly one cluster
+  per lineage.
+- **Never above 0.01** (99% identity): the comparison becomes slower and less
+  exact. **Never below 0.001**: the sketch cannot measure such small distances
+  reliably.
+- **Check the result:** in the Excel *Clusters* sheet (or `clusters.tsv`), the
+  *core genome* of each cluster should be at least about 85% of the genome
+  length. If it is smaller, that cluster is too diverse: lower the distance.
 
-If the median genome is under 500 kb the densities are automatically switched to
-`1024,128,16` and a warning is logged — at 256-base spacing a small genome would
-produce too few anchors to map.
+Set it in **Settings → Resolution → Cluster distance** (shown with its %
+identity) before clicking Run, or with `--cluster-dist` on the command line.
 
-### Experiment switches
+## Other settings, briefly
 
-Each of these removes one part of the idea so that its cost can be measured. They
-exist for the benchmark in section 11 and are not normally used.
+- **How far to refine:** *Sketch* (clusters only, seconds), *Blocks* (where
+  genomes differ), *Exact SNPs* (default).
+- **SNP thresholds** (default 5, 10, 20): genomes linked by chains of at most
+  that many SNPs are grouped into SNP clusters, reported per genome in the
+  Excel workbook and `snp_clusters.tsv`.
+- **SNP rules** (on by default): only differences in the core genome that are
+  not near contig ends, not on short or high-copy contigs, and not in
+  recombination-like clusters count. Turning them off counts every difference;
+  every file keeps both numbers anyway.
 
-| Flag | Removes |
+## What you get
+
+| file | what it is |
 |---|---|
-| `--flat` | The nested levels; only leaf blocks are used. |
-| `--no-block-skip` | Block hashing entirely; every stretch between shared anchors is compared directly. |
-| `--no-piece-cache` | Resolving a shared difference once. |
-| `--no-profile-grouping` | Handling identical genomes once. |
-| `--single-cluster` | Cluster-first; every genome is compared to one pivot. |
-| `--focus0-only` | Refinement; stop at the blurry tree. |
+| `results.xlsx` | Excel workbook: settings, genomes, clusters, one SNP matrix per cluster, variants |
+| `cluster_<id>.snp_matrix.tsv` | square SNP distance matrix of one cluster |
+| `tree.nwk`, `tree.svg` | the full tree with branch lengths in SNPs, as Newick and as a picture |
+| `snp_clusters.tsv` | each genome's SNP cluster at every SNP threshold |
+| `cluster_<id>.vcf`, `cluster_<id>.core_snps.fasta` | SNPs as VCF, and the core SNP alignment for IQ-TREE or Gubbins |
 
-`--flat`, `--no-piece-cache` and `--no-profile-grouping` leave the variants,
-distances and trees unchanged, which is asserted by a test. `--no-block-skip`
-does not: see `DECISIONS.md` D16.
+The desktop program also exports NEXUS (FigTree), iTOL datasets, SVG and PNG.
 
-### Output folder
+## How accurate is it
 
-| File | Content |
+Compared with SKA2 run on the sequencing reads:
+
+| data | result |
 |---|---|
-| `genomes.tsv` | One row per genome: length, contigs, N50, GC, cluster, is_pivot, focus, SNPs vs pivot (all), indels vs pivot, uncovered bp, novel bp, passing SNPs vs pivot. |
-| `clusters.tsv` | Cluster id, pivot, pivot name, size, focus, core genome bp. |
-| `tree.nwk` | The full tree, branch lengths in **SNPs**. Between clusters these are exact for pivots within 1% of each other and sketch estimates beyond. |
-| `tree.subs_per_site.nwk` | The same tree in substitutions per site. |
-| `tree.svg` | A picture of the full tree with an SNP scale bar, tips coloured by cluster. |
-| `results.xlsx` | Excel workbook: Summary (settings), Genomes, Clusters, one SNP matrix per cluster, Between clusters, Variants. |
-| `snp_clusters.tsv` | SNP-cluster label of every genome at each `--snp-thresholds` cut-off. |
-| `cluster_<id>.snp_matrix.tsv` | Square SNP matrix after the SNP rules; `.raw_snp_matrix.tsv` before them. |
-| `cluster_<id>.vcf` | SNPs against the pivot, one sample column per genome, `FILTER` and per-call `FT` reasons. |
-| `cluster_<id>.core_snps.fasta` | Core SNP alignment (passing sites only), ready for IQ-TREE or Gubbins-style tools. |
-| `cluster_<id>.nwk` | One cluster's tree, branch lengths in SNP counts. |
-| `cluster_<id>.dist.tsv` | Pairwise SNP counts, indel counts and comparable bp after the SNP rules, then the same before them (`raw_*`). |
-| `cluster_<id>.variants.tsv` | Every difference from the pivot: genome, pivot contig, pivot position (1-based), ref, alt, type, genome contig, genome position, strand, flags, and `filter` (`PASS` or why it does not count). |
-| `run.json` | Parameters, version, per-stage timings, counters, peak memory. |
-| `events.jsonl` | The timestamped event stream, one JSON object per line. |
+| *Salmonella* outbreak trio | exactly the published 2 / 0 / 2 SNPs |
+| 32-genome *Salmonella* outbreak cluster | 494 of 496 pairs within 5 SNPs, correlation 0.977, 1.8 s |
+| 137-genome *S. aureus* cohort | transmission pairs at 8, 8, 14, 15 SNPs; first tree in 0.6 s, all exact in 28 s |
 
-**Coordinates.** Inside the program everything is 0-based and half-open. In the
-files it is 1-based, converted in one place. For an insertion the reported
-position is that of the base the insertion sits *after*, so an insertion and the
-matching deletion report the same coordinate. That convention applies to **both**
-coordinate columns of a variant row: `pivot_pos` and `genome_pos` are converted
-the same way, so for a forward-strand insertion the two are the same number and
-the row is self-consistent.
+Details: [docs/VALIDATION.md](docs/VALIDATION.md). Known limit: SNPs inside
+repeats that the assembler collapsed into one copy cannot be recognised from
+assemblies alone, and can add a few SNPs to a pair.
 
-**Variant types** are `snp`, `ins`, `del` and `complex`. A `complex` variant means
-the piece was too divergent or too long to resolve into individual events; it is
-excluded from coverage rather than being guessed at.
+## Command line
 
-**Flags** on a variant: `repeat` (the block matched a pivot repeat, so the copy
-chosen may be wrong), `low_identity`, `align_failed`, `end_ext` (found by
-end-of-contig extension rather than between two anchors), `dup` (the interval is
-covered by two or more places of the member), `break_ext` (found by extending
-across a breakpoint such as a pivot contig junction; not counted by default).
-
-**`run.json` timings can be `null`.** A `null` means the stage did not complete —
-for example `exact_tree_ms` on a cancelled run. It is never written as `0`,
-because "instant" and "never" are different claims.
-
----
-
-## `infinity simulate`
-
-Deterministic for a given seed: the same seed and configuration produce
-byte-identical FASTA files and truth files.
-
-```sh
-infinity simulate -o <outdir> [--seed 1] [--reference REF.fasta | --length 2000000 --gc 0.5]
-               [-m CLUSTERS] [-n LEAVES] [--divergence 0.02]
-               [--mean-snps 3] [--mean-indels 0] [--mean-segments 0] [-c CONTIGS]
+```
+infinity thresholds genomes/                      # suggest a cluster distance
+infinity run genomes/ -o results/                 # compare, write everything
+infinity run genomes/ -o results/ --cluster-dist 0.003 --snp-thresholds 5,20
+Infinity-Win --open results/                      # explore a finished run
 ```
 
-It writes one FASTA per leaf genome under `genomes/`, the cluster roots under
-`roots/`, and the truth under `truth/`:
+## More
 
-| File | Content |
-|---|---|
-| `truth/tree_c<NN>.nwk` | The true tree per cluster, branch lengths in SNPs. |
-| `truth/pairwise_snps.tsv` | True pairwise SNP counts. |
-| `truth/clusters.tsv` | True cluster of each genome. |
-| `truth/mutations_<genome>.tsv` | Every mutation on each lineage. |
-| `truth/manifest.json` | The configuration and seed, so a dataset can be replayed exactly. |
-
-Every SNP is placed at a position never mutated before on that lineage, so the
-true distance between two leaves is exactly the path length between them in the
-truth tree. That is what makes the truth tests meaningful.
-
----
-
-## `infinity bench`
-
-Compares an output folder with a truth folder and writes the measurements as
-JSON. This is what the experiment in section 11 is built on.
-
-```sh
-infinity bench --output <outdir> --truth <truthdir> [--json bench.json] [--collapse-below 0.5] [--quiet]
-```
-
-It reports: distance accuracy (pairs exact, maximum absolute error, reported/true
-total), cluster recovery (exact clusters and pairwise co-clustering F1), and tree
-accuracy as a Robinson–Foulds distance after collapsing branches shorter than
-`--collapse-below` SNPs — the resolution section 11 asks for, so that a branch of
-less than half a SNP cannot count as a topological difference. It also reads
-`events.jsonl` to give every emitted tree a timestamp, which is the x axis of the
-accuracy-over-time figure.
-
-Trees are matched by leaf set, not by cluster number, because the reported
-cluster ids need not agree with the truth's. A `tree.nwk` comparison is reported
-in substitutions-per-site units and a `cluster_<id>.nwk` comparison in SNP units;
-the JSON records which, because the collapse threshold is only meaningful in SNP
-units.
-
----
-
-## The desktop program
-
-Start it from a terminal to come up ready:
-
-```sh
-Infinity-Win --run -o results/ genomes_folder/ more_genomes/   # load and start
-Infinity-Win --open results/                                    # explore a finished run
-```
-
-One window, four panels: genomes on the left, the tree in the middle, parameters
-and live counters on the right, and the map along the bottom.
-
-- **Live.** The window never blocks while computing. Every stage streams events,
-  and the tree redraws as focus improves: Focus 0 branches are dashed and pale,
-  Focus 1 solid and thin with an `≈` marker, Focus 2 solid and dark. Nodes move
-  smoothly to their new places when a cluster is refined.
-- **Clusters start collapsed** as a triangle with the member count. Click to open.
-  Clicking a cluster also moves it to the front of the refinement queue, so you
-  can look at the cluster you care about first.
-- **The cluster-distance slider takes effect immediately.** It re-clusters from
-  the stored sketches; clusters whose pivot and members are unchanged keep their
-  results, and only the others are refined again.
-- **The map panel** shows the pivot as a horizontal axis with one row per selected
-  member: grey line where identical, orange box for a difference piece not yet
-  resolved, red tick for a SNP, blue tick for an indel, purple box for a complex
-  variant, triangle for a breakpoint, gap where not covered. In hierarchical mode
-  a region that failed at level 1 is shown as a wide pale box that narrows as
-  levels 2 and 3 are checked — the zoom made visible.
-- **Select two leaves** to see their pairwise distance, SNP count and focus.
-- **Export** the tree as Newick or PNG, plus the distance matrices, variants and
-  clusters.
-- **Open a finished run** from its output folder and browse it without
-  recomputing.
-
-Genome folders are added by dragging them onto the window or by typing a path,
-with a list of recently used folders. A native file-picker dialog is deliberately
-not used; see `DECISIONS.md` D3.
-
----
-
-## How it works, briefly
-
-1. **One hash pass feeds every level.** Sliding a window of `k` bases along each
-   contig produces canonical k-mer hashes. The same hashes serve as the sketch
-   (blurry comparison), as anchors (mapping) and as cut points for nested blocks
-   (zoom).
-2. **Nested content-defined blocks.** Contigs are cut at anchors into blocks of
-   about 16 kb, 2 kb and 256 bp. A block whose hash the pivot already knows is
-   identical and is skipped without looking inside. Block hashes are
-   strand-independent, so a reverse-complemented contig still matches.
-3. **Cluster first.** Genomes are clustered greedily against pivots only, through
-   an inverted index of sketch hashes — never all-versus-all. The most contiguous
-   assembly of each cluster becomes its pivot. Fine comparison happens inside
-   clusters.
-4. **Position is never lost.** Shared points anchor the member onto the pivot;
-   the stretches between them are compared base by base. Every difference maps
-   back to a position on the pivot, so variants can be reported, flagged and
-   drawn.
-
-Full detail is in `PROJECT.md` sections 5–6.
-
----
-
-## Development
-
-```sh
-cargo test --workspace                      # 152 core unit tests + 19 integration tests
-cargo clippy --workspace --all-targets      # must be warning-free
-cargo fmt --all -- --check
-cargo check --target x86_64-pc-windows-msvc # portability gate
-```
-
-The integration tests in `tests/` are the ones that matter most:
-
-- `tests/tests/properties.rs` — the six properties of section 10.2 that must
-  always hold, including "same input gives byte-identical output with 1 thread and
-  with many" and "every optimisation switch gives the same answer".
-- `tests/tests/truth.rs` — the truth tests T1–T5 of section 10.3, run against
-  simulated genomes with known answers.
-
-### Benchmark
-
-```sh
-scripts/run_matrix.py --dry-run     # show the configuration x dataset matrix
-scripts/run_matrix.py               # run it
-scripts/make_report.py              # write REPORT.md
-scripts/README.md                   # the full procedure
-```
-
----
-
-## Limitations
-
-These are real and are described in `PROJECT.md` section 15. `DECISIONS.md`
-records where the implementation deviates from the design, with measurements.
-
-- **Pivot bias.** Sequence the pivot lacks is not compared between members. It is
-  reported as novel bp, not as distance.
-- **Fragmented assemblies cost coverage.** A member contig that runs across a
-  junction between two pivot contigs cannot be placed. At 100 contigs over a 2 Mb
-  genome this loses about 6% of the true SNP total; at 20 contigs about 2%; at one
-  contig nothing. Measured and documented in `DECISIONS.md` D13.
-- **Repeats.** A block that occurs more than once in the pivot can be mapped to
-  the wrong copy. Variants there are flagged `repeat`, not corrected. On real
-  data this matters: on three *Salmonella* Heidelberg assemblies the tool reports
-  2 chromosomal SNPs, matching the published figure, plus 13 differences on a
-  1.4 kb element at 139× coverage that the reference pipeline filters out. Both
-  are in the variant file, and it is up to you to decide which you want.
-- **Trees.** Neighbour joining on SNP counts ignores recombination and is not a
-  substitute for a full phylogenetic analysis.
-- **Divergent clusters.** The block shortcut stops helping around 0.5% divergence
-  and anchors become too sparse above a few percent. Keep `--cluster-dist` small.
-
----
-
-## Licence
-
-MIT. See `LICENSE`.
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md): every option, file and column
+- [docs/VALIDATION.md](docs/VALIDATION.md): how it was tested on real data
+- [PROJECT.md](PROJECT.md), [DECISIONS.md](DECISIONS.md): design and decisions

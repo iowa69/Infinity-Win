@@ -1,0 +1,30 @@
+Infinity-Win - quick start
+==========================
+
+Nothing to install. Unzip this folder anywhere (Desktop, USB stick) and:
+
+1. Double-click Infinity-Win (Infinity-Win.exe on Windows).
+   Windows may say "Windows protected your PC" because the program is not
+   signed: click "More info", then "Run anyway".
+2. Click "+ Genomes" (or drag a folder onto the window) and choose a folder of
+   assembled genomes: .fasta / .fa / .fna files, optionally .gz.
+3. Click Run. A first, blurry tree appears in seconds and sharpens to exact
+   SNP distances as the run proceeds.
+
+The one setting to think about is the CLUSTER DISTANCE (Settings > Resolution).
+Only genomes in the same cluster get exact SNP distances to each other.
+The default, 0.005 (99.5% identity), suits outbreak and transmission work in
+bacteria. To let your own data choose, open a terminal in this folder and run:
+
+    infinity thresholds <your genome folder>
+
+It prints, in seconds, how many clusters each distance makes and suggests the
+most stable one. The README on the project page explains this in detail.
+
+Results (Excel workbook, SNP matrices, tree pictures, VCF) are written to the
+folder shown under "Results to" in the top bar.
+
+Command line, for scripts:
+
+    infinity run <genome folder> -o <results folder>
+    infinity run --help

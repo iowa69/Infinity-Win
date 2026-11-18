@@ -92,6 +92,7 @@ jobs:
           cp "target/${{ matrix.triple }}/release/Infinity-Win${{ matrix.exe }}" "dist/${{ matrix.triple }}/"
           cp VERSION.txt "dist/${{ matrix.triple }}/VERSION"
           cp LICENSE     "dist/${{ matrix.triple }}/LICENSE"
+          cp packaging/START-HERE.txt "dist/${{ matrix.triple }}/START-HERE.txt"
           ls -l "dist/${{ matrix.triple }}"
 
       - name: Checksums
@@ -146,9 +147,17 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release
+          # Stable names, so that
+          #   https://github.com/<owner>/<repo>/releases/latest/download/Infinity-Win-windows-x64.zip
+          # always downloads the newest Windows build.
           for dir in artefacts/infinity-*; do
             triple="${dir##*/infinity-}"
-            ( cd "$dir" && zip -r "../../release/infinity-${triple}.zip" . )
+            case "$triple" in
+              x86_64-pc-windows-msvc)   name="Infinity-Win-windows-x64" ;;
+              x86_64-unknown-linux-gnu) name="Infinity-Win-linux-x64" ;;
+              *)                        name="Infinity-Win-${triple}" ;;
+            esac
+            ( cd "$dir" && chmod +x infinity Infinity-Win 2>/dev/null; zip -r "../../release/${name}.zip" . )
           done
           cd release
           sha256sum *.zip > SHA256SUMS.txt

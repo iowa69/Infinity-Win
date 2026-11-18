@@ -4,6 +4,7 @@
 //! 2); everything shown here comes off the same event stream the GUI reads.
 
 mod bench;
+mod thresholds;
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -37,6 +38,8 @@ enum Cmd {
     Bench(bench::BenchArgs),
     /// Simulate genomes with known truth.
     Simulate(SimulateArgs),
+    /// Suggest a cluster distance for a set of genomes (seconds).
+    Thresholds(thresholds::ThresholdArgs),
 }
 
 /// How much the run narrates while it works.
@@ -295,6 +298,7 @@ fn main() {
         Cmd::Run(args) => cmd_run(args),
         Cmd::Bench(args) => bench::cmd_bench(args),
         Cmd::Simulate(args) => cmd_simulate(args),
+        Cmd::Thresholds(args) => thresholds::cmd_thresholds(args),
     };
     std::process::exit(code);
 }

@@ -164,9 +164,13 @@ fn resolution_section(
         theme::grid_row(
             ui,
             "Cluster distance",
-            "How different two genomes may be and still be compared in detail, as a \
-             sketch distance. 0.005 means about 99.5 % identical. Smaller makes more, \
-             tighter clusters. This one acts immediately while a run is going.",
+            "Only genomes in the same cluster get exact SNP distances to each other; \
+             between clusters you get estimates. This is how different two genomes may \
+             be and still share a cluster: 0.005 = 99.5 % identical, about 14,000 SNPs on \
+             a 2.8 Mb genome. Too small: close genomes land in different clusters and get \
+             no exact distance. Too large: lineages mix, runs slow down and fewer SNPs are \
+             counted. Stay between 0.001 and 0.01. To let your data choose, run \
+             `infinity thresholds <genome folder>`. Best set before Run.",
             |ui| {
                 let before = app.prefs.params.cluster_dist;
                 ui.add(
