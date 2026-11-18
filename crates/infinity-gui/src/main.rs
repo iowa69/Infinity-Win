@@ -41,6 +41,9 @@
 //! needs no display, so the reading half of the program can be exercised in a
 //! terminal or in CI.
 
+// On Windows, a release build is a GUI program: no console window opens behind it
+// when Infinity-Win.exe is double-clicked. Debug builds keep the console for logs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
 use eframe::egui;
