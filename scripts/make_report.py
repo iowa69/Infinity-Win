@@ -81,9 +81,15 @@ def first_tree_from_events(run_dir: Path) -> Tuple[Optional[float], Optional[str
 
 
 def measurements_for_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
-    """The numbers the report and the verdict rule use for one cell."""
+    """The numbers the report and the verdict rule use for one cell.
+
+    Times and memory are the **median over the usable repeats**; the full
+    ``{n, median, min, max}`` is kept under ``<key>_stats`` for the report's
+    ranges. A summary from before ``--repeats`` gives n = 1.
+    """
     run = cell.get("run") or {}
     timings_s = run.get("timings_s") or {}
+    stats = common.cell_repeat_stats(cell)
     out: Dict[str, Any] = {
         "dataset": cell.get("dataset"),
         "config": cell.get("config"),
@@ -111,7 +117,15 @@ def measurements_for_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
         "problems": list(cell.get("problems") or []),
         "error": cell.get("error"),
         "out_dir": cell.get("out_dir"),
+        "repeats_total": len(cell.get("repeats") or []) or (1 if cell.get("status") else 0),
     }
+    for key in common.REPEAT_METRICS:
+        out[f"{key}_stats"] = stats[key]
+        if stats[key]["n"]:
+            out[key] = stats[key]["median"]
+    out["repeats_usable"] = stats["exact_tree_s"]["n"] or stats["wall_s"]["n"]
+    if stats["peak_memory_bytes"].get("any_floor"):
+        out["peak_memory_is_floor"] = True
     # Fall back to the event stream, then to the process wall time. Both are
     # labelled, because a proxy is not the measurement it stands in for.
     run_dir = Path(cell["out_dir"]) if cell.get("out_dir") else None
@@ -125,6 +139,7 @@ def measurements_for_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
         "cached",
     ):
         out["exact_tree_s"] = out["wall_s"]
+        out["exact_tree_s_stats"] = dict(out.get("wall_s_stats") or {})
         out["exact_tree_source"] = (
             "process wall time (proxy: run.json carried no timings.exact_tree_ms)"
         )
@@ -152,7 +167,26 @@ def measurements_for_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def collect(summary: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def resolve_out_dir(cell: Dict[str, Any], matrix_dir: Optional[Path]) -> Optional[str]:
+    """The cell's output folder as a path that exists from here, if it can be found.
+
+    ``run_matrix.py`` records ``out_dir`` as it was given, which is relative to
+    the folder it was started in. When that does not resolve from the current
+    folder, the canonical ``<matrix>/<dataset>/<config>`` layout is tried.
+    """
+    recorded = cell.get("out_dir")
+    if recorded and Path(recorded).is_dir():
+        return str(recorded)
+    if matrix_dir is not None and cell.get("dataset") and cell.get("config"):
+        candidate = Path(matrix_dir) / str(cell["dataset"]) / str(cell["config"])
+        if candidate.is_dir():
+            return str(candidate)
+    return recorded
+
+
+def collect(
+    summary: Dict[str, Any], matrix_dir: Optional[Path] = None
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """``{dataset: {config: measurements}}``."""
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for cell in summary.get("cells", []):
@@ -160,6 +194,9 @@ def collect(summary: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
         config = cell.get("config")
         if not dataset or not config:
             continue
+        resolved = resolve_out_dir(cell, matrix_dir)
+        if resolved != cell.get("out_dir"):
+            cell = {**cell, "out_dir": resolved}
         out.setdefault(str(dataset), {})[str(config)] = measurements_for_cell(cell)
     return out
 
@@ -226,14 +263,24 @@ def run_expected_checks(
         for config, meas in sorted(cells.items()):
             out_dir = meas.get("out_dir")
             observed: Dict[Tuple[str, str], Optional[float]] = {}
+            observed_raw: Dict[Tuple[str, str], Optional[float]] = {}
             observed_filtered: Dict[Tuple[str, str], Optional[float]] = {}
             cell_problems: List[str] = []
             filter_info: Dict[str, Any] = {}
+            dist_basis = common.distance_basis([])
             if out_dir and Path(out_dir).is_dir():
                 rows, row_problems = common.load_cluster_distances(Path(out_dir))
                 cell_problems.extend(row_problems)
+                dist_basis = common.distance_basis(rows)
                 observed = {
                     common.pair_key(r["a"], r["b"]): r.get("snps") for r in rows
+                }
+                # Once the engine writes raw_snps, `snps` is its filtered
+                # core-genome count; both are checked against the same values.
+                observed_raw = {
+                    common.pair_key(r["a"], r["b"]): r.get("raw_snps")
+                    for r in rows
+                    if r.get("raw_snps") is not None
                 }
                 if not observed:
                     cell_problems.append(
@@ -263,6 +310,9 @@ def run_expected_checks(
             else:
                 cell_problems.append(f"output folder missing: {out_dir}")
             checks = common.check_expected_pairs(expected, observed)
+            checks_raw = (
+                common.check_expected_pairs(expected, observed_raw) if observed_raw else []
+            )
             checks_filtered = (
                 common.check_expected_pairs(expected, observed_filtered)
                 if observed_filtered
@@ -281,6 +331,9 @@ def run_expected_checks(
                     else ("PASS" if n_fail == 0 and n_na == 0 else
                           ("FAIL" if n_fail else "PARTIAL (some pairs not measured)"))
                 ),
+                "snps_label": dist_basis["snps_label"],
+                "checks_raw": [c.as_dict() for c in checks_raw],
+                "status_raw": _overall_status(checks_raw),
                 "checks_filtered": [c.as_dict() for c in checks_filtered],
                 "status_filtered": _overall_status(checks_filtered),
                 "filter": filter_info,
@@ -303,8 +356,14 @@ def build_accuracy_curves(
     collapse_snps: float,
     max_points: int,
     enabled: bool = True,
+    summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Drive ``accuracy_over_time.py`` over every usable cell."""
+    """Drive ``accuracy_over_time.py`` over every usable cell.
+
+    Truth is looked up in ``<work>/<dataset>/dataset.json`` and then in the
+    matrix summary, which is the only record of where a simulated dataset kept
+    outside the work folder has its truth.
+    """
     doc: Dict[str, Any] = {
         "figures_dir": str(figures_dir),
         "datasets": {},
@@ -316,25 +375,17 @@ def build_accuracy_curves(
         return doc
     common.ensure_dir(figures_dir)
     all_series: Dict[str, List[Dict[str, Any]]] = {}
+    labels = aot.labels_from_summary(summary)
+    empty_reasons: Dict[str, str] = {}
     for dataset, cells in sorted(by_dataset.items()):
-        dataset_dir = work / dataset
-        truth_tree: Optional[Path] = None
-        truth_dir: Optional[Path] = None
-        if dataset_dir.is_dir():
-            obj, _ = common.load_json_optional(dataset_dir / "dataset.json")
-            if isinstance(obj, dict):
-                truth = obj.get("truth") or {}
-                tree = truth.get("tree")
-                if tree and Path(tree).exists():
-                    truth_tree = Path(tree)
-                tdir = truth.get("dir")
-                if tdir and Path(tdir).is_dir():
-                    truth_dir = Path(tdir)
+        truth_tree, truth_dir, truth_origin = common.dataset_truth(work, dataset, summary)
         per_dataset: Dict[str, Any] = {
             "runs": {},
             "truth_tree": str(truth_tree) if truth_tree else None,
             "truth_dir": str(truth_dir) if truth_dir else None,
+            "truth_origin": truth_origin,
             "simulator_truth": bool(truth_dir and common.is_simulator_truth_dir(truth_dir)),
+            "label": labels.get(dataset, dataset),
         }
         # Why this dataset may have no accuracy curve at all, stated once and
         # precisely: no reference declared, and/or too few taxa for RF to exist.
@@ -381,6 +432,14 @@ def build_accuracy_curves(
             rows = res.pop("rows", [])
             res.pop("dataset", None)
             res.pop("config", None)
+            if rows and meas.get("status") == "failed":
+                # The event stream of a run that was killed or crashed still
+                # scores, but the curve stops where the run stopped.
+                res["status"] = "partial (run failed)"
+                res.setdefault("problems", []).insert(
+                    0, f"the run failed ({meas.get('error') or 'see section 9'}); the curve "
+                    "covers only the events written before it stopped"
+                )
             if rows:
                 ordered = sorted(
                     (r for r in rows if r.get("t_ms") is not None),
@@ -403,6 +462,8 @@ def build_accuracy_curves(
                             "t_s": float(defined[-1]["t_ms"]) / 1000.0,
                             "rf": defined[-1].get("rf"),
                             "rf_normalized": defined[-1].get("rf_normalized"),
+                            "rf_between_clusters": defined[-1].get("rf_between_clusters"),
+                            "rf_within_clusters": defined[-1].get("rf_within_clusters"),
                         }
                     res["t_span_s"] = [
                         float(ordered[0]["t_ms"]) / 1000.0,
@@ -417,10 +478,17 @@ def build_accuracy_curves(
             if rows:
                 series[config] = rows
                 all_series[f"{dataset}/{config}"] = rows
+        if not series:
+            first_problem = next(
+                (r.get("problems")[0] for r in per_dataset["runs"].values() if r.get("problems")),
+                "no configuration produced accuracy points",
+            )
+            empty_reasons[dataset] = truth_note or first_problem
         if series:
             png = figures_dir / f"accuracy_over_time__{dataset}.png"
             written, reason = aot.plot_curves(
-                series, png, title=f"Tree accuracy over time - {dataset}"
+                series, png, title=f"Tree accuracy over time - {dataset}",
+                labels=labels, default_dataset=dataset,
             )
             per_dataset["figure"] = str(png) if written else None
             per_dataset["figure_error"] = None if written else reason
@@ -438,11 +506,24 @@ def build_accuracy_curves(
         doc["combined_csv"] = str(combined)
         doc["combined_rows"] = len(rows)
         png = figures_dir / "accuracy_over_time__all.png"
-        written, reason = aot.plot_curves(all_series, png, title="Tree accuracy over time - all datasets")
+        written, reason = aot.plot_curves(
+            all_series, png, title="Tree accuracy over time - every dataset",
+            labels=labels, empty=empty_reasons,
+        )
         doc["combined_figure"] = str(png) if written else None
         if not written:
             doc["problems"].append(f"combined figure not written: {reason}")
     return doc
+
+
+def _residual(last: Dict[str, Any]) -> str:
+    """``"RF (between / within clusters)"`` for the last point of a curve."""
+    if last.get("rf") in (None, ""):
+        return "n/a"
+    between, within = last.get("rf_between_clusters"), last.get("rf_within_clusters")
+    if between in (None, "") or within in (None, ""):
+        return common.fmt(last.get("rf"), ".4g")
+    return f"{common.fmt(last.get('rf'), '.4g')} ({between} / {within})"
 
 
 def curve_endpoints(doc: Dict[str, Any]) -> List[List[Any]]:
@@ -471,6 +552,7 @@ def curve_endpoints(doc: Dict[str, Any]) -> List[List[Any]]:
                     common.fmt(first.get("rf_normalized"), ".4f"),
                     common.fmt(last.get("t_s"), ".4g"),
                     common.fmt(last.get("rf_normalized"), ".4f"),
+                    _residual(last),
                     why[:200],
                 ]
             )
@@ -624,6 +706,11 @@ def check_switch_invariance(
         base_index = {
             common.pair_key(r["a"], r["b"]): r.get("snps") for r in base_rows
         }
+        base_raw = {
+            common.pair_key(r["a"], r["b"]): r.get("raw_snps")
+            for r in base_rows
+            if r.get("raw_snps") is not None
+        }
         base_variants = variants_fingerprint(Path(baseline_dir))
         for config, meas in sorted(cells.items()):
             if config == "baseline":
@@ -637,6 +724,11 @@ def check_switch_invariance(
             rows, problems = common.load_cluster_distances(Path(other_dir))
             record["problems"] = list(problems)
             index = {common.pair_key(r["a"], r["b"]): r.get("snps") for r in rows}
+            raw_index = {
+                common.pair_key(r["a"], r["b"]): r.get("raw_snps")
+                for r in rows
+                if r.get("raw_snps") is not None
+            }
             shared = sorted(set(base_index) & set(index))
             differing = []
             max_diff = 0
@@ -647,6 +739,13 @@ def check_switch_invariance(
                 if a != b:
                     differing.append((key, a, b))
                     max_diff = max(max_diff, abs(int(a) - int(b)))
+            # Property 6 covers every distance the engine writes, so once it
+            # reports raw counts next to the filtered ones, both must match.
+            raw_differing = [
+                (key, base_raw[key], raw_index[key])
+                for key in sorted(set(base_raw) & set(raw_index))
+                if base_raw[key] != raw_index[key]
+            ]
             other_variants = variants_fingerprint(Path(other_dir))
             vdiff = diff_variants(base_variants, other_variants)
             variants_identical = bool(vdiff["identical"])
@@ -658,6 +757,7 @@ def check_switch_invariance(
                     "pairs_only_in_config": len(set(index) - set(base_index)),
                     "pairs_differing": len(differing),
                     "max_abs_diff_snps": max_diff if differing else None,
+                    "raw_pairs_differing": len(raw_differing) if (base_raw or raw_index) else None,
                     "variants_identical": variants_identical,
                     "variant_rows_baseline": vdiff["rows_baseline"],
                     "variant_rows_config": vdiff["rows_config"],
@@ -669,6 +769,12 @@ def check_switch_invariance(
                     ],
                 }
             )
+            if raw_differing:
+                record["examples"].extend(
+                    {"pair": list(k), "baseline": a, "config": b, "basis": "raw"}
+                    for k, a, b in raw_differing[: max(0, 5 - len(record["examples"]))]
+                )
+                differing = differing + raw_differing
             if not shared:
                 record["status"] = "no comparable pairs"
             elif not differing and variants_identical:
@@ -731,6 +837,7 @@ def render_invariance(doc: Dict[str, Any]) -> str:
                     common.fmt(rec.get("pairs_compared")),
                     common.fmt(rec.get("pairs_differing")),
                     common.fmt(rec.get("max_abs_diff_snps"), ".4g"),
+                    common.fmt(rec.get("raw_pairs_differing")),
                     variant_note,
                     common.fmt(rec.get("pairs_only_in_baseline")),
                     common.fmt(rec.get("pairs_only_in_config")),
@@ -739,8 +846,8 @@ def render_invariance(doc: Dict[str, Any]) -> str:
         out.append(
             common.markdown_table(
                 ["config", "distances vs baseline", "pairs compared",
-                 "pairs differing", "max |diff| SNPs", "variant lists identical",
-                 "pairs only in baseline", "pairs only in config"],
+                 "pairs differing", "max |diff| SNPs", "raw pairs differing",
+                 "variant lists identical", "pairs only in baseline", "pairs only in config"],
                 rows,
             )
         )
@@ -750,8 +857,9 @@ def render_invariance(doc: Dict[str, Any]) -> str:
                 out.append(f"Examples of differing pairs under `{config}`:")
                 out.append("")
                 for ex in rec["examples"]:
+                    basis = " (raw_snps)" if ex.get("basis") == "raw" else ""
                     out.append(
-                        f"- {ex['pair'][0]} vs {ex['pair'][1]}: baseline {ex['baseline']} "
+                        f"- {ex['pair'][0]} vs {ex['pair'][1]}{basis}: baseline {ex['baseline']} "
                         f"SNPs, `{config}` {ex['config']} SNPs"
                     )
                 out.append("")
@@ -767,6 +875,18 @@ def verdict_mark(passed: Optional[bool]) -> str:
     if passed is False:
         return "**FAIL**"
     return "not measured"
+
+
+def fmt_stat(m: Dict[str, Any], key: str, *, memory: bool = False) -> str:
+    """``median [min-max]`` over the repeats, or the single value when n = 1."""
+    human = common.human_bytes if memory else common.human_seconds
+    stats = m.get(f"{key}_stats") or {}
+    value = m.get(key)
+    if value is None:
+        return "n/a"
+    if stats.get("n", 0) > 1 and stats.get("min") is not None:
+        return f"{human(value)} [{human(stats['min'])}-{human(stats['max'])}]"
+    return human(value)
 
 
 def render_accuracy_table(cells: Dict[str, Dict[str, Any]]) -> str:
@@ -815,7 +935,7 @@ def render_accuracy_table(cells: Dict[str, Dict[str, Any]]) -> str:
 
 def render_dataset_table(cells: Dict[str, Dict[str, Any]]) -> str:
     header = [
-        "config", "status", "wall", "time to first tree", "time to exact tree",
+        "config", "status", "runs", "wall", "time to first tree", "time to exact tree",
         "peak memory", "block identity", "pieces compared", "cache hits",
         "alignments", "bases aligned", "breakpoints", "switch applied",
     ]
@@ -836,14 +956,16 @@ def render_dataset_table(cells: Dict[str, Dict[str, Any]]) -> str:
         status = m.get("status")
         if status == "failed":
             status = f"FAILED ({m.get('error') or 'see failures'})"
+        runs = f"{common.fmt(m.get('repeats_usable'))}/{common.fmt(m.get('repeats_total'))}"
         rows.append(
             [
                 config,
                 status,
-                common.human_seconds(m.get("wall_s")),
-                common.human_seconds(m.get("first_tree_s")),
-                common.human_seconds(m.get("exact_tree_s")),
-                common.human_bytes(m.get("peak_memory_bytes"))
+                runs,
+                fmt_stat(m, "wall_s"),
+                fmt_stat(m, "first_tree_s"),
+                fmt_stat(m, "exact_tree_s"),
+                fmt_stat(m, "peak_memory_bytes", memory=True)
                 + (" (floor)" if m.get("peak_memory_is_floor") else ""),
                 common.fmt(identity, ".3%") if identity is not None else "n/a",
                 common.fmt(counters.get("pieces_compared")),
@@ -883,35 +1005,47 @@ def render_verdict(verdicts: Sequence[common.Verdict]) -> Tuple[str, str]:
         detail.append("")
         rows = []
         for m in v.metrics:
-            if m.metric.startswith("peak memory"):
-                base = common.human_bytes(m.baseline)
-                off = common.human_bytes(m.switched_off)
+            human = common.human_bytes if m.metric.startswith("peak memory") else common.human_seconds
+
+            def side(value: Optional[float], rng: Any, n: Optional[int]) -> str:
+                if value is None:
+                    return "n/a"
+                text = human(value)
+                if n and n > 1 and rng and None not in rng:
+                    text += f" [{human(rng[0])}-{human(rng[1])}]"
+                return text + (f" (n={n})" if n else "")
+
+            if m.state == "too_short":
+                worse = "too short to judge"
+            elif m.state == "excluded":
+                worse = "excluded"
             else:
-                base = common.human_seconds(m.baseline)
-                off = common.human_seconds(m.switched_off)
-            worse = {True: "**yes**", False: "no", None: "n/a"}[m.worse]
+                worse = {True: "**yes**", False: "no", None: "n/a"}[m.worse]
+            overlap = {True: "yes", False: "no", None: "n/a"}[m.ranges_overlap]
             rows.append(
                 [
                     m.dataset,
                     m.metric,
-                    base,
-                    off,
+                    side(m.baseline, m.baseline_range, m.n_baseline),
+                    side(m.switched_off, m.switched_off_range, m.n_switched_off),
                     common.fmt(m.ratio, ".3f") + "x" if m.ratio is not None else "n/a",
                     common.fmt(common.pct_change(m.switched_off, m.baseline), "+.1f") + "%"
                     if m.ratio is not None
                     else "n/a",
+                    overlap,
                     worse,
-                    m.note,
+                    m.note if m.state not in ("too_short", "excluded") else "",
                 ]
             )
         detail.append(
             common.markdown_table(
-                ["dataset", "metric", "baseline", "switch off", "ratio", "change",
-                 f">= {int(round((v.threshold - 1) * 100))}% worse?"],
-                [r[:7] for r in rows],
+                ["dataset", "metric", "baseline median [min-max]",
+                 "switch off median [min-max]", "ratio of medians", "change",
+                 "ranges overlap", f">= {int(round((v.threshold - 1) * 100))}% worse?"],
+                [r[:8] for r in rows],
             )
         )
-        notes = [r[7] for r in rows if r[7]]
+        notes = [r[8] for r in rows if r[8]]
         if notes:
             detail.append("")
             detail.append("Notes: " + "; ".join(sorted(set(notes))))
@@ -920,7 +1054,7 @@ def render_verdict(verdicts: Sequence[common.Verdict]) -> Tuple[str, str]:
         detail.append("")
     summary = common.markdown_table(
         ["switch", "what turning it off removes", "verdict", "datasets >=20% worse",
-         "datasets measurable", "why"],
+         "datasets judged", "why"],
         summary_rows,
     )
     return summary, "\n".join(detail)
@@ -952,9 +1086,21 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
             out.append("_No configuration produced a check._")
             out.append("")
             continue
-        # The two bases: what the engine reported, and the same comparison after
-        # the filter every published reference number was produced with.
+        # The bases: what the engine reported (its filtered core-genome count and,
+        # once it writes one, its raw count) and the scripts' own recomputation
+        # after the filter every published reference number was produced with.
+        any_raw = any((info.get("checks_raw") or []) for info in by_config.values())
         any_filtered = any((info.get("checks_filtered") or []) for info in by_config.values())
+        if any_raw:
+            out.append("")
+            out.append(
+                "The engine reports two bases in `cluster_<id>.dist.tsv`: **raw** "
+                "(`raw_snps`, every SNP between the two assemblies) and **core** "
+                "(`snps`, its filtered core-genome count). Both are checked against "
+                "the same published values; the published numbers are themselves "
+                "filtered, so the core count is the like-for-like comparison and the "
+                "raw count shows what the filter removed."
+            )
         if any_filtered:
             filt = next(
                 (info.get("filter") or {} for info in by_config.values() if info.get("filter")),
@@ -962,8 +1108,7 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
             )
             out.append("")
             out.append(
-                f"Two bases are reported. **As reported** is the engine's own "
-                f"`cluster_<id>.dist.tsv`, which is authoritative. **Filtered** is "
+                f"**Script-filtered** is "
                 f"{filt.get('label') or 'a filtered recomputation'}"
                 + (
                     f" (pivot contigs >= {filt.get('min_pivot_contig_bp')} bp)"
@@ -971,11 +1116,15 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
                     else ""
                 )
                 + ", recomputed from `cluster_<id>.variants.tsv` by the benchmark "
-                "scripts. It exists because Infinity-Win deliberately does not filter "
-                "(section 2 lists no filtering among its goals; section 15 says "
-                "repeats are flagged, not corrected) while every published "
-                "reference number here *is* filtered - so the unfiltered comparison "
-                "is not apples to apples."
+                "scripts, independently of the engine. "
+                + (
+                    "It is kept as a cross-check of the engine's own filter."
+                    if any_raw
+                    else "It exists because this engine build reports only an "
+                    "unfiltered count, while every published reference number here "
+                    "*is* filtered - so the unfiltered comparison is not apples to "
+                    "apples."
+                )
             )
             if filt.get("caveat"):
                 out.append("")
@@ -983,56 +1132,62 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
         rows = []
         for config, info in sorted(by_config.items()):
             checks = info.get("checks") or []
-            filtered = {
-                (tuple(c.get("pair") or []) and "-".join(c["pair"])) or c.get("name"): c
-                for c in (info.get("checks_filtered") or [])
-            }
+
+            def index(entries: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+                return {
+                    (tuple(c.get("pair") or []) and "-".join(c["pair"])) or c.get("name"): c
+                    for c in entries
+                }
+
+            filtered = index(info.get("checks_filtered") or [])
+            raw = index(info.get("checks_raw") or [])
             for check in checks:
                 pair = "-".join(check.get("pair") or []) or check.get("name")
-                fcheck = filtered.get(pair) or {}
-                f_obs = fcheck.get("observed")
-                f_pass = fcheck.get("passed")
-                rows.append(
-                    [
-                        config,
-                        pair,
-                        common.fmt(check.get("expected"), ".4g"),
-                        common.fmt(check.get("observed"), ".4g"),
-                        (
-                            common.fmt(
-                                None
-                                if check.get("observed") is None
-                                or check.get("expected") is None
-                                else float(check["observed"]) - float(check["expected"]),
-                                "+.4g",
-                            )
-                        ),
-                        verdict_mark(check.get("passed")),
-                        common.fmt(f_obs, ".4g") if any_filtered else "",
-                        verdict_mark(f_pass) if any_filtered else "",
-                        f"+/- {common.fmt(check.get('tolerance'), '.4g')}",
-                        check.get("source") or "",
-                    ]
-                )
+                row = [
+                    config,
+                    pair,
+                    common.fmt(check.get("expected"), ".4g"),
+                    common.fmt(check.get("observed"), ".4g"),
+                    common.fmt(
+                        None
+                        if check.get("observed") is None or check.get("expected") is None
+                        else float(check["observed"]) - float(check["expected"]),
+                        "+.4g",
+                    ),
+                    verdict_mark(check.get("passed")),
+                ]
+                if any_raw:
+                    rcheck = raw.get(pair) or {}
+                    row += [common.fmt(rcheck.get("observed"), ".4g"), verdict_mark(rcheck.get("passed"))]
+                if any_filtered:
+                    fcheck = filtered.get(pair) or {}
+                    row += [common.fmt(fcheck.get("observed"), ".4g"), verdict_mark(fcheck.get("passed"))]
+                row += [f"+/- {common.fmt(check.get('tolerance'), '.4g')}", check.get("source") or ""]
+                rows.append(row)
             filt_info = info.get("filter") or {}
             note = "; ".join(info.get("problems") or [])[:160]
             if any_filtered and filt_info:
                 note = (
                     f"variants {common.fmt(filt_info.get('variants_used'))} used / "
                     f"{common.fmt(filt_info.get('variants_excluded'))} excluded by the "
-                    f"filter. {note}"
+                    f"script filter. {note}"
                 ).strip()
-            header = [f"`{config}` overall", "", "", "", "",
-                      f"**{info.get('status')}**"]
+            overall = [f"`{config}` overall", "", "", "", "", f"**{info.get('status')}**"]
+            if any_raw:
+                overall += ["", f"**{info.get('status_raw')}**"]
             if any_filtered:
-                header.append("")
-                header.append(f"**{info.get('status_filtered')}**")
-            header += ["", note]
-            rows.append(header)
+                overall += ["", f"**{info.get('status_filtered')}**"]
+            overall += ["", note]
+            rows.append(overall)
         out.append("")
-        head = ["config", "pair", "expected", "as reported", "diff", "verdict"]
+        snps_header = (
+            "engine core (`snps`)" if any_raw else "as reported (`snps`)"
+        )
+        head = ["config", "pair", "expected", snps_header, "diff", "verdict"]
+        if any_raw:
+            head += ["engine raw (`raw_snps`)", "verdict"]
         if any_filtered:
-            head += ["filtered", "verdict"]
+            head += ["script-filtered", "verdict"]
         head += ["tolerance", "provenance / note"]
         out.append(common.markdown_table(head, rows))
         out.append("")
@@ -1121,6 +1276,68 @@ def render_baselines(doc: Dict[str, Any], root: Path) -> str:
     return "\n".join(out)
 
 
+def _mean_genome_mb(cells_for: Dict[str, Dict[str, Any]], summary_cells: Sequence[Dict[str, Any]], name: str) -> Optional[float]:
+    for cell in summary_cells:
+        run = cell.get("run") or {}
+        if str(cell.get("dataset")) == name and run.get("total_length") and run.get("genomes"):
+            return float(run["total_length"]) / float(run["genomes"]) / 1e6
+    return None
+
+
+def performance_targets_text(
+    datasets_meta: Sequence[Dict[str, Any]],
+    by_dataset: Dict[str, Dict[str, Dict[str, Any]]],
+    summary_cells: Sequence[Dict[str, Any]] = (),
+) -> str:
+    """Say what the datasets are - simulated or real, how big - next to the targets."""
+    simulated: List[str] = []
+    real: List[str] = []
+    sim_sizes: List[float] = []
+    for d in datasets_meta:
+        name = str(d.get("name"))
+        if name not in by_dataset:
+            continue
+        mb = _mean_genome_mb(by_dataset.get(name, {}), summary_cells, name)
+        count = d.get("genome_count")
+        size = (f", ~{mb:.1f} Mb each" if mb >= 0.1 else f", ~{mb * 1000:.0f} kb each") if mb else ""
+        desc = f"`{name}` ({common.fmt(count)} genomes{size})"
+        if d.get("kind") == "simulated":
+            simulated.append(desc)
+            if mb:
+                sim_sizes.append(mb)
+        else:
+            real.append(desc)
+    parts = [
+        "Targets are reported against, not gated. The reference machine is 8 cores "
+        "with an SSD and the reference data set is 1,000 simulated **5 Mb** genomes "
+        "in 20 clusters."
+    ]
+    if simulated:
+        size_note = ""
+        if sim_sizes and max(sim_sizes) < 4.5:
+            size_note = (
+                f" Their genomes are ~{min(sim_sizes):.1f}"
+                + (f"-{max(sim_sizes):.1f}" if max(sim_sizes) - min(sim_sizes) >= 0.1 else "")
+                + " Mb, not 5 Mb, so per-genome work is several times lower than in "
+                "the target data set."
+            )
+        parts.append(
+            "The simulated datasets here - " + ", ".join(simulated) + " - are "
+            "**simulated** genomes from `infinity simulate`, scaling the genome *count* "
+            "as section 11 asks." + size_note
+        )
+    if real:
+        parts.append(
+            "The real datasets - " + ", ".join(real) + " - are real assemblies but far "
+            "fewer than 1,000 genomes."
+        )
+    parts.append(
+        "None of them is the reference data set, so the numbers below are shown "
+        "alongside the targets for orientation only; they neither meet nor miss them."
+    )
+    return " ".join(parts)
+
+
 def render_report(
     summary: Dict[str, Any],
     by_dataset: Dict[str, Dict[str, Dict[str, Any]]],
@@ -1174,6 +1391,41 @@ def render_report(
         f"{int(round((common.VERDICT_THRESHOLD - 1) * 100))}% worse on at least "
         f"{common.VERDICT_MIN_DATASETS} of the three datasets."
     )
+    out.append("")
+    repeats_requested = (summary.get("request") or {}).get("repeats")
+    run_counts = sorted(
+        {m.get("repeats_usable") for cells_for in by_dataset.values() for m in cells_for.values()
+         if m.get("repeats_usable")}
+    )
+    counts_text = (
+        f"{run_counts[0]}" if len(run_counts) == 1
+        else (f"{run_counts[0]}-{run_counts[-1]}" if run_counts else "no")
+    )
+    excluded = next((v.datasets_excluded for v in verdicts if v.datasets_excluded), {})
+    min_s = next((v.min_baseline_s for v in verdicts), 0.0)
+    out.append("How the rule is applied to noisy measurements:")
+    out.append("")
+    out.append(
+        f"- **Medians of repeated runs.** Every configuration was run "
+        f"{repeats_requested or counts_text} time(s) (usable runs per cell: {counts_text}); "
+        "the rule compares the **median** of the switched-off runs with the median of "
+        "the baseline runs, and every table shows min-max next to the median. "
+        + ("With a single run per cell there is no spread to show, so a verdict near "
+           "the 20% line is weak evidence." if run_counts == [1] else "")
+    )
+    if min_s:
+        out.append(
+            f"- **Too short to judge.** Where the baseline median time-to-exact is under "
+            f"{min_s:g} s, the time metric is shown but marked *too short to judge* and "
+            "counts neither way: at that scale a 20% difference is process start-up and "
+            "page-cache noise. Peak memory on the same dataset is still judged."
+        )
+    for name, why in sorted(excluded.items()):
+        out.append(
+            f"- **`{name}` is not part of the performance verdict** ({why}). Its "
+            "timings are still reported in section 3, and it is the acceptance "
+            "check of section 5."
+        )
     out.append("")
     summary_table, verdict_detail = render_verdict(verdicts)
     out.append(summary_table)
@@ -1390,11 +1642,44 @@ def render_report(
     out.append("## 7. The key figure: tree accuracy versus elapsed time")
     out.append("")
     out.append(
-        "Accuracy at a given instant is the Robinson-Foulds distance between the "
-        "tree Infinity-Win had emitted by then and the truth tree, after collapsing "
-        "branches shorter than half a SNP. The curves are built by replaying "
-        "`events.jsonl` and re-assembling the full tree after every "
-        "`backbone_tree` / `cluster_focus` event (PROJECT.md section 6.9)."
+        "Accuracy at a given instant is the normalised Robinson-Foulds distance "
+        "between the **whole tree the program was showing** and the truth tree, "
+        "over the **full leaf set** - every genome of the dataset that the truth "
+        "knows - after collapsing branches shorter than half a SNP. The curves are "
+        "built by replaying `events.jsonl`: after every `backbone_tree` / "
+        "`cluster_focus` event the displayed tree is re-assembled as PROJECT.md "
+        "section 6.9 describes (the backbone, with each pivot leaf replaced by its "
+        "cluster), where a cluster that has not emitted a tree yet is an "
+        "unresolved star of its members and every other cluster is its latest "
+        "emitted tree. So each curve starts near 1 (a star resolves nothing) and "
+        "falls as clusters become exact."
+    )
+    out.append("")
+    out.append(
+        "- **Normalisation:** RF / (splits in the displayed tree + splits in the "
+        "truth): 1 = no split right, 0 = identical topology. Splits are "
+        "unrooted bipartitions of the full leaf set."
+    )
+    out.append(
+        "- **Simulated truth:** `infinity simulate` writes one truth tree per "
+        "cluster and no full tree. Every cluster root is derived from the "
+        "reference independently, so the full truth is those trees joined at one "
+        "star: each cluster is a clade, and no order of clusters is claimed."
+    )
+    out.append(
+        "- **Why the simulated curves do not end at exactly 0:** the full tree also "
+        "claims where each cluster hangs off the rest. Two things the per-cluster "
+        "RF of `infinity bench` ignores are counted here: splits *between* "
+        "clusters that the backbone resolves although the truth is a star, and "
+        "splits *within* a cluster that move because the cluster tree is rooted "
+        "at its midpoint (section 6.9) rather than at the true cluster root. The "
+        "`final RF` column below splits the residual into those two parts "
+        "(between / within)."
+    )
+    out.append(
+        "- **Real data:** scored against the dataset's reference tree, restricted "
+        "to the genomes that are both in the run and in that tree; extra "
+        "reference/outgroup leaves are left out."
     )
     out.append("")
     figures: List[str] = []
@@ -1430,16 +1715,17 @@ def render_report(
     if endpoint_rows:
         out.append(
             "Curve endpoints (the same data as the figure, as text). `first` is the "
-            "first instant whose RF is defined; while only part of the tree exists "
-            "there may be fewer than four shared taxa and RF is then undefined "
-            "rather than zero - those points are counted in `no RF`."
+            "first instant whose RF is defined; RF is undefined (never zero) when "
+            "fewer than four genomes can be scored - those points are counted in "
+            "`no RF`. `collapse threshold` is the truth tree's, in its own units."
         )
         out.append("")
         out.append(
             common.markdown_table(
                 ["dataset", "config", "status", "points", "no RF", "RF source",
                  "collapse threshold", "first t (s)", "first RF (norm)",
-                 "last t (s)", "last RF (norm)", "why empty (if it is)"],
+                 "last t (s)", "last RF (norm)", "final RF (between / within)",
+                 "why empty (if it is)"],
                 endpoint_rows,
             )
         )
@@ -1514,13 +1800,7 @@ def render_report(
     # ---- performance targets --------------------------------------------
     out.append("## 10. Performance targets (PROJECT.md section 10.4)")
     out.append("")
-    out.append(
-        "Targets are reported against, not gated. The reference machine is 8 "
-        "cores with an SSD and the reference data set is 1,000 simulated 5 Mb "
-        "genomes in 20 clusters; the datasets in this report are the real ones, "
-        "so the numbers are not directly comparable to the targets and are shown "
-        "alongside them for orientation only."
-    )
+    out.append(performance_targets_text(datasets_meta, by_dataset, cells))
     out.append("")
     target_rows = []
     for name, cells_for in sorted(by_dataset.items()):
@@ -1529,11 +1809,11 @@ def render_report(
             [
                 name,
                 common.fmt(base.get("genomes")),
-                common.human_seconds(base.get("first_tree_s")),
+                fmt_stat(base, "first_tree_s"),
                 "<= 60 s",
-                common.human_seconds(base.get("exact_tree_s")),
+                fmt_stat(base, "exact_tree_s"),
                 "<= 5 min",
-                common.human_bytes(base.get("peak_memory_bytes")),
+                fmt_stat(base, "peak_memory_bytes", memory=True),
                 "<= 4 GB",
             ]
         )
@@ -1604,6 +1884,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-figures", action="store_true", help="do not regenerate accuracy curves")
     p.add_argument("--collapse-snps", type=float, default=0.5, help="RF collapse threshold in SNPs")
+    p.add_argument(
+        "--min-judge-s",
+        type=float,
+        default=common.VERDICT_MIN_BASELINE_S,
+        help="time-to-exact is only judged when the baseline median is at least this "
+        f"many seconds (default {common.VERDICT_MIN_BASELINE_S:g}; 0 judges everything)",
+    )
     p.add_argument("--max-points", type=int, default=400, help="cap scored points per configuration")
     p.add_argument("--stdout", action="store_true", help="also print the report to stdout")
     p.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
@@ -1635,7 +1922,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             file=sys.stderr,
         )
 
-    by_dataset = collect(summary)
+    by_dataset = collect(summary, summary_path.parent)
 
     # dataset metadata, straight from the dataset.json files
     datasets_meta: List[Dict[str, Any]] = []
@@ -1658,6 +1945,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # so the denominator is every dataset the matrix knows about, including the
     # ones that produced no usable cell at all.
     verdicts: List[common.Verdict] = []
+    excluded = common.performance_exclusions(datasets_meta)
     dataset_names = sorted({str(d.get("name")) for d in datasets_meta if d.get("name")} | set(by_dataset))
     for config in common.CONFIGS:
         if config.is_baseline:
@@ -1677,6 +1965,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 baseline_by,
                 off_by,
                 dataset_names=dataset_names,
+                min_baseline_s=args.min_judge_s,
+                excluded=excluded,
             )
         )
 
@@ -1690,6 +1980,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         collapse_snps=args.collapse_snps,
         max_points=args.max_points,
         enabled=not args.no_figures,
+        summary=summary,
     )
     for problem in expected_problems:
         accuracy_doc.setdefault("problems", []).append(problem)

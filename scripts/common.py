@@ -1309,24 +1309,109 @@ def _leaf_set(node: NewickNode) -> frozenset:
 
 
 def splits(node: NewickNode, leaves: Optional[frozenset] = None) -> set:
-    """Non-trivial bipartitions of ``node`` (unrooted, canonicalised)."""
+    """Non-trivial bipartitions of ``node`` (unrooted, canonicalised).
+
+    Each bipartition is keyed by the side that does *not* hold the
+    alphabetically first leaf. Keying by "the smaller side" instead would give
+    a bipartition with two equal halves two different keys (one per side), so
+    the two children of a root splitting the leaves 50/50 would be counted as
+    two splits.
+    """
     all_leaves = leaves if leaves is not None else _leaf_set(node)
     if len(all_leaves) < 4:
         return set()
+    ref = min(all_leaves)
     out = set()
     for child_node in node.iter_nodes():
         if child_node is node:
             continue
-        side = _leaf_set(child_node)
+        side = _leaf_set(child_node) & all_leaves
         if not side or side >= all_leaves:
             continue
         complement = all_leaves - side
-        if len(side) < 2 and len(complement) < 2:
+        if len(side) < 2 or len(complement) < 2:
+            continue  # trivial split (one leaf on one side)
+        out.add(frozenset(complement if ref in side else side))
+    return out
+
+
+# -- bitmask splits ----------------------------------------------------------
+#
+# Splits as Python ints (one bit per leaf) instead of frozensets of names. The
+# accuracy-over-time curve scores hundreds of trees of up to thousands of
+# leaves per run, and the set-of-names representation is quadratic in the
+# depth of the tree; with masks a whole tree is one post-order pass.
+
+_INT_BIT_COUNT = getattr(int, "bit_count", None)
+
+
+def popcount(value: int) -> int:
+    """Number of set bits (``int.bit_count`` where Python has it)."""
+    if _INT_BIT_COUNT is not None:
+        return _INT_BIT_COUNT(value)
+    return bin(value).count("1")
+
+
+def leaf_index(names: Iterable[str]) -> Dict[str, int]:
+    """``name -> bit`` for a leaf universe, in sorted name order."""
+    return {name: 1 << i for i, name in enumerate(sorted(set(names)))}
+
+
+def clade_masks(
+    root: NewickNode, index: Dict[str, int], threshold: float = 0.0
+) -> Tuple[int, List[int]]:
+    """``(leaf mask of the whole tree, [clade mask of every kept edge])``.
+
+    One entry per non-root internal node whose branch is *not* contracted by
+    ``threshold`` (the same rule as :func:`contract_short_branches`: a branch
+    shorter than the threshold is contracted, a missing length is kept, a leaf
+    is never contracted). Leaves missing from ``index`` contribute no bit, which
+    is how a tree is restricted to a leaf universe. Iterative, so a
+    caterpillar tree with thousands of leaves cannot hit the recursion limit.
+    """
+    masks: List[int] = []
+    value: Dict[int, int] = {}
+    stack: List[Tuple[NewickNode, bool]] = [(root, False)]
+    while stack:
+        node, expanded = stack.pop()
+        if not node.children:
+            value[id(node)] = index.get(node.name, 0) if node.name else 0
             continue
-        key = side if len(side) <= len(complement) else complement
-        if len(key) < 2:
-            continue  # trivial split (one leaf on the small side)
-        out.add(frozenset(key))
+        if not expanded:
+            stack.append((node, True))
+            for child in node.children:
+                stack.append((child, False))
+            continue
+        mask = 0
+        for child in node.children:
+            mask |= value.pop(id(child), 0)
+        value[id(node)] = mask
+        if node is root:
+            continue
+        if threshold and node.length is not None and node.length < threshold:
+            continue
+        masks.append(mask)
+    return value.get(id(root), 0), masks
+
+
+def canonical_splits(masks: Iterable[int], universe: int) -> set:
+    """Non-trivial bipartitions of ``universe`` among ``masks``, canonicalised.
+
+    Each mask is restricted to ``universe``; a bipartition is kept when both
+    sides hold at least two leaves, and keyed by the side without the lowest
+    set bit of ``universe`` - so both sides of one bipartition map to one key.
+    """
+    n = popcount(universe)
+    if n < 4:
+        return set()
+    ref = universe & -universe
+    out = set()
+    for mask in masks:
+        mask &= universe
+        k = popcount(mask)
+        if k < 2 or n - k < 2:
+            continue
+        out.add(universe ^ mask if mask & ref else mask)
     return out
 
 
@@ -1429,17 +1514,29 @@ def rf_distance(
             f"only {len(shared)} shared leaves: RF is undefined for fewer than 4 taxa"
         )
         return result
-    run_cmp = contract_short_branches(run_tree, collapse) if collapse else run_tree
-    truth_cmp = contract_short_branches(truth_tree, collapse) if collapse else truth_tree
-    run_pruned = prune_to(run_cmp, shared) if len(shared) < len(run_leaves) else run_cmp
-    truth_pruned = prune_to(truth_cmp, shared) if len(shared) < len(truth_leaves) else truth_cmp
-    base = frozenset(shared)
-    a = splits(run_pruned, base)
-    b = splits(truth_pruned, base)
+    # Contract short branches, restrict to the shared leaves, take the splits:
+    # restricting every clade to the shared leaves gives exactly the splits of
+    # the pruned tree, so no pruned copy is built.
+    index = leaf_index(shared)
+    universe = (1 << len(index)) - 1
+    _, run_masks = clade_masks(run_tree, index, collapse or 0.0)
+    _, truth_masks = clade_masks(truth_tree, index, collapse or 0.0)
+    a = canonical_splits(run_masks, universe)
+    b = canonical_splits(truth_masks, universe)
+    return rf_from_split_sets(a, b, result)
+
+
+def rf_from_split_sets(a: set, b: set, result: Optional[RfResult] = None) -> RfResult:
+    """Fill an :class:`RfResult` from two canonical split sets.
+
+    ``rf_normalized = rf / (splits_a + splits_b)``: 0 is identical, 1 means no
+    split is shared (a star tree against any resolved truth scores 1).
+    """
+    result = result or RfResult()
     result.splits_a = len(a)
     result.splits_b = len(b)
     result.shared_splits = len(a & b)
-    result.rf = len(a - b) + len(b - a)
+    result.rf = len(a ^ b)
     denom = len(a) + len(b)
     result.rf_normalized = (result.rf / denom) if denom else 0.0
     return result
@@ -1763,6 +1860,13 @@ GENOME_NAME_ALIASES = ("name", "genome", "genome_name", "sample", "id", "genome_
 #: The real file writes **both** a numeric id and a name per side::
 #:
 #:     genome_a  name_a  genome_b  name_b  snps  indels  comparable_bp  subs_per_site
+#:     [raw_snps  raw_comparable_bp]
+#:
+#: The engine is gaining the two ``raw_*`` columns after the existing ones. Once
+#: they are there, ``snps`` / ``comparable_bp`` are the **core-genome, filtered**
+#: values and ``raw_*`` the unfiltered ones; without them, ``snps`` is the
+#: engine's only (unfiltered) count. Every column is found by its header name,
+#: so appended or reordered columns change nothing.
 #:
 #: Joins against SKA2, a truth tree and the published expected values are all by
 #: genome *name*, so the name columns are matched first and the id columns are
@@ -1798,16 +1902,34 @@ DIST_COLUMN_ALIASES = {
     ),
     "focus": ("focus", "focus_level", "level"),
     "indels": ("indels", "indel", "indel_count"),
+    "raw_snps": ("raw_snps", "snps_raw", "unfiltered_snps"),
+    "raw_comparable_bp": ("raw_comparable_bp", "comparable_bp_raw", "unfiltered_comparable_bp"),
 }
+
+#: How to call the ``snps`` column in reports, depending on whether the file
+#: also carries ``raw_snps`` (then ``snps`` is the filtered core-genome count).
+SNPS_LABEL_FILTERED = "filtered (core genome)"
+SNPS_LABEL_ONLY = "as reported"
+
+
+def distance_basis(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Which distance columns a run reported: ``{"has_raw", "snps_label"}``."""
+    has_raw = any(r.get("raw_snps") is not None for r in rows)
+    return {
+        "has_raw": has_raw,
+        "snps_label": SNPS_LABEL_FILTERED if has_raw else SNPS_LABEL_ONLY,
+    }
 
 
 def load_cluster_distances(outdir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Read every ``cluster_<id>.dist.tsv`` in an output folder.
 
     Returns ``(rows, problems)`` where each row is a dict with keys ``cluster``,
-    ``a``, ``b``, ``snps``, ``comparable_bp``, ``distance``, ``focus``. Column
-    names are matched by alias; when the two genome columns cannot be identified
-    the file is reported and skipped instead of guessed at.
+    ``a``, ``b``, ``snps``, ``comparable_bp``, ``distance``, ``focus``,
+    ``indels``, ``raw_snps`` and ``raw_comparable_bp`` (the last two ``None``
+    until the engine writes them). Column names are matched by alias, never by
+    position; when the two genome columns cannot be identified the file is
+    reported and skipped instead of guessed at.
     """
     outdir = Path(outdir)
     problems: List[str] = []
@@ -1865,6 +1987,10 @@ def load_cluster_distances(outdir: Path) -> Tuple[List[Dict[str, Any]], List[str
                     "distance": _to_float(row.get(cols["distance"])) if cols["distance"] else None,
                     "focus": row.get(cols["focus"]) if cols["focus"] else None,
                     "indels": _to_int(row.get(cols["indels"])) if cols["indels"] else None,
+                    "raw_snps": _to_int(row.get(cols["raw_snps"])) if cols["raw_snps"] else None,
+                    "raw_comparable_bp": _to_int(row.get(cols["raw_comparable_bp"]))
+                    if cols["raw_comparable_bp"]
+                    else None,
                     "_source": path.name,
                 }
             )
@@ -2141,7 +2267,7 @@ def comparable_bp_for(outdir: Path, run_json: Optional[RunJson] = None) -> Optio
     """A comparable-site count to convert "half a SNP" into branch-length units.
 
     Prefers the largest ``comparable_bp`` seen in ``cluster_*.dist.tsv``, and
-    falls back to ``run.json.total_length``.
+    falls back to the mean genome length (``run.json`` total_length / genomes).
     """
     rows, _ = load_cluster_distances(Path(outdir))
     values = [r["comparable_bp"] for r in rows if r.get("comparable_bp")]
@@ -2149,8 +2275,11 @@ def comparable_bp_for(outdir: Path, run_json: Optional[RunJson] = None) -> Optio
         return max(values)
     if run_json is None:
         run_json = load_run_json(Path(outdir), required=False)
-    if run_json is not None:
-        return run_json.total_length
+    if run_json is not None and run_json.total_length:
+        # total_length is summed over every genome; half a SNP is a fraction of
+        # ONE genome's comparable sites, so use the mean genome length.
+        genomes = run_json.genomes
+        return int(run_json.total_length / genomes) if genomes else run_json.total_length
     return None
 
 
@@ -2225,6 +2354,42 @@ def find_datasets(work_dir: Path, names: Optional[Sequence[str]] = None) -> List
             "run scripts/real_datasets.py --datasets all first"
         )
     return out
+
+
+def dataset_truth(
+    work_dir: Optional[Path],
+    name: str,
+    summary: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Path], Optional[Path], str]:
+    """``(reference tree, truth folder, where they came from)`` for one dataset.
+
+    Looks at ``<work>/<name>/dataset.json`` first, then at the ``datasets`` list
+    of a matrix ``summary.json``: a simulated dataset can live outside the work
+    folder (on tmpfs, say), and then the summary is the only place that still
+    knows where its truth is. Paths that do not exist are dropped.
+    """
+    candidates: List[Tuple[Dict[str, Any], str]] = []
+    if work_dir is not None:
+        path = Path(work_dir) / name / "dataset.json"
+        obj, _ = load_json_optional(path)
+        if isinstance(obj, dict):
+            candidates.append((obj, str(path)))
+    for entry in (summary or {}).get("datasets") or []:
+        if isinstance(entry, dict) and str(entry.get("name")) == str(name):
+            candidates.append((entry, "matrix summary.json"))
+    tree: Optional[Path] = None
+    tdir: Optional[Path] = None
+    origin = "no dataset descriptor found"
+    for obj, where in candidates:
+        truth = obj.get("truth") if isinstance(obj.get("truth"), dict) else {}
+        t, d = truth.get("tree"), truth.get("dir")
+        if tree is None and t and Path(t).exists():
+            tree, origin = Path(t), where
+        if tdir is None and d and Path(d).is_dir():
+            tdir, origin = Path(d), where
+        if tree is None and tdir is None:
+            origin = f"{where} declares no existing truth"
+    return tree, tdir, origin
 
 
 # ---------------------------------------------------------------------------
@@ -2352,6 +2517,86 @@ VERDICT_METRICS = (
     ("peak_memory_bytes", "peak memory", "higher_is_worse"),
 )
 
+#: A time-to-exact whose baseline median is shorter than this is not judged:
+#: a 20% difference on a sub-2-second run is inside run-to-run noise (process
+#: start-up, page cache, scheduler), so calling it "worse" would be noise.
+VERDICT_MIN_BASELINE_S = 2.0
+
+#: How many times run_matrix.py runs every configuration by default. The
+#: verdict uses the median, the report shows min-max next to it.
+DEFAULT_REPEATS = 3
+
+#: Datasets that are not performance tests. A dataset.json can also opt out with
+#: ``"performance_verdict": false`` (and an optional ``performance_reason``).
+PERFORMANCE_EXCLUDED: Dict[str, str] = {
+    "salmonella_trio": (
+        "3 genomes: an exactness check against published SNP distances, "
+        "not a performance test"
+    ),
+}
+
+
+def performance_exclusions(datasets: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """``{dataset: reason}`` for every dataset left out of the performance verdict."""
+    out: Dict[str, str] = {}
+    for entry in datasets:
+        name = str(entry.get("name"))
+        if entry.get("performance_verdict") is False:
+            out[name] = str(
+                entry.get("performance_reason")
+                or "its dataset.json sets performance_verdict: false"
+            )
+        elif name in PERFORMANCE_EXCLUDED:
+            out[name] = PERFORMANCE_EXCLUDED[name]
+    return out
+
+
+#: The per-run measurements a repeat records, and that are summarised.
+REPEAT_METRICS = ("wall_s", "first_tree_s", "exact_tree_s", "total_s", "peak_memory_bytes")
+
+
+def repeat_stats(values: Iterable[Optional[float]]) -> Dict[str, Any]:
+    """``{n, median, min, max, values}`` over the known values (unknown ones skipped)."""
+    vals = [
+        float(v) for v in values
+        if v is not None and not (isinstance(v, float) and math.isnan(v))
+    ]
+    return {
+        "n": len(vals),
+        "median": median(vals),
+        "min": min(vals) if vals else None,
+        "max": max(vals) if vals else None,
+        "values": vals,
+    }
+
+
+def cell_repeat_stats(cell: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Per-metric statistics over a matrix cell's usable repeats.
+
+    A summary written before ``--repeats`` existed has no ``repeats`` list; its
+    single run is then the only value (n = 1), never an invented spread.
+    """
+    usable = [
+        r for r in (cell.get("repeats") or [])
+        if isinstance(r, dict) and r.get("status") in ("ok", "cached")
+    ]
+    if not usable and not cell.get("repeats") and cell.get("status") in ("ok", "cached"):
+        run = cell.get("run") or {}
+        timings = run.get("timings_s") or {}
+        usable = [{
+            "wall_s": cell.get("wall_s"),
+            "first_tree_s": timings.get("first_tree_s", cell.get("first_tree_s")),
+            "exact_tree_s": timings.get("exact_tree_s", cell.get("exact_tree_s")),
+            "total_s": timings.get("total_s", cell.get("total_s")),
+            "peak_memory_bytes": cell.get("peak_memory_bytes"),
+            "peak_memory_is_floor": cell.get("peak_memory_is_floor"),
+        }]
+    out = {key: repeat_stats(r.get(key) for r in usable) for key in REPEAT_METRICS}
+    out["peak_memory_bytes"]["any_floor"] = any(
+        bool(r.get("peak_memory_is_floor")) for r in usable
+    )
+    return out
+
 
 @dataclass
 class VerdictMetric:
@@ -2362,6 +2607,13 @@ class VerdictMetric:
     ratio: Optional[float]
     worse: Optional[bool]
     note: str = ""
+    #: ``judged``, ``too_short`` (baseline median under the time floor),
+    #: ``excluded`` (dataset is not a performance test) or ``missing``.
+    state: str = "judged"
+    baseline_range: Optional[Tuple[Optional[float], Optional[float]]] = None
+    switched_off_range: Optional[Tuple[Optional[float], Optional[float]]] = None
+    n_baseline: Optional[int] = None
+    n_switched_off: Optional[int] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -2372,7 +2624,30 @@ class VerdictMetric:
             "ratio": self.ratio,
             "worse": self.worse,
             "note": self.note,
+            "state": self.state,
+            "baseline_range": list(self.baseline_range) if self.baseline_range else None,
+            "switched_off_range": (
+                list(self.switched_off_range) if self.switched_off_range else None
+            ),
+            "n_baseline": self.n_baseline,
+            "n_switched_off": self.n_switched_off,
         }
+
+    @property
+    def ranges_overlap(self) -> Optional[bool]:
+        """Whether the min-max ranges of the two sides overlap.
+
+        ``None`` when either side has fewer than two runs: a single value has no
+        spread, so "no overlap" would claim a separation nobody measured.
+        """
+        if not self.baseline_range or not self.switched_off_range:
+            return None
+        if (self.n_baseline or 0) < 2 or (self.n_switched_off or 0) < 2:
+            return None
+        (b_lo, b_hi), (o_lo, o_hi) = self.baseline_range, self.switched_off_range
+        if None in (b_lo, b_hi, o_lo, o_hi):
+            return None
+        return not (o_lo > b_hi or o_hi < b_lo)
 
 
 @dataclass
@@ -2391,9 +2666,12 @@ class Verdict:
     datasets_worse: List[str] = field(default_factory=list)
     datasets_measurable: List[str] = field(default_factory=list)
     datasets_total: int = 0
+    #: ``{dataset: reason}``: not part of the performance verdict at all.
+    datasets_excluded: Dict[str, str] = field(default_factory=dict)
     reason: str = ""
     threshold: float = VERDICT_THRESHOLD
     min_datasets: int = VERDICT_MIN_DATASETS
+    min_baseline_s: float = 0.0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -2404,11 +2682,27 @@ class Verdict:
             "datasets_worse": list(self.datasets_worse),
             "datasets_measurable": list(self.datasets_measurable),
             "datasets_total": self.datasets_total,
+            "datasets_excluded": dict(self.datasets_excluded),
+            "min_baseline_s": self.min_baseline_s,
             "reason": self.reason,
             "threshold": self.threshold,
             "min_datasets": self.min_datasets,
             "metrics": [m.as_dict() for m in self.metrics],
         }
+
+
+def _range_of(measure: Dict[str, Any], key: str) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    stats = measure.get(f"{key}_stats")
+    if isinstance(stats, dict) and stats.get("n"):
+        return (stats.get("min"), stats.get("max"))
+    return None
+
+
+def _n_of(measure: Dict[str, Any], key: str) -> Optional[int]:
+    stats = measure.get(f"{key}_stats")
+    if isinstance(stats, dict):
+        return stats.get("n")
+    return 1 if measure.get(key) is not None else None
 
 
 def evaluate_verdict(
@@ -2417,26 +2711,44 @@ def evaluate_verdict(
     baseline_by_dataset: Dict[str, Dict[str, Any]],
     switched_by_dataset: Dict[str, Dict[str, Any]],
     dataset_names: Optional[Sequence[str]] = None,
+    *,
+    min_baseline_s: float = 0.0,
+    excluded: Optional[Dict[str, str]] = None,
 ) -> Verdict:
     """Apply the section 11 rule to one switch.
 
     ``baseline_by_dataset`` / ``switched_by_dataset`` map a dataset name to a
     measurement dict that may contain ``exact_tree_s`` and
-    ``peak_memory_bytes`` (either may be ``None``). ``dataset_names`` is the full
-    set the rule should consider, so a dataset that was never run is named in the
-    verdict instead of quietly shrinking the denominator.
+    ``peak_memory_bytes`` (either may be ``None``) - the **medians** over the
+    repeats - plus optional ``<key>_stats`` dicts with ``n``/``min``/``max``.
+    ``dataset_names`` is the full set the rule should consider, so a dataset
+    that was never run is named in the verdict instead of quietly shrinking the
+    denominator.
 
     A part of the idea *pays* if turning it off makes time-to-exact **or** peak
     memory at least 20% worse on at least two of the three datasets. A dataset
     where neither metric is measurable counts as neither worse nor not-worse:
     the verdict then says it could not be decided, rather than reporting a win
     (section 2 anti-goal).
+
+    Two refinements keep noise out of the verdict:
+
+    * ``min_baseline_s``: a time-to-exact whose baseline median is shorter than
+      this is shown but marked *too short to judge* and counts neither way
+      (memory on the same dataset is still judged);
+    * ``excluded``: ``{dataset: reason}`` for datasets that are not performance
+      tests at all (the 3-genome trio). They are listed with their reason and
+      left out of the denominator.
     """
-    verdict = Verdict(switch=switch, removes=removes or "")
+    verdict = Verdict(switch=switch, removes=removes or "", min_baseline_s=min_baseline_s)
+    excluded = dict(excluded or {})
     considered = list(dataset_names) if dataset_names else []
-    names = sorted(set(baseline_by_dataset) | set(switched_by_dataset) | set(considered))
+    every = sorted(set(baseline_by_dataset) | set(switched_by_dataset) | set(considered))
+    names = [n for n in every if n not in excluded]
+    verdict.datasets_excluded = {n: excluded[n] for n in every if n in excluded}
     verdict.datasets_total = len(names)
-    for name in names:
+    pct_label = int(round((VERDICT_THRESHOLD - 1) * 100))
+    for name in every:
         base = baseline_by_dataset.get(name) or {}
         off = switched_by_dataset.get(name) or {}
         any_measurable = False
@@ -2447,7 +2759,12 @@ def evaluate_verdict(
             r = ratio(o, b)
             worse: Optional[bool] = None
             note = ""
-            if r is None:
+            state = "judged"
+            if name in excluded:
+                state = "excluded"
+                note = f"excluded from the performance verdict: {excluded[name]}"
+            elif r is None:
+                state = "missing"
                 if not base and not off:
                     note = "this dataset was never run"
                 elif b is None and o is None:
@@ -2456,6 +2773,13 @@ def evaluate_verdict(
                     note = "baseline value missing or zero, ratio undefined"
                 else:
                     note = "switched-off value missing"
+            elif key == "exact_tree_s" and min_baseline_s and float(b) < min_baseline_s:
+                state = "too_short"
+                note = (
+                    f"too short to judge: baseline median {human_seconds(b)} is under "
+                    f"{min_baseline_s:g} s, where a {pct_label}% difference is "
+                    "run-to-run noise"
+                )
             else:
                 any_measurable = True
                 worse = r >= VERDICT_THRESHOLD
@@ -2470,8 +2794,15 @@ def evaluate_verdict(
                     ratio=r,
                     worse=worse,
                     note=note,
+                    state=state,
+                    baseline_range=_range_of(base, key),
+                    switched_off_range=_range_of(off, key),
+                    n_baseline=_n_of(base, key),
+                    n_switched_off=_n_of(off, key),
                 )
             )
+        if name in excluded:
+            continue
         if any_measurable:
             verdict.datasets_measurable.append(name)
         if any_worse:
@@ -2520,6 +2851,16 @@ def evaluate_verdict(
         if unmeasurable:
             detail += f"; not measurable on {len(unmeasurable)} ({', '.join(unmeasurable)})"
         verdict.reason = f"does not pay by the section 11 rule: {detail}"
+    too_short = sorted({m.dataset for m in verdict.metrics if m.state == "too_short"})
+    if too_short:
+        verdict.reason += (
+            f"; time-to-exact too short to judge (baseline median < {min_baseline_s:g} s) "
+            f"on {', '.join(too_short)}"
+        )
+    if verdict.datasets_excluded:
+        verdict.reason += (
+            f"; not a performance test, left out: {', '.join(sorted(verdict.datasets_excluded))}"
+        )
     return verdict
 
 

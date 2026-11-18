@@ -131,7 +131,23 @@ scripts/run_matrix.py --datasets ncbi_pd_cluster
 scripts/run_matrix.py --configs baseline flat --force
 scripts/run_matrix.py --threads 8 --k 31 --densities 16384,2048,256
 scripts/run_matrix.py --extra-run-arg --verbose       # repeatable pass-through
+scripts/run_matrix.py --repeats 5                     # default 3
+scripts/run_matrix.py --repeats 3 --keep-repeat-outputs
 ```
+
+**Repeats.** Many cells finish in under a second, where a 20% difference is
+noise, so every configuration runs `--repeats` times (default 3). Repeat 1
+writes the full output folder (used for accuracy, invariance and `bench`);
+repeats 2..N go to `<dataset>/<config>/repeats/r<k>/` and are pruned to
+`run.json` + logs unless `--keep-repeat-outputs` (the disk is nearly full).
+Repeats run **round-robin** - repeat 2 of every configuration, then repeat 3 -
+so slow drift of the machine does not land on one configuration. Every repeat is
+recorded in `cells[].repeats[]` (status, wall time, first/exact/total time, peak
+memory and its source), and `cells[].timing` holds `{n, median, min, max,
+values}` per metric. A failed repeat is a failure (exit 1, listed in
+`failures`) and adds no number; a configuration whose first run failed is not
+repeated. Re-running with a larger `--repeats` reuses the repeats that exist
+and only runs the missing ones.
 
 Per cell it records: the exact `run` and `bench` command lines, wall time,
 return code, `run.json` timings/counters/`focus_counts`/`peak_memory_bytes`,
@@ -170,29 +186,63 @@ matrix still leaves a usable, honest summary behind.
 ### `accuracy_over_time.py` — the key figure
 
 Parses `events.jsonl` and produces tree accuracy versus elapsed time, one curve
-per configuration.
+per configuration, one panel per dataset.
 
-Accuracy at an instant = **Robinson-Foulds distance** between the tree emitted by
-then and the truth tree, *after collapsing branches shorter than half a SNP*.
-The full tree at each instant is re-assembled the way section 6.9 describes: take
-the `backbone_tree` (leaves are clusters) and replace each pivot leaf with the
-latest `cluster_focus` subtree.
+**What one point means.** At each `backbone_tree` / `cluster_focus` event the
+script rebuilds the tree the program was *showing* at that instant, the way
+section 6.9 describes: the backbone, with every pivot leaf replaced by its
+cluster. A cluster that has not emitted a tree yet is an **unresolved star of
+its members**; every other cluster is its latest emitted tree (Focus 0, 1 or 2).
+That whole tree is scored against the truth over the **full leaf set** - every
+genome of the run that the truth knows - so a genome that is not resolved yet
+counts as unresolved, never as "not there yet". The curve therefore starts near
+1 and falls as clusters become exact.
+
+* **Normalised Robinson-Foulds** = (splits in one tree but not the other) /
+  (splits of the two trees added together). 1 = no split right (a star scores
+  1 against any resolved truth), 0 = identical topology. Splits are unrooted
+  bipartitions of the full leaf set.
+* **Half a SNP, per unit.** Branches shorter than half a SNP are collapsed in
+  each part's own units: Focus 2 cluster trees are in SNPs (< 0.5), Focus 1
+  trees in difference pieces (< 0.5 piece), the backbone and Focus 0 trees in
+  substitutions per site (< 0.5 / comparable bp). The truth is collapsed in its
+  units (SNPs for simulator truth).
+* **Simulated truth.** `infinity simulate` writes one truth tree per cluster
+  (`tree_cNN.nwk`, rooted at the cluster root) and no full tree. Every cluster
+  root is the reference with its own independent substitutions, so the full
+  truth is those trees **joined at one star**: each cluster is a clade, no order
+  of clusters is claimed.
+* **Real data.** The dataset's reference tree, restricted to the genomes that
+  are both in the run and in the tree (the IQ-TREE tree's 11 extra reference
+  genomes are left out and reported).
+* **Why a simulated curve can end above 0** although `infinity bench` reports
+  per-cluster RF 0: the full tree also claims where each cluster hangs off the
+  rest. `rf_between_clusters` counts splits that separate whole truth clusters
+  (the backbone resolving what the truth leaves as a star);
+  `rf_within_clusters` counts splits that cut a cluster - a wrong cluster tree,
+  or a cluster tree rooted at its midpoint (6.9) instead of the true cluster
+  root. On the November 2026 `sim_100` baseline the end value 10 is 1 between +
+  9 within, and the 9 are entirely rooting (unrooted per-cluster RF is 0).
+
+Splits are leaf bitmasks; each emitted cluster tree is turned into splits once,
+so a 5000-genome run with 300 tree events scores in seconds.
 
 ```bash
 # one run
 scripts/accuracy_over_time.py --run-dir bench-work/matrix/ncbi_pd_cluster/baseline \
     --truth-tree bench-work/ncbi_pd_cluster/truth/cluster.treefile
 
-# the whole matrix
+# the whole matrix (truth from each dataset.json, else from matrix/summary.json)
 scripts/accuracy_over_time.py --matrix-dir bench-work/matrix
+
+# the older measure: mean RF of the cluster trees emitted so far, each against
+# its own truth tree (what `infinity bench` reports per cluster)
+scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --scoring per-cluster
 
 # read RF values from a bench JSON instead of recomputing them
 scripts/accuracy_over_time.py --run-dir <dir> --rf-from <dir>/bench.json --rf-mode bench
 
-# force the pure-Python RF even when a bench.json exists
-scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode internal
-
-# let the CLI's own RF code do the scoring (one temp output folder per tree)
+# let the CLI's own RF code do the scoring
 scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode infinity --infinity <path>
 ```
 
@@ -200,45 +250,48 @@ scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode infinity 
 
 | mode | behaviour |
 |---|---|
-| `auto` (default) | the best source that can actually form a curve: a `bench.json` series with RF at two or more instants, else RF recomputed here, else the bench series anyway. The choice is recorded per row in `rf_source` and explained in the notes. |
+| `auto` (default) | RF recomputed here over the full leaf set whenever a truth exists (simulator folder or reference tree); otherwise a `bench.json` series, labelled. The choice is recorded per row in `rf_source`. |
 | `bench` | require RF values from `--rf-from <bench.json>` (or `<run-dir>/bench.json`); no truth tree needed |
-| `internal` | always compute RF in pure Python from the emitted Newick, against per-cluster truth trees (`--truth-dir`) or one reference tree (`--truth-tree`) |
+| `internal` | always compute RF here; fail if there is no truth |
 | `infinity` | re-run `infinity bench --output <run dir> --truth <truth dir>` and read its series; needs a simulator truth folder |
 
-`--rf-from`/`--rf-mode bench` is what makes the script usable **before** the CLI's
-`bench` subcommand exists, and `internal` is what makes it usable when `bench`
-exists but its series has no time resolution (see section 4).
+An explicit `--truth-tree` or `--truth-dir` is used as given; truth is only
+discovered (from `<work>/<dataset>/dataset.json`, then from the matrix
+`summary.json`, which is the only record of a simulated dataset kept on tmpfs)
+when neither is passed.
 
-**"Half a SNP" needs a unit.** Infinity-Win writes substitutions per site inside
-clusters (section 6.9) while the simulator's truth tree is in SNPs (section 10.1),
-so one number cannot serve both. `--collapse-mode`:
+`--collapse-mode` (`auto`, `snps`, `length X`, `none`) and `--comparable-bp`
+work as before; `auto` takes the comparable-site count from `cluster_*.dist.tsv`
+or the mean genome length (`run.json` total_length / genomes). An unconverted
+"half a SNP" is never silently applied: the CSV carries the truth threshold and
+the status JSON the run-side thresholds.
 
-- `auto` (default) — use `--comparable-bp` if given (or the largest
-  `comparable_bp` in `cluster_*.dist.tsv`, else `run.json.total_length`), giving
-  `threshold = collapse_snps / comparable_bp`; otherwise, if the truth tree's own
-  branch lengths look like integer SNP counts, use `collapse_snps` directly;
-  otherwise **do not collapse and say so**.
-- `snps` — require a comparable-site count; error out rather than guess.
-- `length X` — an absolute threshold in tree units.
-- `none` — no collapsing.
+Robinson-Foulds needs **four or more taxa**: with fewer scorable genomes (the
+3-genome outbreak trio) RF is empty, never zero.
 
-An unconverted "half a SNP" is never silently applied: the CSV carries the
-threshold that was actually used, and the reason is printed.
-
-Robinson-Foulds needs **four or more taxa**. Points where fewer than four truth
-leaves are present (very early in a run, or the 3-genome outbreak trio) get an
-empty RF and a note, never a zero. `leaves_shared` says how much of the tree
-existed at that instant.
+**The figure.** Small multiples, one panel per dataset (a dataset with no
+scorable truth gets a panel that says why), the time axis log-scaled per panel
+when its times span more than 5x (`--linear-x` forces linear). Each
+configuration has one fixed colour, marker and dash pattern in every panel and
+every figure (`CONFIG_STYLES`; colours from the dataviz reference palette,
+validated for colour-vision deficiency), so one legend serves all panels. Curves
+are steps: the displayed tree stays the same until the next event replaces it.
+The definition above is printed under the figure.
 
 Outputs: `accuracy_over_time__<dataset>__<config>.csv` per run,
-`accuracy_over_time.csv` combined, and `accuracy_over_time*.png` when matplotlib
-is available. CSV columns:
+`accuracy_over_time.csv` combined, `accuracy_over_time.png` (all panels) and
+`accuracy_over_time__<dataset>.png` when matplotlib is available. CSV columns:
 
 ```
 dataset, config, t_ms, t_s, seq, event, cluster, focus, rf_source,
 leaves_run, leaves_truth, leaves_shared, splits_run, splits_truth, splits_shared,
-rf, rf_normalized, collapse_threshold, note
+leaves_exact, clusters_exact, rf, rf_normalized, rf_between_clusters,
+rf_within_clusters, collapse_threshold, note
 ```
+
+`leaves_shared` is the number of genomes scored (the full leaf set),
+`leaves_run` how many of them the displayed tree contained, `leaves_exact` how
+many were in a Focus 2 cluster at that instant.
 
 ### `baselines.py` — the outside baselines (Linux only, not part of the program)
 
@@ -298,15 +351,29 @@ commands.
 
 The verdict is exactly section 11's rule: *a part of the idea pays if turning it
 off makes time-to-exact or peak memory at least 20% worse on at least two of the
-three datasets.* Four outcomes are distinguished, because collapsing them would
-hide missing data:
+three datasets*, applied to measurements that are honest about noise:
+
+* **Medians.** The rule compares the median over the repeats of the switched-off
+  configuration with the baseline's median; every table prints `median
+  [min-max]` and the usable/total runs, and the verdict detail says whether the
+  two min-max ranges overlap (n/a with a single run - a point has no spread).
+* **Too short to judge.** When the baseline median time-to-exact is under 2 s
+  (`--min-judge-s`), the time metric is printed but marked *too short to judge*
+  and counts neither way. Peak memory on that dataset is still judged.
+* **Not a performance test.** `salmonella_trio` (3 genomes, the exactness check
+  of section 5) is left out of the performance verdict and out of its
+  denominator, and the report says so (`common.PERFORMANCE_EXCLUDED`; any
+  dataset.json can opt out with `"performance_verdict": false`).
+
+A summary from before `--repeats` existed still reports, as n = 1.
+Four outcomes are distinguished, because collapsing them would hide missing data:
 
 | Verdict | Meaning |
 |---|---|
 | **pays** | ≥ 2 datasets measurably ≥ 20% worse |
 | does not pay | ≥ 2 datasets measurable, fewer than 2 got 20% worse |
 | undetermined | only 1 dataset measurable — the rule cannot decide either way |
-| not measurable | no dataset had a usable time-to-exact or peak memory |
+| not measurable | no dataset had a usable (judgeable) time-to-exact or peak memory |
 
 "Undetermined" and "not measurable" are never reported as a pass.
 
@@ -445,22 +512,12 @@ recorded, and keeps the run's own timings and counters, which are still valid.
 
 ### Where the accuracy-over-time curve comes from
 
-`accuracy_over_time.py --rf-mode auto` picks the best available source, and says
-which one it used in the CSV's `rf_source` column and in its notes:
-
-1. a `bench.json` series **with RF at two or more distinct instants** (the
-   engine's own numbers — preferred whenever it can actually form a curve);
-2. otherwise RF **recomputed in Python** at every emitted tree: each emitted
-   cluster tree against the matching `tree_*.nwk` truth tree (simulated data), or
-   the assembled full tree against one reference tree (real data);
-3. otherwise the `bench.json` series anyway, labelled, because one point is
-   better than none.
-
-Today the engine's `timeline` reports `rf_normalised: null` for live trees, so on
-simulated data path 2 is what produces the curve. If `bench` later scores live
-trees against truth, path 1 takes over automatically with no script change. Use
-`--rf-mode bench` to force the bench values, `internal` to force the recomputed
-ones, or `infinity` to have the CLI re-run `bench` first.
+`accuracy_over_time.py --rf-mode auto` recomputes RF itself whenever a truth
+exists, because only that gives one definition (the displayed tree over the full
+leaf set) for simulated and real data alike. The engine's `bench.json`
+`timeline` reports `rf_normalised: null` for live trees and its final per-cluster
+`trees` share one timestamp, so it is used only when there is no truth to score
+against; `--rf-mode bench` / `infinity` still force it.
 
 ### Output files the scripts parse, and how leniently
 
@@ -468,10 +525,12 @@ ones, or `infinity` to have the CLI re-run `bench` first.
 |---|---|---|
 | `run.json` | `run_matrix`, `make_report` | every key optional; null timings stay `null`; unknown keys ignored |
 | `events.jsonl` | `accuracy_over_time` | bad lines counted and skipped with their line numbers; envelope shape `{"seq","t_ms","wall_ms","event":{"event","data"}}` |
-| `cluster_<id>.dist.tsv` | `baselines`, `make_report`, `common` | the real header is `genome_a name_a genome_b name_b snps indels comparable_bp subs_per_site`; **names are matched before ids**, because joining on the numeric id would match nothing and look like a clean zero. Alternatives (`sample1/sample2`, `snp_count`, `sites`, `distance`) are also accepted; a file whose two genome columns cannot be identified is reported and skipped, never guessed at |
+| `cluster_<id>.dist.tsv` | `baselines`, `make_report`, `common` | the real header is `genome_a name_a genome_b name_b snps indels comparable_bp subs_per_site`, and the engine is appending `raw_snps raw_comparable_bp`. Once those exist, `snps`/`comparable_bp` are the **filtered core-genome** values and `raw_*` the unfiltered ones; the reports then show both (acceptance check: "engine core" and "engine raw" columns; `baselines.py compare`: a core and a raw join against SKA2; switch invariance: `raw pairs differing`). Without them `snps` is labelled "as reported". **Names are matched before ids**, because joining on the numeric id would match nothing and look like a clean zero. Alternatives (`sample1/sample2`, `snp_count`, `sites`, `distance`) are also accepted; a file whose two genome columns cannot be identified is reported and skipped, never guessed at |
 | `tree.nwk`, `cluster_<id>.nwk` | `accuracy_over_time`, `baselines` | internal node labels, `[&...]` comments, quoted names, multiple trees |
-| `genomes.tsv` | `run_matrix`, `baselines` | `id name path length contigs n50 gc cluster is_pivot focus snps_vs_pivot indels_vs_pivot uncovered_bp novel_bp` |
-| `clusters.tsv`, `cluster_<id>.variants.tsv` | available via `common.load_*` | same alias matching; ragged rows blank-filled and reported |
+| `genomes.tsv` | `common`, `baselines` | `id name path length contigs n50 gc cluster is_pivot focus snps_vs_pivot indels_vs_pivot uncovered_bp novel_bp`, plus whatever the engine appends; only named columns are looked up |
+| `clusters.tsv`, `cluster_<id>.variants.tsv` | `common`, `make_report` | same alias matching; ragged rows blank-filled and reported. `variants.tsv` is gaining a final `filter` column (`PASS` or `;`-separated reasons); readers look columns up by name, so it changes nothing, and the variant fingerprint of the invariance check includes it |
+
+**No reader parses by position.** Every engine TSV is read with `common.read_table` and its columns are found by header name (`Table.find_column`), so appended or reordered columns change nothing; `tests/test_columns.py` shuffles the columns of every file and checks the results do not move, and `FAKE_INFINITY_NEW_COLUMNS=1` makes the fake engine write the upcoming layout. The one positional reader is the Mash table, because `mash dist` writes no header.
 
 A column may be missing while the tool is still being built. Readers report that
 as a problem string that ends up in `REPORT.md` section 8 — they do not crash and
@@ -500,6 +559,7 @@ tested end to end without the real binary. Environment variables steer it:
 | `FAKE_INFINITY_BENCH_FAIL=1` | `bench` exits non-zero, writes nothing |
 | `FAKE_INFINITY_DIST_JSON=<path>` | take pairwise SNP counts from a JSON list |
 | `FAKE_INFINITY_SLEEP=<float>` | make wall time visible |
+| `FAKE_INFINITY_NEW_COLUMNS=1` | write the upcoming layout: `raw_snps`/`raw_comparable_bp` in `dist.tsv`, a `filter` column in `variants.tsv`, extra `genomes.tsv` columns |
 
 Covered: the SKA2 parser (including the real 496-row table when present), the
 `events.jsonl` parser, the `run.json` reader, defensive table reading, Newick /
@@ -515,7 +575,8 @@ in `tempfile.mkdtemp()` directories under `/tmp` and removed afterwards.
 ## 6. Assumptions worth knowing
 
 1. **Sequential runs.** Configurations run one at a time. Parallel runs would
-   make wall time and peak memory meaningless.
+   make wall time and peak memory meaningless. Each runs `--repeats` times,
+   round-robin, and only medians enter the verdict.
 2. **Genome names must match** between Infinity-Win's output, the SKA2 table and any
    truth tree, or the joins produce nothing. Infinity-Win uses the FASTA file stem; the
    real datasets were built so those agree. `baselines.py compare` reports a

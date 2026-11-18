@@ -370,7 +370,10 @@ class TestAccuracyOverTime(ScriptCase):
         self.assertTrue(scored, "at least one point must have a defined RF")
         self.assertGreater(float(scored[-1]["rf"]), 0.0)
         self.assertGreater(float(scored[-1]["rf_normalized"]), 0.0)
-        self.assertIn("per cluster", scored[-1]["rf_source"])
+        self.assertIn("full leaf set", scored[-1]["rf_source"])
+        # the swap is inside one cluster, so no split between clusters is wrong
+        self.assertEqual(int(scored[-1]["rf_between_clusters"]), 0)
+        self.assertGreater(int(scored[-1]["rf_within_clusters"]), 0)
 
     def test_a_single_full_truth_tree_is_used_when_there_is_no_simulator_truth(self) -> None:
         """Real datasets have one reference tree, not per-cluster truth trees."""
@@ -400,8 +403,75 @@ class TestAccuracyOverTime(ScriptCase):
         rows = self.read_csv(out / "accuracy_over_time__fix_small__baseline.csv")
         scored = [r for r in rows if r["rf_normalized"] not in ("", None)]
         self.assertTrue(scored)
-        self.assertEqual(scored[-1]["rf_source"], "internal RF")
+        self.assertEqual(scored[-1]["rf_source"], "internal RF (full leaf set)")
         self.assertEqual(float(scored[-1]["rf"]), 0.0, "the fixture run tree equals truth")
+        # a reference tree has no truth clusters, so RF is not decomposed
+        self.assertEqual(scored[-1]["rf_between_clusters"], "")
+
+    def test_the_curve_starts_with_unrefined_stars_and_falls_to_exact(self) -> None:
+        """Every instant is scored on the full leaf set, stars included."""
+        out = self.root / "curves-stars"
+        code = accuracy_over_time.main(
+            [
+                "--run-dir", str(self.run_dir("baseline")),
+                "--work-dir", str(self.work),
+                "--out-dir", str(out),
+                "--no-plot",
+            ]
+        )
+        self.assertEqual(code, 0)
+        rows = self.read_csv(out / "accuracy_over_time__fix_small__baseline.csv")
+        self.assertEqual(rows[0]["event"], "backbone_tree")
+        self.assertTrue(all(r["rf_source"] == "internal RF (full leaf set)" for r in rows))
+        # every point is scored over all 8 genomes, even before a cluster is refined
+        self.assertTrue(all(int(r["leaves_shared"]) == self.genomes for r in rows))
+        self.assertTrue(all(int(r["leaves_run"]) == self.genomes for r in rows))
+        first, last = float(rows[0]["rf_normalized"]), float(rows[-1]["rf_normalized"])
+        self.assertGreater(first, 0.0, "two unresolved stars cannot match the truth")
+        self.assertEqual(last, 0.0)
+        self.assertEqual(int(rows[0]["leaves_exact"]), 0)
+        self.assertEqual(int(rows[-1]["leaves_exact"]), self.genomes)
+        values = [float(r["rf_normalized"]) for r in rows]
+        self.assertEqual(values, sorted(values, reverse=True), "accuracy only improves here")
+
+    def test_truth_is_found_through_the_matrix_summary(self) -> None:
+        """A simulated dataset may keep its dataset.json outside the work folder."""
+        moved = self.root / "elsewhere"
+        (self.work / "fix_small").rename(moved)
+        summary_path = self.matrix / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        for entry in summary["datasets"]:
+            entry["truth"]["dir"] = str(moved / "truth")
+            entry["truth"]["tree"] = None
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        out = self.root / "via-summary"
+        code = accuracy_over_time.main(
+            [
+                "--matrix-dir", str(self.matrix),
+                "--work-dir", str(self.work),
+                "--out-dir", str(out),
+                "--no-plot",
+            ]
+        )
+        self.assertEqual(code, 0)
+        rows = self.read_csv(out / "accuracy_over_time__fix_small__baseline.csv")
+        self.assertTrue(rows)
+        self.assertEqual(rows[-1]["rf_source"], "internal RF (full leaf set)")
+
+    def test_per_cluster_scoring_is_still_available(self) -> None:
+        out = self.root / "curves-per-cluster"
+        code = accuracy_over_time.main(
+            [
+                "--run-dir", str(self.run_dir("baseline")),
+                "--work-dir", str(self.work),
+                "--out-dir", str(out),
+                "--scoring", "per-cluster",
+                "--no-plot",
+            ]
+        )
+        self.assertEqual(code, 0)
+        rows = self.read_csv(out / "accuracy_over_time__fix_small__baseline.csv")
+        self.assertIn("per cluster", rows[-1]["rf_source"])
 
     def test_rf_can_come_from_a_bench_json_instead_of_being_recomputed(self) -> None:
         bench_json = self.run_dir("baseline") / "bench.json"
@@ -981,8 +1051,8 @@ class TestAcceptanceCheck(ScriptCase):
         self.assertTrue(basis.get("caveat"), "the filtered basis must carry its caveat")
         run_matrix.main(self.matrix_argv("--datasets", "salmonella_trio", "--configs", "baseline"))
         text = self.report(expected_dir=self.expected_file.parent)
-        self.assertIn("Two bases are reported", text)
-        self.assertIn("as reported", text)
+        self.assertIn("**Script-filtered**", text)
+        self.assertIn("as reported (`snps`)", text)
         self.assertIn("filtered", text)
         # the recomputation's own limits must be stated, not hidden
         self.assertIn("does NOT apply the comparable-coverage restriction", basis["caveat"])

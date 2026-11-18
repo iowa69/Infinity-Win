@@ -24,7 +24,7 @@ Where the trees come from
     the curve shows the whole picture sharpening, not one cluster at a time.
 
 Where the RF values come from (``--rf-mode``)
-    ``auto``     use a ``bench.json`` timeline when one exists, else compute RF here
+    ``auto``     compute RF here whenever a truth exists, else use a ``bench.json``
     ``bench``    require RF values from a bench JSON (``--rf-from``)
     ``internal`` always compute RF in pure Python from the emitted Newick
     ``infinity``    write each emitted tree to a temporary output folder and ask
@@ -51,7 +51,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -73,23 +73,61 @@ CSV_HEADER = [
     "splits_run",
     "splits_truth",
     "splits_shared",
+    "leaves_exact",
+    "clusters_exact",
     "rf",
     "rf_normalized",
+    "rf_between_clusters",
+    "rf_within_clusters",
     "collapse_threshold",
     "note",
 ]
 
-#: Colour/marker cycle for the figure, in the order configurations are drawn.
-STYLE_CYCLE = [
-    ("#1f77b4", "o"),
-    ("#d62728", "s"),
-    ("#2ca02c", "^"),
-    ("#ff7f0e", "D"),
-    ("#9467bd", "v"),
-    ("#8c564b", "P"),
-    ("#e377c2", "X"),
-    ("#7f7f7f", "*"),
+#: One fixed style per configuration: (colour, marker, line style). The same
+#: configuration has the same look in every panel and every figure, so one
+#: legend serves them all. Colours are slots 1-6 of the dataviz reference
+#: categorical palette (validated for adjacent-pair colour-vision-deficiency
+#: separation on a light surface); marker and dash pattern are a second,
+#: colour-free encoding of the same identity.
+CONFIG_STYLES: Dict[str, Tuple[str, str, Any]] = {
+    "baseline": ("#2a78d6", "o", "-"),
+    "no_block_skip": ("#eb6834", "s", (0, (5, 2))),
+    "flat": ("#1baf7a", "^", (0, (1, 1.5))),
+    "no_piece_cache": ("#eda100", "D", (0, (6, 2, 1, 2))),
+    "no_profile_grouping": ("#e87ba4", "v", (0, (3, 1.5, 1, 1.5, 1, 1.5))),
+    "single_cluster": ("#008300", "P", (0, (8, 2))),
+}
+#: Configurations outside the six of section 11, in sorted-name order. Past
+#: these, a configuration is drawn grey rather than given a generated hue.
+EXTRA_STYLES: List[Tuple[str, str, Any]] = [
+    ("#6250d6", "X", "-"),
+    ("#e34948", "*", (0, (5, 2))),
 ]
+FALLBACK_STYLE: Tuple[str, str, Any] = ("#8a8984", ".", (0, (1, 1)))
+SURFACE = "#fcfcfb"
+INK = "#0b0b0b"
+INK_MUTED = "#52514e"
+
+#: How the figure defines accuracy; printed under the figure and in REPORT.md.
+ACCURACY_DEFINITION = (
+    "Each point scores the whole tree on screen at that instant against the truth, "
+    "over every genome of the dataset: clusters not yet refined are unresolved stars "
+    "of their members, refined clusters are their emitted trees, all joined by the "
+    "backbone. Normalised Robinson-Foulds = (splits in one tree but not the other) / "
+    "(splits of the two trees added together); 1 = no correct split, 0 = identical "
+    "topology, after collapsing branches shorter than half a SNP. Simulated truth = the "
+    "per-cluster truth trees joined at one star, because every cluster root is "
+    "derived independently from the reference."
+)
+
+
+def config_style(config: str, known: Sequence[str] = ()) -> Tuple[str, str, Any]:
+    """The fixed (colour, marker, line style) of one configuration."""
+    if config in CONFIG_STYLES:
+        return CONFIG_STYLES[config]
+    extras = sorted({c for c in known if c not in CONFIG_STYLES} | {config})
+    position = extras.index(config)
+    return EXTRA_STYLES[position] if position < len(EXTRA_STYLES) else FALLBACK_STYLE
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +153,27 @@ class ClusterState:
         cid = str(self.cluster_id)
         out.extend([cid, f"c{cid}", f"cluster_{cid}", f"cluster{cid}", f"Cluster{cid}"])
         return out
+
+
+def alias_map(clusters: Dict[str, "ClusterState"], only_emitted: bool = False) -> Dict[str, str]:
+    """``lower-cased backbone leaf name -> cluster id``.
+
+    Pivot names are claimed first; the generic spellings (``3``, ``c3``,
+    ``cluster_3``...) only fill in afterwards, so a genome that happens to be
+    called ``c1`` is never taken for cluster 1 when it is another cluster's pivot.
+    """
+    out: Dict[str, str] = {}
+    chosen = {
+        cid: state for cid, state in clusters.items()
+        if not only_emitted or state.latest_newick is not None
+    }
+    for cid, state in chosen.items():
+        if state.pivot_name:
+            out.setdefault(state.pivot_name.lower(), cid)
+    for cid, state in chosen.items():
+        for alias in state.aliases():
+            out.setdefault(alias.lower(), cid)
+    return out
 
 
 def _as_name_list(value: Any) -> List[str]:
@@ -175,12 +234,7 @@ def graft(
     """Replace each cluster leaf of ``backbone`` with that cluster's tree (6.9)."""
     notes: List[str] = []
     id_to_name = id_to_name or {}
-    alias_to_cluster: Dict[str, str] = {}
-    for cid, state in clusters.items():
-        if state.latest_newick is None:
-            continue
-        for alias in state.aliases():
-            alias_to_cluster.setdefault(alias.lower(), cid)
+    alias_to_cluster = alias_map(clusters, only_emitted=True)
     if not alias_to_cluster:
         return backbone.copy(), ["no cluster tree had been emitted yet"]
     used: set = set()
@@ -376,35 +430,429 @@ def tree_points(
 # ---------------------------------------------------------------------------
 
 
-def score_internal(
-    points: List[Dict[str, Any]],
-    truth: common.NewickNode,
-    collapse: float,
+FULL_LEAF_SET_SOURCE = "internal RF (full leaf set)"
+
+
+@dataclass
+class FullTruth:
+    """The truth tree over every genome, ready to be scored against."""
+
+    root: common.NewickNode
+    leaves: frozenset
+    kind: str  # "simulator" or "reference"
+    threshold: float
+    explanation: str
+    source: str
+
+
+@dataclass
+class RunThresholds:
+    """'Half a SNP' in the units of each part of the tree the program shows.
+
+    The backbone and Focus 0 cluster trees are in substitutions per site, Focus 1
+    cluster trees in difference pieces (PROJECT.md 6.9: the Focus 1 estimate
+    counts differing pieces, roughly one per SNP) and Focus 2 cluster trees in
+    SNPs, so one number cannot collapse all of them.
+    """
+
+    per_site: float
+    pieces: float
+    snps: float
+    explanation: str
+
+    def for_focus(self, focus: Optional[int]) -> float:
+        if focus == 2:
+            return self.snps
+        if focus == 1:
+            return self.pieces
+        return self.per_site
+
+
+def load_full_truth(
+    truth_dir: Optional[Path],
+    truth_tree: Optional[Path],
+    *,
+    collapse_snps: float,
+    collapse_mode: str,
+    collapse_length: Optional[float],
+    comparable_bp: Optional[int],
+) -> Tuple[Optional[FullTruth], List[str]]:
+    """One truth tree over the full leaf set, or ``(None, reasons)``.
+
+    A simulator truth folder holds one tree per cluster (in SNPs, rooted at the
+    cluster root) and no full tree. Every cluster root is the reference with its
+    own independent substitutions (``infinity-sim``: "each is the reference with
+    `divergence` of its positions substituted"), so the full truth is those
+    trees joined at one star: each cluster is a clade, and nothing is claimed
+    about the order in which clusters split from the reference. A real dataset
+    has one reference tree instead, used as it is.
+    """
+    problems: List[str] = []
+    if truth_dir and common.is_simulator_truth_dir(Path(truth_dir)):
+        trees, tree_problems = load_truth_trees(Path(truth_dir))
+        problems.extend(tree_problems)
+        if trees:
+            root = common.NewickNode()
+            for _, tree in trees:
+                tree.length = None  # the long branch from the reference to the cluster root
+                root.add(tree)
+            if collapse_mode == "none":
+                threshold, why = 0.0, "collapsing disabled (--collapse-mode none)"
+            elif collapse_mode == "length":
+                threshold, why = common.guess_collapse_threshold(
+                    None, mode="length", explicit_length=collapse_length
+                )
+            else:
+                threshold = float(collapse_snps)
+                why = (
+                    f"simulator truth trees are in SNPs; collapsing branches shorter "
+                    f"than {collapse_snps} SNP"
+                )
+            return (
+                FullTruth(
+                    root=root,
+                    leaves=frozenset(root.leaf_names()),
+                    kind="simulator",
+                    threshold=threshold,
+                    explanation=why,
+                    source=f"{len(trees)} per-cluster truth tree(s) in {truth_dir}, joined at a star",
+                ),
+                problems,
+            )
+    if truth_tree and Path(truth_tree).exists():
+        node = common.read_newick_file(Path(truth_tree))
+        threshold, why = common.guess_collapse_threshold(
+            node,
+            collapse_snps=collapse_snps,
+            comparable_bp=comparable_bp,
+            mode=collapse_mode,
+            explicit_length=collapse_length,
+        )
+        return (
+            FullTruth(
+                root=node,
+                leaves=frozenset(node.leaf_names()),
+                kind="reference",
+                threshold=threshold,
+                explanation=why,
+                source=str(truth_tree),
+            ),
+            problems,
+        )
+    problems.append(
+        "no truth tree (--truth-tree) and no simulator truth folder (--truth-dir), "
+        "so RF cannot be recomputed here"
+    )
+    return None, problems
+
+
+def run_thresholds(
+    *,
+    collapse_snps: float,
+    collapse_mode: str,
+    collapse_length: Optional[float],
+    comparable_bp: Optional[int],
+) -> RunThresholds:
+    if collapse_mode == "none":
+        return RunThresholds(0.0, 0.0, 0.0, "collapsing disabled (--collapse-mode none)")
+    if collapse_mode == "length":
+        if collapse_length is None:
+            raise common.PrereqError("--collapse-mode length needs --collapse-length <float>")
+        x = float(collapse_length)
+        return RunThresholds(x, x, x, f"every branch shorter than {x} collapsed")
+    snp = float(collapse_snps)
+    if comparable_bp:
+        per_site = snp / float(comparable_bp)
+        site_note = f"{per_site:.3g} subs/site ({snp} SNP over {comparable_bp} comparable bp)"
+    else:
+        per_site = 0.0
+        site_note = "not collapsed (no comparable-site count to convert SNPs into subs/site)"
+    return RunThresholds(
+        per_site=per_site,
+        pieces=snp,
+        snps=snp,
+        explanation=(
+            f"Focus 2 cluster trees: < {snp} SNP; Focus 1: < {snp} difference piece; "
+            f"backbone and Focus 0: {site_note}"
+        ),
+    )
+
+
+def _genome_universe(log: common.EventLog, id_to_name: Dict[str, str]) -> List[str]:
+    """Every genome name the run knows about, from the whole event stream."""
+    names: List[str] = list(id_to_name.values())
+    for ev in log.of_type("clustered"):
+        for entry in common.event_data(ev).get("clusters") or []:
+            if isinstance(entry, dict):
+                names.extend(id_to_name.get(str(m), str(m)) for m in _as_name_list(entry.get("member_names")))
+    for ev in log.of_type("cluster_focus"):
+        for member in common.event_data(ev).get("members") or []:
+            if isinstance(member, dict) and member.get("name"):
+                names.append(str(member["name"]))
+    return sorted(set(names))
+
+
+def score_full_leaf_set(
+    log: common.EventLog,
+    truth: FullTruth,
+    thresholds: RunThresholds,
     dataset: str,
     config: str,
-) -> List[Dict[str, Any]]:
+    *,
+    max_points: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """RF of the whole displayed tree against the truth, at every tree event.
+
+    At each ``backbone_tree`` / ``cluster_focus`` event the tree the program is
+    showing is rebuilt the way section 6.9 describes - the backbone, with each
+    pivot leaf replaced by its cluster - where a cluster that has emitted no tree
+    yet is an unresolved star of its members and every other cluster is its
+    latest emitted tree. That tree is scored against the truth over the *full*
+    leaf set: every genome of the run that the truth tree knows. A genome not
+    yet placed anywhere counts as unresolved, never as missing. So the curve
+    starts near 1 (a star resolves nothing) and falls as clusters become exact.
+
+    Splits are bitmasks over the scored genomes; each cluster tree's splits are
+    computed once when it is emitted, so a point costs one set union.
+    """
+    problems: List[str] = []
     rows: List[Dict[str, Any]] = []
-    for point in points:
-        result = common.rf_distance(point["tree"], truth, collapse=collapse)
+    id_to_name: Dict[str, str] = {}
+    for ev in log.of_type("genome_scanned"):
+        data = common.event_data(ev)
+        gid = data.get("id", data.get("genome_id", data.get("genome")))
+        name = data.get("name", data.get("genome_name"))
+        if gid is not None and name:
+            id_to_name[str(gid)] = str(name)
+    universe_names = _genome_universe(log, id_to_name)
+    if not universe_names:
+        problems.append("the event stream names no genomes, so there is nothing to score")
+        return rows, problems
+    scored_names = sorted(set(universe_names) & truth.leaves)
+    not_in_truth = len(universe_names) - len(scored_names)
+    if not_in_truth:
+        problems.append(
+            f"{not_in_truth} of {len(universe_names)} genomes are not in the truth tree "
+            "and are left out of the score"
+        )
+    extra_truth = len(truth.leaves - set(universe_names))
+    if extra_truth:
+        problems.append(
+            f"the truth tree has {extra_truth} leaves that are not genomes of this run "
+            "(e.g. reference/outgroup genomes); they are left out of the score"
+        )
+    index = common.leaf_index(scored_names)
+    universe = (1 << len(index)) - 1
+    n_scored = len(index)
+    defined = n_scored >= 4
+    if not defined:
+        problems.append(
+            f"only {n_scored} genomes are both in the run and in the truth tree: "
+            "Robinson-Foulds is undefined for fewer than 4 taxa"
+        )
+    _, truth_masks = common.clade_masks(truth.root, index, truth.threshold)
+    truth_splits = common.canonical_splits(truth_masks, universe)
+    # For simulated truth, each differing split is classed as "between clusters"
+    # (it separates whole truth clusters: the backbone resolving what the truth
+    # leaves as a star) or "within" (it cuts a cluster: a wrong cluster tree, or
+    # a cluster tree rooted somewhere other than its true root, which changes
+    # where the cluster hangs off the rest of the tree).
+    truth_cluster_masks: List[int] = []
+    if truth.kind == "simulator":
+        for child in truth.root.children:
+            mask, _ = common.clade_masks(child, index)
+            if mask:
+                truth_cluster_masks.append(mask)
+
+    def between_clusters(split: int) -> bool:
+        return all((split & cm) in (0, cm) for cm in truth_cluster_masks)
+
+    clusters = collect_clusters(log)
+    cache: Dict[str, Dict[str, Any]] = {}
+
+    def member_mask(cid: str) -> int:
+        entry = cache.get(cid)
+        if entry is not None:
+            return entry["leaf_mask"]
+        mask = 0
+        for name in clusters[cid].member_names:
+            mask |= index.get(name, 0)
+        return mask
+
+    def emit_cluster_tree(cid: str, newick: str, focus: Optional[int]) -> None:
+        try:
+            tree = common.parse_newick(newick)
+        except common.PrereqError as exc:
+            problems.append(f"cluster {cid}: unparsable Newick ({exc})")
+            return
+        remap_leaf_names(tree, id_to_name)
+        leaf_mask, masks = common.clade_masks(tree, index, thresholds.for_focus(focus))
+        cache[cid] = {
+            "leaf_mask": leaf_mask,
+            "splits": common.canonical_splits(masks, universe),
+            "focus": focus,
+        }
+        state = clusters.setdefault(cid, ClusterState(cid))
+        if not state.member_names:
+            state.member_names = sorted(n for n in tree.leaf_names() if n)
+
+    backbone: Optional[common.NewickNode] = None
+
+    def displayed_splits() -> Tuple[set, int, List[str]]:
+        notes: List[str] = []
+        clade_edges: List[int] = []
+        present = 0
+        used: set = set()
+        alias_to_cluster = alias_map(clusters)
+        if backbone is not None:
+            # post-order over the backbone; a pivot leaf expands to its cluster
+            value: Dict[int, int] = {}
+            stack: List[Tuple[common.NewickNode, bool]] = [(backbone, False)]
+            while stack:
+                node, expanded = stack.pop()
+                short = bool(
+                    thresholds.per_site and node.length is not None
+                    and node.length < thresholds.per_site
+                )
+                if not node.children:
+                    cid = alias_to_cluster.get((node.name or "").lower())
+                    if cid is not None and cid not in used:
+                        used.add(cid)
+                        mask = member_mask(cid)
+                        if not short:
+                            clade_edges.append(mask)  # the cluster as a clade
+                    else:
+                        mask = index.get(node.name, 0) if node.name else 0
+                    value[id(node)] = mask
+                    continue
+                if not expanded:
+                    stack.append((node, True))
+                    stack.extend((child, False) for child in node.children)
+                    continue
+                mask = 0
+                for child in node.children:
+                    mask |= value.pop(id(child), 0)
+                value[id(node)] = mask
+                if node is not backbone and not short:
+                    clade_edges.append(mask)
+            present |= value.get(id(backbone), 0)
+        else:
+            notes.append(
+                "no backbone tree yet: clusters are joined at one star, so no split "
+                "between clusters is claimed"
+            )
+        leftovers = [cid for cid in sorted(clusters) if cid not in used]
+        if backbone is not None and leftovers:
+            notes.append(
+                f"{len(leftovers)} cluster(s) are not on the backbone and were attached "
+                "at the root"
+            )
+        for cid in leftovers:
+            mask = member_mask(cid)
+            clade_edges.append(mask)
+            present |= mask
+        found = common.canonical_splits(clade_edges, universe)
+        for cid in used | set(leftovers):
+            entry = cache.get(cid)
+            if entry is not None:
+                found |= entry["splits"]
+        return found, present, notes
+
+    emitting = [e for e in log.events if common.event_name(e) in ("backbone_tree", "cluster_focus")]
+    emitting.sort(
+        key=lambda e: (
+            common.event_t_ms(e) if common.event_t_ms(e) is not None else 0.0,
+            e.get("seq", 0),
+        )
+    )
+    if not emitting:
+        problems.append(
+            "events.jsonl contains no backbone_tree or cluster_focus event, so there "
+            "is no tree to score"
+        )
+        return rows, problems
+    picked = set(range(len(emitting)))
+    if max_points and len(emitting) > max_points:
+        step = (len(emitting) - 1) / (max_points - 1)
+        picked = {round(i * step) for i in range(max_points)}
+        problems.append(
+            f"{len(emitting) - len(picked)} of {len(emitting)} tree events were replayed "
+            f"but not scored, to stay within --max-points {max_points}"
+        )
+    for position, ev in enumerate(emitting):
+        name = common.event_name(ev)
+        data = common.event_data(ev)
+        newick = data.get("newick")
+        cluster_id = data.get("cluster", data.get("cluster_id"))
+        focus = data.get("focus") if isinstance(data.get("focus"), int) else None
+        if name == "backbone_tree":
+            if not isinstance(newick, str) or not newick.strip():
+                problems.append(f"seq {ev.get('seq')}: backbone_tree has no newick")
+                continue
+            try:
+                backbone = common.parse_newick(newick)
+            except common.PrereqError as exc:
+                problems.append(f"seq {ev.get('seq')}: backbone Newick is unparsable ({exc})")
+                continue
+            remap_leaf_names(backbone, id_to_name)
+        else:
+            if cluster_id is None or not isinstance(newick, str) or not newick.strip():
+                problems.append(f"seq {ev.get('seq')}: cluster_focus without cluster id or newick")
+                continue
+            cid = str(cluster_id)
+            state = clusters.setdefault(cid, ClusterState(cid))
+            if not state.member_names:
+                state.member_names = [
+                    str(m.get("name")) for m in data.get("members") or []
+                    if isinstance(m, dict) and m.get("name")
+                ]
+            emit_cluster_tree(cid, newick, focus)
+        if position not in picked:
+            continue
+        run_splits, present, notes = displayed_splits()
+        exact_mask = 0
+        clusters_exact = 0
+        for cid, entry in cache.items():
+            if entry.get("focus") == 2:
+                exact_mask |= entry["leaf_mask"]
+                clusters_exact += 1
+        rf_between: Optional[int] = None
+        rf_within: Optional[int] = None
+        if defined:
+            result = common.rf_from_split_sets(run_splits, truth_splits)
+            if truth_cluster_masks:
+                differing = run_splits ^ truth_splits
+                rf_between = sum(1 for split in differing if between_clusters(split))
+                rf_within = len(differing) - rf_between
+        else:
+            result = common.RfResult()
         rows.append(
             {
                 "dataset": dataset,
                 "config": config,
-                **{k: point[k] for k in ("t_ms", "seq", "event", "cluster", "focus")},
-                "rf_source": "internal RF",
-                "rf": result.rf,
-                "rf_normalized": result.rf_normalized,
-                "leaves_run": result.leaves_a,
-                "leaves_truth": result.leaves_b,
-                "leaves_shared": result.leaves_shared,
+                "t_ms": common.event_t_ms(ev),
+                "seq": ev.get("seq"),
+                "event": name,
+                "cluster": None if cluster_id is None else str(cluster_id),
+                "focus": focus,
+                "rf_source": FULL_LEAF_SET_SOURCE,
+                "leaves_run": common.popcount(present & universe),
+                "leaves_truth": len(truth.leaves),
+                "leaves_shared": n_scored,
                 "splits_run": result.splits_a,
                 "splits_truth": result.splits_b,
                 "splits_shared": result.shared_splits,
-                "collapse_threshold": collapse or None,
-                "note": "; ".join(point.get("notes", []) + result.problems),
+                "leaves_exact": common.popcount(exact_mask & universe),
+                "clusters_exact": clusters_exact,
+                "rf": result.rf,
+                "rf_normalized": result.rf_normalized,
+                "rf_between_clusters": rf_between,
+                "rf_within_clusters": rf_within,
+                "collapse_threshold": truth.threshold or None,
+                "note": "; ".join(notes),
             }
         )
-    return rows
+    return rows, problems
 
 
 def load_truth_trees(truth_dir: Path) -> Tuple[List[Tuple[str, common.NewickNode]], List[str]]:
@@ -669,35 +1117,236 @@ def rows_from_bench(bench: common.BenchJson, dataset: str, config: str) -> Tuple
 
 def write_rows(csv_path: Path, rows: Sequence[Dict[str, Any]]) -> Path:
     """Write the accuracy curve as CSV. Each row carries its own dataset/config."""
-    common.write_csv(
-        csv_path,
-        CSV_HEADER,
-        [
-            [
-                r.get("dataset"),
-                r.get("config"),
-                r.get("t_ms"),
-                None if r.get("t_ms") is None else round(float(r["t_ms"]) / 1000.0, 6),
-                r.get("seq"),
-                r.get("event"),
-                r.get("cluster"),
-                r.get("focus"),
-                r.get("rf_source"),
-                r.get("leaves_run"),
-                r.get("leaves_truth"),
-                r.get("leaves_shared"),
-                r.get("splits_run"),
-                r.get("splits_truth"),
-                r.get("splits_shared"),
-                r.get("rf"),
-                r.get("rf_normalized"),
-                r.get("collapse_threshold"),
-                r.get("note"),
-            ]
-            for r in rows
-        ],
-    )
+    def cell(r: Dict[str, Any], column: str) -> Any:
+        if column == "t_s":
+            return None if r.get("t_ms") is None else round(float(r["t_ms"]) / 1000.0, 6)
+        return r.get(column)
+
+    common.write_csv(csv_path, CSV_HEADER, [[cell(r, c) for c in CSV_HEADER] for r in rows])
     return csv_path
+
+
+def _curve_points(rows: Sequence[Dict[str, Any]]) -> List[Tuple[float, float]]:
+    """``(seconds, normalised RF)`` in time order; undefined RF is left out."""
+    pts = []
+    for r in rows:
+        if r.get("t_ms") is None or r.get("rf_normalized") in (None, ""):
+            continue
+        try:
+            pts.append((max(float(r["t_ms"]) / 1000.0, 1e-3), float(r["rf_normalized"])))
+        except (TypeError, ValueError):
+            continue
+    return sorted(pts, key=lambda p: p[0])
+
+
+def _ordered_configs(names: Iterable[str]) -> List[str]:
+    names = set(names)
+    known = [c for c in CONFIG_STYLES if c in names]
+    return known + sorted(names - set(known))
+
+
+def plot_panels(
+    panels: Sequence[Dict[str, Any]],
+    png_path: Path,
+    *,
+    title: str,
+    log_x: Optional[bool] = None,
+    footnote: Optional[str] = ACCURACY_DEFINITION,
+) -> Tuple[bool, Optional[str]]:
+    """Small multiples: one panel per dataset, one curve per configuration.
+
+    ``panels`` is a list of ``{"dataset", "label", "series": {config: rows},
+    "empty_reason"}``. A panel without data is still drawn, with its reason, so
+    a dataset that could not be scored is visible rather than silently absent.
+    Each configuration keeps its fixed colour, marker and dash pattern
+    (:data:`CONFIG_STYLES`) in every panel, so one legend serves the figure.
+    The curve is drawn as steps: the tree on screen stays the same until the
+    next event replaces it. ``log_x=None`` picks a log time axis per panel when
+    its times span more than a factor of five.
+    """
+    plt, reason = common.try_import_matplotlib()
+    if plt is None:
+        return False, reason
+    panels = [p for p in panels if p]
+    if not any(_curve_points(rows) for p in panels for rows in (p.get("series") or {}).values()):
+        return False, "no data points to plot"
+    try:
+        import textwrap
+
+        from matplotlib.lines import Line2D
+
+        n = len(panels)
+        ncols = 1 if n == 1 else (2 if n in (2, 4) else 3)
+        nrows = (n + ncols - 1) // ncols
+        panel_w, panel_h = (7.2, 3.6) if n == 1 else (4.4, 3.0)
+        all_configs = _ordered_configs(c for p in panels for c in (p.get("series") or {}))
+        width = panel_w * ncols + 0.9
+        wrap_chars = int(width * 15)
+        foot = textwrap.wrap(footnote, wrap_chars) if footnote else []
+        # about 2.2 in per legend entry (dash sample + the longest config name)
+        legend_cols = max(1, min(len(all_configs), int((width - 0.9) // 2.2)))
+        legend_rows = (len(all_configs) + legend_cols - 1) // legend_cols if len(all_configs) > 1 else 0
+        top_in = 0.6 + 0.26 * legend_rows + (0.2 if legend_rows else 0.0)
+        bottom_in = 0.62 + 0.15 * len(foot)
+        height = panel_h * nrows + top_in + bottom_in + 0.35 * (nrows - 1)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(width, height), dpi=150, squeeze=False)
+        fig.patch.set_facecolor(SURFACE)
+        fig.subplots_adjust(
+            left=0.75 / width,
+            right=1 - 0.2 / width,
+            top=1 - top_in / height,
+            bottom=bottom_in / height,
+            hspace=0.6 * nrows / max(1.0, panel_h * nrows),
+            wspace=0.22,
+        )
+        for slot, ax in enumerate(axes.flat):
+            if slot >= n:
+                ax.set_visible(False)
+                continue
+            panel = panels[slot]
+            ax.set_facecolor(SURFACE)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+            for side in ("left", "bottom"):
+                ax.spines[side].set_color("#c3c2b7")
+            ax.tick_params(colors=INK_MUTED, labelsize=8)
+            ax.set_title(panel.get("label") or panel.get("dataset") or "", loc="left",
+                         fontsize=9.5, color=INK)
+            series = panel.get("series") or {}
+            drawn = 0
+            xs_all: List[float] = []
+            for config in _ordered_configs(series):
+                pts = _curve_points(series[config])
+                if not pts:
+                    continue
+                colour, marker, dash = config_style(config, all_configs)
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                xs_all.extend(xs)
+                ax.plot(
+                    xs, ys, drawstyle="steps-post", color=colour, linestyle=dash,
+                    linewidth=1.8, marker=marker, markersize=5.5,
+                    markevery=max(1, len(xs) // 10), markerfacecolor=colour,
+                    markeredgecolor=SURFACE, markeredgewidth=0.9, zorder=3,
+                )
+                drawn += 1
+            if not drawn:
+                ax.set_xticks([])
+                ax.set_yticks([])
+                why = panel.get("empty_reason") or "no accuracy points"
+                ax.text(0.5, 0.5, "\n".join(textwrap.wrap(why, 44)), ha="center",
+                        va="center", fontsize=8, color=INK_MUTED, transform=ax.transAxes)
+                continue
+            use_log = log_x
+            if use_log is None:
+                use_log = bool(xs_all) and max(xs_all) / max(min(xs_all), 1e-3) > 5.0
+            ax.set_xscale("log" if use_log else "linear")
+            if use_log:
+                from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+
+                ax.xaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+                ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
+                ax.xaxis.set_minor_formatter(NullFormatter())
+            ax.set_ylim(-0.04, 1.04)
+            ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+            ax.grid(True, which="major", color="#e4e3df", linewidth=0.6, zorder=0)
+            row, col = divmod(slot, ncols)
+            if col == 0:
+                ax.set_ylabel("normalised RF to truth\n(1 = nothing right, 0 = exact)",
+                              fontsize=8.5, color=INK)
+            last_in_column = row == nrows - 1 or (slot + ncols) >= n
+            if last_in_column:
+                ax.set_xlabel(
+                    "time since the run started (s" + (", log scale)" if use_log else ")"),
+                    fontsize=8.5, color=INK,
+                )
+        fig.suptitle(title, x=0.75 / width, ha="left", y=1 - 0.12 / height,
+                     fontsize=12, color=INK)
+        if len(all_configs) > 1:
+            handles = []
+            for config in all_configs:
+                colour, marker, dash = config_style(config, all_configs)
+                handles.append(
+                    Line2D([0], [0], color=colour, linestyle=dash, linewidth=1.8,
+                           marker=marker, markersize=5.5, markerfacecolor=colour,
+                           markeredgecolor=SURFACE, label=config)
+                )
+            fig.legend(
+                handles=handles, loc="upper left", ncol=legend_cols, frameon=False,
+                fontsize=8.5, bbox_to_anchor=(0.75 / width - 0.01, 1 - 0.48 / height),
+                handlelength=3.2, columnspacing=1.4,
+            )
+        if foot:
+            fig.text(0.75 / width, 0.12 / height, "\n".join(foot), fontsize=7.2,
+                     color=INK_MUTED, ha="left", va="bottom")
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(png_path, facecolor=SURFACE)
+        plt.close(fig)
+    except Exception as exc:  # noqa: BLE001 - plotting must never lose the numbers
+        return False, f"plotting failed ({type(exc).__name__}: {exc})"
+    return True, None
+
+
+def dataset_label(
+    name: str,
+    meta: Optional[Dict[str, Any]] = None,
+    mean_genome_bp: Optional[float] = None,
+) -> str:
+    """A panel title that says what the dataset is: size, and real or simulated."""
+    meta = meta or {}
+    bits: List[str] = []
+    count = meta.get("genome_count")
+    kind = meta.get("kind")
+    if count:
+        noun = f"{kind} genomes" if kind else "genomes"
+        bits.append(f"{count} {noun}")
+    elif kind:
+        bits.append(str(kind))
+    if mean_genome_bp:
+        bits.append(f"~{mean_genome_bp / 1e6:.1f} Mb each")
+    return f"{name} ({', '.join(bits)})" if bits else name
+
+
+def labels_from_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Panel titles for every dataset a matrix summary knows."""
+    lengths: Dict[str, float] = {}
+    for cell in (summary or {}).get("cells") or []:
+        run = cell.get("run") or {}
+        total, genomes = run.get("total_length"), run.get("genomes")
+        if cell.get("config") == "baseline" and total and genomes:
+            lengths[str(cell.get("dataset"))] = float(total) / float(genomes)
+    return {
+        str(entry.get("name")): dataset_label(
+            str(entry.get("name")), entry, lengths.get(str(entry.get("name")))
+        )
+        for entry in (summary or {}).get("datasets") or []
+        if isinstance(entry, dict) and entry.get("name")
+    }
+
+
+def panels_from_series(
+    series: Dict[str, List[Dict[str, Any]]],
+    *,
+    default_dataset: str = "dataset",
+    labels: Optional[Dict[str, str]] = None,
+    empty: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Group ``{"dataset/config": rows}`` (or ``{config: rows}``) into panels."""
+    grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for key, rows in series.items():
+        dataset, _, config = key.partition("/") if "/" in key else (default_dataset, "", key)
+        grouped.setdefault(dataset, {})[config] = rows
+    for dataset in (empty or {}):
+        grouped.setdefault(dataset, {})
+    return [
+        {
+            "dataset": dataset,
+            "label": (labels or {}).get(dataset, dataset),
+            "series": grouped[dataset],
+            "empty_reason": (empty or {}).get(dataset),
+        }
+        for dataset in sorted(grouped)
+    ]
 
 
 def plot_curves(
@@ -705,44 +1354,16 @@ def plot_curves(
     png_path: Path,
     *,
     title: str,
-    log_x: bool = True,
+    log_x: Optional[bool] = None,
+    labels: Optional[Dict[str, str]] = None,
+    empty: Optional[Dict[str, str]] = None,
+    default_dataset: str = "dataset",
 ) -> Tuple[bool, Optional[str]]:
-    """One curve per configuration. Returns ``(written, reason)``."""
-    plt, reason = common.try_import_matplotlib()
-    if plt is None:
-        return False, reason
-    drawable = {k: v for k, v in series.items() if v}
-    if not drawable:
-        return False, "no data points to plot"
-    try:
-        fig, ax = plt.subplots(figsize=(8.2, 5.0), dpi=150)
-        for i, (label, rows) in enumerate(sorted(drawable.items())):
-            colour, marker = STYLE_CYCLE[i % len(STYLE_CYCLE)]
-            pts = sorted(
-                ((float(r["t_ms"]) / 1000.0, r.get("rf_normalized")) for r in rows
-                 if r.get("t_ms") is not None and r.get("rf_normalized") is not None),
-                key=lambda p: p[0],
-            )
-            if not pts:
-                continue
-            xs = [max(p[0], 1e-3) for p in pts]
-            ys = [p[1] for p in pts]
-            ax.plot(xs, ys, color=colour, marker=marker, markersize=3.5, linewidth=1.4,
-                    label=f"{label} ({len(pts)} pts)")
-        ax.set_xscale("log" if log_x else "linear")
-        ax.set_xlabel("elapsed time (s)")
-        ax.set_ylabel("normalised Robinson-Foulds distance to truth")
-        ax.set_ylim(-0.02, 1.05)
-        ax.set_title(title)
-        ax.grid(True, which="both", alpha=0.25, linewidth=0.6)
-        ax.legend(fontsize=8, loc="upper right", framealpha=0.9)
-        fig.tight_layout()
-        png_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(png_path)
-        plt.close(fig)
-    except Exception as exc:  # noqa: BLE001 - plotting must never lose the numbers
-        return False, f"plotting failed ({type(exc).__name__}: {exc})"
-    return True, None
+    """Figure for ``{"dataset/config": rows}``: one panel per dataset."""
+    panels = panels_from_series(
+        series, default_dataset=default_dataset, labels=labels, empty=empty
+    )
+    return plot_panels(panels, png_path, title=title, log_x=log_x)
 
 
 # ---------------------------------------------------------------------------
@@ -794,8 +1415,15 @@ def analyse_run_dir(
     comparable_bp: Optional[int],
     max_points: Optional[int],
     infinity: Optional[Path],
+    scoring: str = "full",
 ) -> Dict[str, Any]:
-    """Produce the accuracy-over-time rows for one output folder."""
+    """Produce the accuracy-over-time rows for one output folder.
+
+    ``scoring="full"`` (the default, and what the key figure shows) scores the
+    whole displayed tree over the full leaf set; ``"per-cluster"`` keeps the
+    older measure - the mean RF of the cluster trees emitted so far, each
+    against its own truth tree - for comparison with ``infinity bench``.
+    """
     result: Dict[str, Any] = {
         "dataset": dataset,
         "config": config,
@@ -839,40 +1467,21 @@ def analyse_run_dir(
             result["problems"].append(f"--rf-mode bench needs a bench JSON; none at {bench_path}")
             return result
 
-    # --- collapse threshold --------------------------------------------
+    # --- collapse thresholds -------------------------------------------
     if comparable_bp is None:
         comparable_bp = common.comparable_bp_for(run_dir, run_json)
-    truth_node: Optional[common.NewickNode] = None
-    if truth_tree and Path(truth_tree).exists():
-        truth_node = common.read_newick_file(Path(truth_tree))
-    threshold, explanation = common.guess_collapse_threshold(
-        truth_node,
-        collapse_snps=collapse_snps,
-        comparable_bp=comparable_bp,
-        mode=collapse_mode,
-        explicit_length=collapse_length,
-    )
-    result["collapse"] = {
-        "threshold": threshold,
-        "explanation": explanation,
-        "comparable_bp": comparable_bp,
-    }
+    result["collapse"] = {"threshold": None, "explanation": None, "comparable_bp": comparable_bp}
 
     # --- rows -----------------------------------------------------------
-    # Which RF source gives the best accuracy-over-time curve:
+    # Which RF source gives the accuracy-over-time curve:
     #
     #   an explicit --rf-mode   that mode, and nothing else
-    #   auto                    1. a bench.json series that has RF at more than
-    #                               one instant - the engine's own numbers
-    #                            2. RF recomputed here at every emitted tree,
-    #                               against per-cluster truth (simulated data) or
-    #                               one reference tree (real data). Today this is
-    #                               the only source with real time resolution: the
-    #                               engine scores its live trees against nothing,
-    #                               and its final per-cluster trees all share one
-    #                               timestamp.
-    #                            3. the bench.json series anyway, labelled,
-    #                               because one point beats none
+    #   auto                    1. RF recomputed here at every emitted tree, over
+    #                               the full leaf set, whenever a truth exists - the
+    #                               one definition that is the same for simulated
+    #                               and real data and has real time resolution
+    #                            2. otherwise a bench.json series (labelled), because
+    #                               one point beats none
     rows: List[Dict[str, Any]] = []
     source: Optional[str] = None
 
@@ -888,46 +1497,50 @@ def analyse_run_dir(
     # --- internal (pure Python) RF, computed once and then selected ------
     internal_rows: List[Dict[str, Any]] = []
     internal_source: Optional[str] = None
-    cluster_threshold = threshold
     if rf_mode in ("auto", "internal"):
-        points, problems = tree_points(log, max_points=max_points)
-        result["problems"].extend(problems)
-        # Simulated truth is a set of per-cluster trees in SNP units; real truth
-        # is one reference tree in substitutions per site. Which one exists
-        # decides how RF is computed and what "half a SNP" means.
-        per_cluster_truth: List[Tuple[str, common.NewickNode]] = []
-        if truth_dir and common.is_simulator_truth_dir(Path(truth_dir)):
-            per_cluster_truth, tc_problems = load_truth_trees(Path(truth_dir))
-            result["problems"].extend(tc_problems)
-        if per_cluster_truth:
-            cluster_threshold, cluster_why = common.guess_collapse_threshold(
-                per_cluster_truth[0][1],
+        truth, truth_problems = load_full_truth(
+            truth_dir,
+            truth_tree,
+            collapse_snps=collapse_snps,
+            collapse_mode=collapse_mode,
+            collapse_length=collapse_length,
+            comparable_bp=comparable_bp,
+        )
+        result["problems"].extend(truth_problems)
+        if truth is not None:
+            result["truth"] = {"kind": truth.kind, "source": truth.source, "leaves": len(truth.leaves)}
+            result["collapse"]["threshold"] = truth.threshold
+            result["collapse"]["explanation"] = f"truth: {truth.explanation}"
+        if truth is not None and scoring == "per-cluster":
+            per_cluster_truth: List[Tuple[str, common.NewickNode]] = []
+            if truth.kind == "simulator" and truth_dir:
+                per_cluster_truth, tc_problems = load_truth_trees(Path(truth_dir))
+                result["problems"].extend(tc_problems)
+            if not per_cluster_truth:
+                result["problems"].append(
+                    "--scoring per-cluster needs a simulator truth folder with tree_*.nwk"
+                )
+            else:
+                points, problems = tree_points(log, max_points=max_points)
+                result["problems"].extend(problems)
+                internal_rows, problems = score_internal_per_cluster(
+                    points, per_cluster_truth, truth.threshold, dataset, config
+                )
+                result["problems"].extend(problems)
+                internal_source = "internal RF (per cluster)"
+        elif truth is not None:
+            thresholds = run_thresholds(
                 collapse_snps=collapse_snps,
-                comparable_bp=None,
-                mode=collapse_mode,
-                explicit_length=collapse_length,
+                collapse_mode=collapse_mode,
+                collapse_length=collapse_length,
+                comparable_bp=comparable_bp,
             )
-            result["collapse"]["per_cluster_threshold"] = cluster_threshold
-            result["collapse"]["per_cluster_explanation"] = cluster_why
-        internal_reason: Optional[str] = None
-        if not points:
-            internal_reason = "no tree-emitting events were found in the stream"
-        elif per_cluster_truth:
-            internal_rows, problems = score_internal_per_cluster(
-                points, per_cluster_truth, cluster_threshold, dataset, config
+            result["collapse"]["run"] = thresholds.explanation
+            internal_rows, problems = score_full_leaf_set(
+                log, truth, thresholds, dataset, config, max_points=max_points
             )
             result["problems"].extend(problems)
-            internal_source = "internal RF (per cluster)"
-        elif truth_node is not None:
-            internal_rows = score_internal(points, truth_node, threshold, dataset, config)
-            internal_source = "internal RF"
-        else:
-            internal_reason = (
-                "no truth tree (--truth-tree) and no simulator truth folder "
-                "(--truth-dir), so RF cannot be recomputed here"
-            )
-        if internal_reason:
-            result["problems"].append(internal_reason)
+            internal_source = FULL_LEAF_SET_SOURCE
 
     if rf_mode == "bench":
         rows, source = bench_rows, "bench.json"
@@ -954,25 +1567,8 @@ def analyse_run_dir(
         rows, source = internal_rows, internal_source
     else:  # auto
         instants = defined_instants(bench_rows)
-        if bench_rows and instants >= 2:
-            rows, source = bench_rows, "bench.json"
-            if internal_rows:
-                result["problems"].append(
-                    f"RF was also recomputed here ({len(internal_rows)} points); the "
-                    "engine's own bench values were preferred because they cover "
-                    f"{instants} distinct instants. Use --rf-mode internal for the "
-                    "recomputed curve."
-                )
-        elif internal_rows:
+        if internal_rows:
             rows, source = internal_rows, internal_source
-            if bench_rows:
-                result["problems"].append(
-                    f"the bench.json RF series has {len(bench_rows)} entries but only "
-                    f"{instants} distinct timestamp(s) with a defined normalised RF, "
-                    "which cannot show accuracy growing over time; RF was recomputed "
-                    "here from the emitted Newick instead. Use --rf-mode bench to "
-                    "force the bench values."
-                )
         elif bench_rows:
             rows, source = bench_rows, "bench.json"
             result["problems"].append(
@@ -1036,7 +1632,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--rf-mode",
         choices=("auto", "bench", "internal", "infinity"),
         default="auto",
-        help="where RF values come from (default: auto = bench.json if present, else internal)",
+        help="where RF values come from (default: auto = RF recomputed here over the "
+        "full leaf set whenever a truth exists, else a bench.json series)",
     )
     p.add_argument("--infinity", default=None, help="infinity binary, for --rf-mode infinity")
     p.add_argument(
@@ -1054,9 +1651,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="comparable sites, to convert SNPs into substitutions/site "
         "(default: from cluster_*.dist.tsv or run.json total_length)",
     )
+    p.add_argument(
+        "--scoring",
+        choices=("full", "per-cluster"),
+        default="full",
+        help="full (default): RF of the whole displayed tree over every genome, "
+        "unrefined clusters as stars; per-cluster: mean RF of the cluster trees "
+        "emitted so far, each against its own truth tree (simulated data only)",
+    )
     p.add_argument("--max-points", type=int, default=400, help="cap scored points per run (default 400)")
     p.add_argument("--no-plot", action="store_true", help="write CSV only")
-    p.add_argument("--linear-x", action="store_true", help="linear instead of log time axis")
+    p.add_argument(
+        "--linear-x",
+        action="store_true",
+        help="linear time axis everywhere (default: log per panel when its times span > 5x)",
+    )
     p.add_argument("--json", type=Path, default=None, help="write a status JSON here")
     p.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
     return p
@@ -1107,28 +1716,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out_dir = Path(args.out_dir) if args.out_dir else matrix_dir / "figures"
     common.ensure_dir(out_dir)
 
+    # A matrix summary remembers where every dataset's truth is, including
+    # simulated datasets whose dataset.json lives outside the work folder.
+    summary: Optional[Dict[str, Any]] = None
+    summary_path = (
+        Path(args.matrix_dir) / "summary.json" if args.matrix_dir
+        else Path(args.run_dir).parent.parent / "summary.json"
+    )
+    obj, _ = common.load_json_optional(summary_path)
+    if isinstance(obj, dict):
+        summary = obj
+
     results: List[Dict[str, Any]] = []
     all_series: Dict[str, List[Dict[str, Any]]] = {}
     all_rows: List[Dict[str, Any]] = []
+    empty_reasons: Dict[str, str] = {}
     for dataset, config, run_dir in targets:
         dataset_dir = work / dataset
         truth_tree = args.truth_tree
         truth_dir = args.truth_dir
         truth_notes: List[str] = []
-        # The dataset folder knows both kinds of truth: a simulator truth folder
-        # (per-cluster trees + pairwise SNPs) and, for real data, a reference tree.
-        if dataset_dir.is_dir():
-            obj, _ = common.load_json_optional(dataset_dir / "dataset.json")
-            if isinstance(obj, dict):
-                truth = obj.get("truth") or {}
-                if truth_dir is None and truth.get("dir"):
-                    truth_dir = Path(truth["dir"])
-        if truth_tree is None and dataset_dir.is_dir():
-            truth_tree, truth_notes = find_truth_tree(
+        # The dataset descriptor knows both kinds of truth: a simulator truth
+        # folder (per-cluster trees + pairwise SNPs) and, for real data, a
+        # reference tree.
+        # An explicit --truth-tree / --truth-dir is the truth, full stop: a
+        # discovered simulator folder must not silently override it.
+        explicit = truth_tree is not None or truth_dir is not None
+        known_tree, known_dir, origin = (
+            (None, None, "") if explicit else common.dataset_truth(work, dataset, summary)
+        )
+        if known_dir is not None:
+            truth_dir = known_dir
+            truth_notes.append(f"truth folder from {origin}: {known_dir}")
+        if known_tree is not None:
+            truth_tree = known_tree
+            truth_notes.append(f"reference tree from {origin}: {known_tree}")
+        if not explicit and truth_tree is None and truth_dir is None:
+            truth_tree, more = find_truth_tree(
                 run_dir, None, dataset_dir if dataset_dir.is_dir() else None
             )
-        elif truth_tree is None:
-            truth_tree, truth_notes = find_truth_tree(run_dir, None, None)
+            truth_notes.extend(more)
         print(f"[{dataset}/{config}] {run_dir}")
         for note in truth_notes:
             print(f"    note: {note}")
@@ -1148,6 +1775,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 comparable_bp=args.comparable_bp,
                 max_points=args.max_points,
                 infinity=Path(args.infinity) if args.infinity else None,
+                scoring=args.scoring,
             )
         except common.PrereqError as exc:
             res = {
@@ -1171,10 +1799,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if res.get("csv"):
             print(f"    csv: {res['csv']}")
         if rows:
-            all_series[f"{dataset}/{config}" if len(targets) > 1 else config] = rows
+            all_series[f"{dataset}/{config}"] = rows
             all_rows.extend(
                 [{**r, "dataset": dataset, "config": config} for r in rows]
             )
+        elif res.get("problems"):
+            empty_reasons.setdefault(dataset, res["problems"][0])
 
     # combined CSV + figure. The CSV is written first and always: a missing
     # matplotlib must never cost the numbers.
@@ -1183,12 +1813,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"\ncombined CSV: {combined_csv} ({len(all_rows)} rows)")
 
     png_written: Dict[str, Any] = {}
+    log_x = False if args.linear_x else None
+    with_points = {key.split("/", 1)[0] for key in all_series}
+    empty = {d: why for d, why in empty_reasons.items() if d not in with_points}
+    labels = labels_from_summary(summary)
     if not args.no_plot and all_series:
         title = "Tree accuracy over time"
         if len(targets) == 1:
             title += f" - {targets[0][0]}/{targets[0][1]}"
         png = out_dir / "accuracy_over_time.png"
-        written, reason = plot_curves(all_series, png, title=title, log_x=not args.linear_x)
+        written, reason = plot_curves(
+            all_series, png, title=title, log_x=log_x, empty=empty, labels=labels
+        )
         if written:
             print(f"figure: {png}")
             png_written["combined"] = str(png)
@@ -1198,14 +1834,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # one figure per dataset when several were processed
         by_dataset: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         for label, rows in all_series.items():
-            d = label.split("/")[0] if "/" in label else (targets[0][0] if targets else "dataset")
-            c = label.split("/", 1)[1] if "/" in label else label
+            d, _, c = label.partition("/")
             by_dataset.setdefault(d, {})[c] = rows
         if len(by_dataset) > 1:
             for d, series in sorted(by_dataset.items()):
                 png = out_dir / f"accuracy_over_time__{d}.png"
                 written, reason = plot_curves(
-                    series, png, title=f"Tree accuracy over time - {d}", log_x=not args.linear_x
+                    series, png, title=f"Tree accuracy over time - {d}", log_x=log_x,
+                    default_dataset=d, labels=labels,
                 )
                 if written:
                     print(f"figure: {png}")

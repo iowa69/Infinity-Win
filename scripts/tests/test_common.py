@@ -395,11 +395,54 @@ class TestNewickAndRf(unittest.TestCase):
         self.assertEqual(result.leaves_shared, 5)
 
     def test_different_topologies_have_nonzero_rf(self) -> None:
+        # Unrooted, each tree has exactly one bipartition (ab|cd vs ac|bd), so
+        # RF is 2. The two children of a 50/50 root are one split, not two.
         a = common.parse_newick("((a,b),(c,d));")
         b = common.parse_newick("((a,c),(b,d));")
         result = common.rf_distance(a, b)
-        self.assertEqual(result.rf, 4)
+        self.assertEqual(result.splits_a, 1)
+        self.assertEqual(result.splits_b, 1)
+        self.assertEqual(result.rf, 2)
         self.assertEqual(result.rf_normalized, 1.0)
+
+    def test_an_evenly_split_root_is_one_bipartition(self) -> None:
+        """Regression: keying by 'the smaller side' counted ties twice."""
+        tree = common.parse_newick("(((a,b),(c,d)),((e,f),(g,h)));")
+        found = common.splits(tree)
+        self.assertIn(frozenset("efgh"), found)
+        self.assertNotIn(frozenset("abcd"), found, "abcd|efgh must have a single key")
+        # 4 cherries + the root split = 5 unrooted bipartitions
+        self.assertEqual(len(found), 5)
+        index = common.leaf_index("abcdefgh")
+        _, masks = common.clade_masks(tree, index)
+        self.assertEqual(len(common.canonical_splits(masks, (1 << 8) - 1)), 5)
+        self.assertEqual(common.rf_distance(tree, tree.copy()).splits_a, 5)
+
+    def test_clade_masks_contract_short_branches_like_the_tree_version(self) -> None:
+        tree = common.parse_newick("(((a:1,b:1):0.1,(c:1,d:1):1):1,(e:1,f:1):2);")
+        index = common.leaf_index("abcdef")
+        full = (1 << 6) - 1
+        for threshold in (0.0, 0.5, 1.5):
+            _, masks = common.clade_masks(tree, index, threshold)
+            via_masks = common.canonical_splits(masks, full)
+            via_tree = common.splits(common.contract_short_branches(tree, threshold))
+            self.assertEqual(len(via_masks), len(via_tree), threshold)
+
+    def test_clade_masks_survive_a_deep_caterpillar(self) -> None:
+        names = [f"t{i:04d}" for i in range(3000)]
+        root = common.NewickNode()
+        node = root
+        # build without the recursive parser: a 3000-deep chain
+        for name in reversed(names[1:]):
+            inner = common.NewickNode("", 1.0)
+            node.add(common.NewickNode(name, 1.0))
+            node.add(inner)
+            node = inner
+        node.add(common.NewickNode(names[0], 1.0))
+        index = common.leaf_index(names)
+        leaves, masks = common.clade_masks(root, index)
+        self.assertEqual(common.popcount(leaves), 3000)
+        self.assertEqual(len(common.canonical_splits(masks, leaves)), 3000 - 3)
 
     def test_collapse_threshold_removes_short_branch_splits(self) -> None:
         # ((a,b) short, (c,d)) vs ((a,c),(b,d)): with a big collapse threshold the

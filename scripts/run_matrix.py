@@ -9,7 +9,17 @@ For every dataset and every one of the six configurations -- the baseline
 1. invokes ``infinity run`` into its own output folder,
 2. invokes ``infinity bench`` against the dataset's truth,
 3. records wall time, peak memory, counters, timings and the bench result,
-4. appends the cell to ``<matrix-dir>/summary.json``.
+4. repeats the run ``--repeats`` times (default 3) and records every repeat,
+5. appends the cell to ``<matrix-dir>/summary.json``.
+
+**Repeats.** Many runs take under a second, where a 20% difference is noise. So
+every configuration runs ``--repeats`` times; the report applies the section 11
+rule to the median and prints min-max next to it. The first repeat writes the
+full output folder (used for accuracy, invariance and bench); repeats 2..N go to
+``<config>/repeats/r<k>/`` and are pruned to ``run.json`` plus logs unless
+``--keep-repeat-outputs``. Repeats run round-robin - repeat 2 of every
+configuration, then repeat 3 - so slow drift of the machine (thermal, page
+cache, other load) does not land on one configuration.
 
 Two rules shape the implementation:
 
@@ -39,6 +49,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -314,6 +325,114 @@ def summarise_bench(path: Path) -> Dict[str, Any]:
     }
 
 
+#: Files kept from a repeat beyond the first; everything else is pruned.
+REPEAT_KEEP = ("run.json", "infinity.run.log", "infinity.run.err")
+
+
+def repeat_record_from_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
+    """The first repeat, as recorded by the main cell."""
+    mem = cell.get("memory") or {}
+    return {
+        "repeat": 1,
+        "out_dir": cell.get("out_dir"),
+        "status": cell.get("status"),
+        "reused": bool(cell.get("reused")),
+        "returncode": cell.get("returncode"),
+        "wall_s": cell.get("wall_s"),
+        "timed_out": cell.get("timed_out"),
+        "first_tree_s": cell.get("first_tree_s"),
+        "exact_tree_s": cell.get("exact_tree_s"),
+        "total_s": cell.get("total_s"),
+        "peak_memory_bytes": cell.get("peak_memory_bytes"),
+        "peak_memory_is_floor": bool(cell.get("peak_memory_is_floor")),
+        "memory_source": mem.get("source"),
+        "error": cell.get("error"),
+    }
+
+
+def prune_repeat_dir(rdir: Path) -> int:
+    """Delete a repeat's outputs except ``REPEAT_KEEP``. Returns files removed."""
+    removed = 0
+    for entry in rdir.iterdir():
+        if entry.name in REPEAT_KEEP:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink()
+        removed += 1
+    return removed
+
+
+def run_extra_repeat(
+    binary: Path,
+    inputs: Sequence[Path],
+    outdir: Path,
+    config: common.Config,
+    args: argparse.Namespace,
+    k: int,
+) -> Dict[str, Any]:
+    """Run (or reuse) repeat ``k`` >= 2 of one cell into ``<outdir>/repeats/r<k>``."""
+    rdir = outdir / "repeats" / f"r{k}"
+    cmd = run_command(binary, inputs, rdir, config, args)
+    record: Dict[str, Any] = {
+        "repeat": k, "out_dir": str(rdir), "run_command": cmd, "reused": False,
+        "status": "pending", "error": None,
+    }
+    child: Optional[common.ChildResult] = None
+    if (rdir / "run.json").exists() and not args.force:
+        record["status"] = "cached"
+        record["reused"] = True
+    else:
+        if (rdir / "run.json").exists():
+            (rdir / "run.json").unlink()
+        rdir.mkdir(parents=True, exist_ok=True)
+        child = common.run_child(
+            cmd,
+            stdout_path=rdir / "infinity.run.log",
+            stderr_path=rdir / "infinity.run.err",
+            timeout=args.timeout,
+        )
+        record["returncode"] = child.returncode
+        record["wall_s"] = round(child.wall_s, 3)
+        record["timed_out"] = child.timed_out
+        if child.timed_out:
+            record["status"] = "failed"
+            record["error"] = f"timed out after {args.timeout:.0f}s and was killed"
+        elif child.returncode != 0:
+            record["status"] = "failed"
+            record["error"] = f"`infinity run` exited with code {child.returncode}"
+            record["stderr_tail"] = child.stderr_tail(400)
+        else:
+            record["status"] = "ok"
+    run_info = summarise_run(rdir, config) if (rdir / "run.json").exists() else None
+    if run_info and run_info.get("run_json_present"):
+        timings = run_info.get("timings_s") or {}
+        record["first_tree_s"] = timings.get("first_tree_s")
+        record["exact_tree_s"] = timings.get("exact_tree_s")
+        record["total_s"] = timings.get("total_s")
+        mem = memory_summary(run_info, child)
+        record["peak_memory_bytes"] = mem["bytes"]
+        record["peak_memory_is_floor"] = bool(mem["is_floor"] and mem["bytes"] is not None)
+        record["memory_source"] = mem["source"]
+        record["switch_verified"] = run_info.get("switch_verified")
+    elif record["status"] in ("ok", "cached"):
+        record["status"] = "failed"
+        record["error"] = "`infinity run` exited 0 but wrote no usable run.json"
+    if child is not None and not getattr(args, "keep_repeat_outputs", False) and rdir.is_dir():
+        record["pruned_files"] = prune_repeat_dir(rdir)
+    return record
+
+
+def update_timing(cell: Dict[str, Any]) -> None:
+    """Recompute the per-metric median/min/max over the cell's repeats."""
+    stats = common.cell_repeat_stats(cell)
+    cell["timing"] = {key: {k: v for k, v in value.items()} for key, value in stats.items()}
+    usable = sum(1 for r in cell.get("repeats") or [] if r.get("status") in ("ok", "cached"))
+    cell["repeats_usable"] = usable
+    cell["repeats_total"] = len(cell.get("repeats") or [])
+
+
 def materialise_simulated(
     dataset: Dict[str, Any], binary: Path, args: argparse.Namespace, matrix_dir: Path
 ) -> Optional[str]:
@@ -410,6 +529,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="comparable site count used to convert SNPs to substitutions/site",
     )
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="per-run timeout, seconds")
+    p.add_argument(
+        "--repeats",
+        type=int,
+        default=common.DEFAULT_REPEATS,
+        help="run every configuration this many times; the report uses the median "
+        f"and shows min-max (default {common.DEFAULT_REPEATS})",
+    )
+    p.add_argument(
+        "--keep-repeat-outputs",
+        action="store_true",
+        help="keep the full output folder of repeats 2..N (default: keep only "
+        "run.json and the logs, to save disk)",
+    )
     p.add_argument("--force", action="store_true", help="re-run configurations that have a run.json")
     p.add_argument("--force-bench", action="store_true", help="re-run bench even if bench.json exists")
     p.add_argument(
@@ -424,6 +556,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.repeats < 1:
+        raise common.PrereqError(f"--repeats must be at least 1 (got {args.repeats})")
     work = Path(args.work_dir) if args.work_dir else common.default_work_dir()
     matrix_dir = Path(args.matrix_dir) if args.matrix_dir else work / "matrix"
 
@@ -450,6 +584,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"matrix dir: {matrix_dir}")
     print(f"datasets:   {', '.join(d['name'] for d in datasets)}")
     print(f"configs:    {', '.join(c.name for c in configs)}")
+    print(f"repeats:    {args.repeats} per configuration (round-robin)")
     if args.dry_run:
         print("MODE:       dry run - nothing will be executed or written\n")
     else:
@@ -515,6 +650,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "collapse_snps": args.collapse_snps,
             "comparable_bp": args.comparable_bp,
             "timeout_s": args.timeout,
+            "repeats": args.repeats,
+            "keep_repeat_outputs": bool(args.keep_repeat_outputs),
             "force": bool(args.force),
             "force_bench": bool(args.force_bench),
         },
@@ -565,6 +702,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
 
         bargs, breason = truth_arguments(dataset)
+        dataset_cells: List[Tuple[common.Config, Dict[str, Any]]] = []
         print(f"=== {dname} ({dataset.get('genome_count')} genomes) ===")
         if breason:
             print(f"    bench: SKIPPED - {breason}")
@@ -583,6 +721,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "problems": [],
             }
             cells.append(cell)
+            dataset_cells.append((config, cell))
             run_cmd = run_command(binary or Path("infinity"), inputs, outdir, config, args)
             cell["run_command"] = run_cmd
             bench_cmd = (
@@ -606,6 +745,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print(f"      {btag}: {' '.join(bench_cmd)}")
                 else:
                     print(f"      bench skipped: {breason}")
+                if args.repeats > 1:
+                    print(
+                        f"      repeats 2..{args.repeats}: the same `infinity run` with "
+                        f"-o {outdir / 'repeats' / 'r<k>'}"
+                    )
                 continue
 
             common.ensure_dir(outdir)
@@ -713,6 +857,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"      bench: {cell['bench']['status']}")
 
             _flush(summary, summary_path, args, cells, failures, started_all)
+
+        # ---- repeats 2..N, round-robin over the configurations -------------
+        if not args.dry_run:
+            for config, cell in dataset_cells:
+                cell["repeats"] = [repeat_record_from_cell(cell)]
+                update_timing(cell)
+            for k in range(2, args.repeats + 1):
+                for config, cell in dataset_cells:
+                    if cell.get("status") not in ("ok", "cached"):
+                        note = (
+                            "not repeated: the first run did not succeed, so a repeat "
+                            "would only re-measure a failure"
+                        )
+                        if note not in cell["problems"]:
+                            cell["problems"].append(note)
+                        continue
+                    record = run_extra_repeat(
+                        binary or Path("infinity"), inputs, Path(cell["out_dir"]), config, args, k
+                    )
+                    cell["repeats"].append(record)
+                    update_timing(cell)
+                    tag = "cached" if record.get("reused") else record.get("status")
+                    print(
+                        f"  [{config.name}] repeat {k}/{args.repeats}: {tag}"
+                        + (f" in {common.human_seconds(record.get('wall_s'))}" if record.get("wall_s") else "")
+                        + (f": {record.get('error')}" if record.get("error") else "")
+                    )
+                    if record.get("status") == "failed":
+                        cell["problems"].append(f"repeat {k} failed: {record.get('error')}")
+                    if record.get("switch_verified") is False:
+                        cell["problems"].append(f"repeat {k}: SWITCH NOT APPLIED")
+                    _flush(summary, summary_path, args, cells, failures, started_all)
         print()
 
     _flush(summary, summary_path, args, cells, failures, started_all, final=True)
@@ -794,6 +970,9 @@ def _flush(
         bench = cell.get("bench") or {}
         if bench.get("status") == "failed":
             derived.append(f"{label}: bench failed")
+        for record in cell.get("repeats") or []:
+            if record.get("repeat", 1) > 1 and record.get("status") == "failed":
+                derived.append(f"{label} repeat {record.get('repeat')}: {record.get('error') or 'failed'}")
     all_failures = list(dict.fromkeys([f for f in derived if f] + [f for f in failures if f]))
 
     totals: Dict[str, int] = {}
@@ -819,6 +998,7 @@ def _print_table(summary: Dict[str, Any]) -> None:
         f"{'dataset':<18} {'config':<21} {'status':<9} {'wall':>9} "
         f"{'1st tree':>9} {'exact':>9} {'peak mem':>10} {'RF':>6}  notes"
     )
+    print("(times and memory are medians over the usable repeats; n = repeats used)")
     print("-" * 112)
     for cell in cells:
         run = cell.get("run") or {}
@@ -837,13 +1017,23 @@ def _print_table(summary: Dict[str, Any]) -> None:
             notes.append("bench skipped (no truth)")
         if cell.get("error"):
             notes.append(str(cell["error"])[:48])
+        timing = cell.get("timing") or {}
+
+        def med(key: str) -> Any:
+            stats = timing.get(key) or {}
+            return stats.get("median") if stats.get("n") else cell.get(
+                "peak_memory_bytes" if key == "peak_memory_bytes" else key
+            )
+
+        if timing:
+            notes.append(f"n={(timing.get('exact_tree_s') or {}).get('n', 0)}")
         print(
             f"{str(cell.get('dataset'))[:18]:<18} {str(cell.get('config'))[:21]:<21} "
             f"{str(cell.get('status'))[:9]:<9} "
-            f"{common.human_seconds(cell.get('wall_s')):>9} "
-            f"{common.human_seconds(cell.get('first_tree_s')):>9} "
-            f"{common.human_seconds(cell.get('exact_tree_s')):>9} "
-            f"{common.human_bytes(mem.get('bytes')):>10} "
+            f"{common.human_seconds(med('wall_s')):>9} "
+            f"{common.human_seconds(med('first_tree_s')):>9} "
+            f"{common.human_seconds(med('exact_tree_s')):>9} "
+            f"{common.human_bytes(med('peak_memory_bytes') if timing else mem.get('bytes')):>10} "
             f"{common.fmt(bench.get('rf'), '.4g'):>6}  {'; '.join(notes)[:60]}"
         )
 
