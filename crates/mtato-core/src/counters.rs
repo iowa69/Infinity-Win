@@ -35,8 +35,13 @@ pub struct Counters {
     pub breakpoints: u64,
 
     // --- the number the whole idea is judged on ---
-    /// Fraction of member blocks that were identical to the pivot and skipped.
-    /// Derived, not accumulated; recomputed by [`Counters::block_identity`].
+    /// Blocks that matched the pivot and were skipped, summed over all levels.
+    /// Always exactly `blocks_matched.iter().sum()` — what
+    /// [`Counters::total_matched`] recomputes — because `compare::match_blocks`
+    /// increments the two together. It is *not* `blocks_looked_up`, which counts
+    /// every block examined whether it matched or not (measured on a 50-genome
+    /// run: 38155 against 42175). Redundant, but kept because an external
+    /// report script reads this key out of `run.json`.
     pub blocks_total: u64,
 }
 

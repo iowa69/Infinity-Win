@@ -11,7 +11,7 @@
 //! and applied afterwards, so drawing never has to fight the borrow checker.
 
 use eframe::egui;
-use egui::{Align2, Color32, Context, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::app::MtatoApp;
 use crate::layout::{self, NodeKind, TreeLayout};
@@ -76,12 +76,10 @@ enum Hover {
     Cluster(u32),
 }
 
-pub fn show(ctx: &Context, app: &mut MtatoApp) {
-    egui::CentralPanel::default().show(ctx, |ui| {
-        header(ui, app);
-        ui.separator();
-        canvas(ui, app);
-    });
+pub fn show(ui: &mut egui::Ui, app: &mut MtatoApp) {
+    header(ui, app);
+    ui.separator();
+    canvas(ui, app);
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +249,9 @@ struct Draw<'a> {
     view: View,
     rect: Rect,
     dark: bool,
+    weak: Color32,
+    strong: Color32,
+    text: Color32,
     model: &'a UiModel,
     selection: &'a [u32],
     search_hit: Option<u32>,
@@ -264,26 +265,41 @@ fn canvas(ui: &mut egui::Ui, app: &mut MtatoApp) {
     let (rect, resp) = ui.allocate_exact_size(size.max(Vec2::splat(40.0)), Sense::click_and_drag());
     app.tree_rect = Some((rect, ui.ctx().pixels_per_point()));
     let dark = ui.visuals().dark_mode;
-    let bg = ui.visuals().panel_fill();
+    let bg = ui.visuals().panel_fill;
     let border = ui.visuals().widgets.noninteractive.bg_stroke;
+    let weak = ui.visuals().weak_text_color();
+    let strong = ui.visuals().strong_text_color();
+    let text_col = ui.visuals().text_color();
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 0, bg);
 
+    // Pointer state is read once, up front: `Response` is consumed by the
+    // tooltip call at the end of the frame.
+    let pointer = resp.hover_pos();
+    let dragged_by = if resp.dragged() {
+        Some(resp.drag_delta())
+    } else {
+        None
+    };
+    let clicked = resp.clicked();
+    let additive = ui.ctx().input(|i| i.modifiers.command);
+    let scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
+
     // --- interaction first, so this frame draws the result ------------------
+    let fit_to = app.tree_layout.as_ref().map(|l| (l.rows, l.x_max));
     if app.tree.needs_fit && !app.tree.user_moved {
-        if let Some(l) = app.tree_layout.as_ref() {
-            fit_view(app, rect, l);
+        if let Some((rows, x_max)) = fit_to {
+            fit_view(app, rect, rows, x_max);
         }
         app.tree.needs_fit = false;
     }
-    if resp.dragged() {
-        app.tree.offset += resp.drag_delta();
+    if let Some(d) = dragged_by {
+        app.tree.offset += d;
         app.tree.user_moved = true;
     }
-    let scroll = ui.input(|i| i.smooth_scroll_delta);
     if scroll.y.abs() > 0.01 {
-        let pointer = resp.hover_pos().unwrap_or_else(|| rect.center());
-        let v = current_view(app, rect).zoomed_about(pointer, (scroll.y * 0.004).exp());
+        let anchor = pointer.unwrap_or_else(|| rect.center());
+        let v = current_view(app, rect).zoomed_about(anchor, (scroll.y * 0.004).exp());
         apply_view(app, rect, v);
         app.tree.user_moved = true;
     }
@@ -323,11 +339,11 @@ fn canvas(ui: &mut egui::Ui, app: &mut MtatoApp) {
     }
 
     let view = current_view(app, rect);
-    let pointer = resp.hover_pos();
 
     // --- read-only drawing pass --------------------------------------------
     let hits: Vec<(Hover, Rect)>;
     let mut hover: Option<Hover> = None;
+    let mut tooltip: Vec<String> = Vec::new();
     {
         let l = app.tree_layout.as_ref().expect("checked above");
         let d = Draw {
@@ -335,6 +351,9 @@ fn canvas(ui: &mut egui::Ui, app: &mut MtatoApp) {
             view,
             rect,
             dark,
+            weak,
+            strong,
+            text: text_col,
             model: &app.model,
             selection: &app.selection,
             search_hit: app.tree.search_hit,
@@ -351,15 +370,10 @@ fn canvas(ui: &mut egui::Ui, app: &mut MtatoApp) {
         }
         draw_scale_bar(&d, l, pointer);
         if let Some(h) = &hover {
-            let lines = match h {
+            tooltip = match h {
                 Hover::Genome(id) => genome_tooltip(d.model, *id),
                 Hover::Cluster(id) => cluster_tooltip(d.model, *id),
             };
-            resp.on_hover_ui(|ui| {
-                for line in lines {
-                    ui.label(line);
-                }
-            });
         }
     }
 
@@ -369,18 +383,18 @@ fn canvas(ui: &mut egui::Ui, app: &mut MtatoApp) {
 
     // --- clicks, applied after the read-only pass ---------------------------
     let mut click: Option<(Hover, bool)> = None;
-    if resp.clicked() {
+    if clicked {
         if let Some(p) = pointer {
             click = hits
                 .iter()
                 .rev()
                 .find(|(_, r)| r.contains(p))
-                .map(|(h, _)| (h.clone(), ui.input(|i| i.modifiers.command)));
+                .map(|(h, _)| (h.clone(), additive));
         }
     }
-    if let Some((h, additive)) = click {
+    if let Some((h, add)) = click {
         match h {
-            Hover::Genome(id) => app.select_genome(id, additive),
+            Hover::Genome(id) => app.select_genome(id, add),
             Hover::Cluster(id) => app.toggle_cluster(id),
         }
     }
@@ -391,6 +405,13 @@ fn canvas(ui: &mut egui::Ui, app: &mut MtatoApp) {
             egui::CursorIcon::Default
         };
     });
+    if !tooltip.is_empty() {
+        resp.on_hover_ui(|ui| {
+            for line in tooltip {
+                ui.label(line);
+            }
+        });
+    }
 }
 
 fn hint(painter: &egui::Painter, rect: Rect, msg: &str, dark: bool) {
@@ -423,11 +444,14 @@ fn apply_view(app: &mut MtatoApp, rect: Rect, v: View) {
     app.tree.px_per_unit = v.px_per_unit;
 }
 
-fn fit_view(app: &mut MtatoApp, rect: Rect, l: &TreeLayout) {
+/// Fit the whole tree into the panel: the rows fill the height, and the
+/// horizontal extent leaves [`LABEL_FRACTION`] of the width free for the labels.
+fn fit_view(app: &mut MtatoApp, rect: Rect, rows: f64, x_max: f64) {
     let h = (rect.height() - 2.0 * MARGIN).max(10.0);
     let w = ((rect.width() - 2.0 * MARGIN) * (1.0 - LABEL_FRACTION)).max(10.0);
-    app.tree.px_per_row = (h / l.rows.max(1.0) as f32).clamp(MIN_PX_PER_ROW, MAX_PX_PER_ROW);
-    app.tree.px_per_unit = (w / l.x_max.max(1e-6) as f32).clamp(MIN_PX_PER_UNIT, MAX_PX_PER_UNIT);
+    app.tree.px_per_row = (h / rows.max(1.0) as f32).clamp(MIN_PX_PER_ROW, MAX_PX_PER_ROW);
+    app.tree.px_per_unit =
+        (w / x_max.max(1e-6) as f32).clamp(MIN_PX_PER_UNIT, MAX_PX_PER_UNIT);
     app.tree.offset = Vec2::ZERO;
 }
 
@@ -449,8 +473,8 @@ fn draw_edges(d: &Draw<'_>, l: &TreeLayout) {
         let parent = d.view.screen(p);
         // Cull branches that are entirely off screen: a thousand-genome tree
         // shows a few dozen rows at a time.
-        if (child.y < d.rect.top - 2.0 && parent.y < d.rect.top - 2.0)
-            || (child.y > d.rect.bottom + 2.0 && parent.y > d.rect.bottom + 2.0)
+        if (child.y < d.rect.top() - 2.0 && parent.y < d.rect.top() - 2.0)
+            || (child.y > d.rect.bottom() + 2.0 && parent.y > d.rect.bottom() + 2.0)
         {
             continue;
         }
@@ -466,7 +490,7 @@ fn draw_edges(d: &Draw<'_>, l: &TreeLayout) {
         };
         let top = d.view.screen((c.0, n.row_min));
         let bottom = d.view.screen((c.0, n.row_max));
-        if bottom.y < d.rect.top - 2.0 || top.y > d.rect.bottom + 2.0 {
+        if bottom.y < d.rect.top() - 2.0 || top.y > d.rect.bottom() + 2.0 {
             continue;
         }
         let style = colors::focus_style(n.focus, d.dark);
@@ -501,9 +525,9 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
     let small_font = FontId::proportional((d.view.px_per_row * 0.62).clamp(8.0, 12.0));
     let show_labels = d.view.px_per_row >= MIN_ROW_FOR_LABELS;
     let show_approx = d.view.px_per_row >= MIN_ROW_FOR_APPROX;
-    let weak = d.painter.ctx().style().visuals.weak_text_color();
-    let strong = d.painter.ctx().style().visuals.strong_text_color();
-    let text_col = d.painter.ctx().style().visuals.text_color();
+    let weak = d.weak;
+    let strong = d.strong;
+    let text_col = d.text;
 
     for n in &l.nodes {
         let Some(&p) = d.positions.get(n.idx) else {
@@ -511,7 +535,7 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
         };
         let s = d.view.screen(p);
         let y = s.y;
-        if y < d.rect.top - 20.0 || y > d.rect.bottom + 20.0 {
+        if y < d.rect.top() - 20.0 || y > d.rect.bottom() + 20.0 {
             continue;
         }
         match &n.kind {
@@ -699,7 +723,7 @@ fn draw_legend(
     );
     painter.rect_stroke(box_rect, 4, border, egui::StrokeKind::Middle);
     let font = FontId::proportional(11.0);
-    for (i, (focus, text)) in [
+    for (i, text) in [
         "Focus 0 — sketch only, blurry (≈)",
         "Focus 1 — blocks compared, ≈ pieces",
         "Focus 2 — exact, base level, SNPs",
@@ -708,14 +732,14 @@ fn draw_legend(
     .enumerate()
     {
         let y = box_rect.top() + 14.0 + i as f32 * 17.0;
-        let style = colors::focus_style(focus as u8, dark);
+        let style = colors::focus_style(i as u8, dark);
         let a = Pos2::new(box_rect.left() + 10.0, y);
         let b = Pos2::new(box_rect.left() + 40.0, y);
         segment(painter, a, b, &style);
         painter.text(
             Pos2::new(box_rect.left() + 46.0, y),
             Align2::LEFT_CENTER,
-            text,
+            *text,
             font.clone(),
             style.color,
         );

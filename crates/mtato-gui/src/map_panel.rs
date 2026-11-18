@@ -20,7 +20,7 @@
 //! differences".
 
 use eframe::egui;
-use egui::{Align2, Color32, Context, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 use mtato_core::events::MapUpdateInfo;
 use mtato_core::interval;
@@ -102,12 +102,12 @@ struct Row<'a> {
     breakpoints: Vec<u64>,
 }
 
-pub fn show(ctx: &Context, app: &mut MtatoApp) {
-    egui::TopBottomPanel::bottom("map")
+pub fn show(ui: &mut egui::Ui, app: &mut MtatoApp) {
+    egui::Panel::bottom("map")
         .resizable(true)
-        .default_height(190.0)
-        .min_height(70.0)
-        .show(ctx, |ui| {
+        .default_size(196.0)
+        .min_size(74.0)
+        .show(ui, |ui| {
             header(ui, app);
             ui.separator();
             body(ui, app);
@@ -148,7 +148,7 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
         );
         match plan.reason {
             map::RowReason::Selection => {
-                ui.weak(format!("{} selected member(s)", plan.genomes.len()))
+                ui.weak(format!("{} selected member(s)", plan.genomes.len()));
             }
             map::RowReason::WholeCluster => {
                 if plan.truncated {
@@ -161,7 +161,9 @@ fn header(ui: &mut egui::Ui, app: &mut MtatoApp) {
                     ui.weak(format!("{} members", plan.genomes.len()));
                 }
             }
-            map::RowReason::NoData => ui.weak(no_data_hint(&app.model, app.selected_cluster)),
+            map::RowReason::NoData => {
+                ui.weak(no_data_hint(&app.model, app.selected_cluster));
+            }
         }
     });
     if fit_now {
@@ -192,7 +194,7 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
     let dark = ui.visuals().dark_mode;
     let weak = ui.visuals().weak_text_color();
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 0, ui.visuals().panel_fill());
+    painter.rect_filled(rect, 0, ui.visuals().panel_fill);
 
     let cluster = app.selected_cluster.unwrap_or(u32::MAX);
     let plan = map::plan_rows(&app.model, app.selected_cluster, &app.selection, ROW_CAP);
@@ -237,7 +239,7 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
     }
     let plot = plot_rect(rect);
     let pointer = resp.hover_pos();
-    let scroll = ui.input(|i| i.smooth_scroll_delta);
+    let scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
     if scroll.y.abs() > 0.01 {
         let anchor = pointer
             .map(|p| flat_of(p.x, &app.map_view, plot))
@@ -290,7 +292,7 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
                 Pos2::new(rect.left(), top),
                 Vec2::new(rect.width(), ROW_H),
             );
-            draw_row(&painter, row, &view, band, plot, dark);
+            draw_row(&painter, row, &view, band, plot, dark, weak);
             if let Some(p) = pointer {
                 if band.contains(p) {
                     hovered_row = Some(i);
@@ -315,7 +317,7 @@ fn body(ui: &mut egui::Ui, app: &mut MtatoApp) {
     if let Some(g) = clicked {
         // Clicking a row selects that member, which is what links the map back
         // to the tree and the genome list.
-        let additive = ui.input(|i| i.modifiers.command);
+        let additive = ui.ctx().input(|i| i.modifiers.command);
         app.select_genome(g, additive);
     }
 }
@@ -409,11 +411,11 @@ fn draw_row(
     band: Rect,
     plot: Rect,
     dark: bool,
+    weak: Color32,
 ) {
     let cy = band.center().y;
     let h = (band.height() - 5.0).max(2.0);
     let font = FontId::proportional(10.0);
-    let weak = painter.ctx().style().visuals.weak_text_color();
 
     // The row label: the member's name, in its cluster colour.
     let colour = colors::cluster_color(row.map.cluster, dark);

@@ -167,7 +167,10 @@ does not: see `DECISIONS.md` D16.
 **Coordinates.** Inside the program everything is 0-based and half-open. In the
 files it is 1-based, converted in one place. For an insertion the reported
 position is that of the base the insertion sits *after*, so an insertion and the
-matching deletion report the same coordinate.
+matching deletion report the same coordinate. That convention applies to **both**
+coordinate columns of a variant row: `pivot_pos` and `genome_pos` are converted
+the same way, so for a forward-strand insertion the two are the same number and
+the row is self-consistent.
 
 **Variant types** are `snp`, `ins`, `del` and `complex`. A `complex` variant means
 the piece was too divergent or too long to resolve into individual events; it is

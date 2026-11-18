@@ -48,6 +48,12 @@ pub struct Parameters {
     pub single_cluster: bool,
     /// Sequences of non-pivot genomes are kept while they fit in this budget
     /// (6.10). 0 means "never keep".
+    ///
+    /// Not yet wired up: the 6.10 eviction it describes is unimplemented, so
+    /// this value is parsed, defaulted, validated and written to `run.json`,
+    /// but nothing reads it. The only memory control that actually operates is
+    /// the piece cache — a member whose difference pieces are all cached is not
+    /// re-read for Focus 2 (`engine::resolve_focus1`). See DECISIONS.md.
     pub memory_budget_bytes: u64,
 }
 

@@ -75,7 +75,7 @@ pub struct MtatoApp {
     laid_out_expanded: u64,
     /// Screen rectangle of the tree canvas and the pixels-per-point in force,
     /// remembered so a screenshot can be cropped to the tree alone.
-    tree_rect: Option<(egui::Rect, f32)>,
+    pub(crate) tree_rect: Option<(egui::Rect, f32)>,
 
     // --- map view ---------------------------------------------------------
     pub(crate) map_view: crate::map_panel::MapView,

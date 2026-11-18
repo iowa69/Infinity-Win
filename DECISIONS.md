@@ -193,6 +193,22 @@ could drift from it.
 **Affects.** With this flag every cluster is a singleton and no variant files are
 written, which is the honest result of stopping at Focus 0.
 
+> **CORRECTED — the mechanism does not reliably do what is claimed above.** The
+> degenerate threshold only forces a singleton when two genomes have *no* shared
+> sketch hashes. When two sketches are identical the distance is exactly `0.0`, and
+> `0.0 <= f64::MIN_POSITIVE` is **true**, so they still join one cluster. That is
+> common at the scales `cluster_dist` is meant for: on 8 simulated genomes with
+> mean 3 SNPs per branch, `--focus0-only` produced **one cluster of size 8 at Focus
+> 2**, not eight singletons, and `tree.nwk` was unchanged from a normal run.
+>
+> So `--focus0-only` does not stop at Focus 0 in general, and the flag is
+> misnamed. A correct implementation needs an explicit "stop after the backbone"
+> stage flag rather than a threshold trick. Until then the flag should not be
+> relied on, and the `cluster_dist = f64::MIN_POSITIVE` idiom should not be copied
+> elsewhere. This was found while reproducing the singleton-cluster tree bug
+> (D22 F3), which needs a genuinely all-singleton clustering such as
+> `-m 8 -n 1` to trigger.
+
 ---
 
 ## D12. The `dup` rule of 6.8 needs member coordinates, not just pivot ones
@@ -223,16 +239,33 @@ halves of the distinction.
 
 ## D13. Test T3's thresholds are not met, and the cause is pivot contig junctions
 
-> **PROVISIONAL — the causal attribution below is under revision.** A
-> specification review subsequently found that SNPs discovered by the
-> end-of-contig x-drop extension of 6.6 step D are computed correctly and then
-> **discarded**: `Focus1` carries no variant list, so the staged Focus 1 → Focus 2
-> path (the only production path, required by 6.11.3) drops them. Those SNPs live
-> in exactly the region this entry blames on pivot contig junctions — between a
-> contig end and the first or last shared point, when the head or tail block did
-> not match. The measured numbers below are still correct as measurements, but the
-> 0.934 figure and the "entirely the junction effect" claim must be re-measured
-> once the discarded variants are restored. See D22.
+> **REVISED after F1/F5 landed.** The measurements below were taken with
+> end-of-contig extension SNPs being silently discarded (D22, F1) and with the
+> `alt` allele of those SNPs on the wrong strand (F5). With both fixed, on the same
+> configuration (2 Mb, 50 leaves, 3 SNPs, 0.5 indels, `-c 100
+> --random-orientation`, seed 44):
+>
+> | quantity | outline asks | before F1/F5 | after F1/F5 |
+> |---|---|---|---|
+> | reported / true SNP total | ≥ 0.99 | 0.9360 | **0.9421** |
+> | pairs exact | — | 121 / 1225 | **151 / 1225** |
+> | worst over-report | ≤ 2 | 3 | **0** |
+> | worst under-report | — | 7 | 7 |
+> | mean absolute error | — | 2.236 | **1.924** |
+> | tree RF normalised | — | 0.0562 | **0.0233** |
+>
+> **The over-reporting half of this entry is withdrawn.** The claim that the worst
+> over-report was 4 (later 3) was an artefact of the discarded end-extension SNPs
+> being partly compensated elsewhere; with F1 and F5 in place no pair over-reports
+> at all, so T3's first criterion — "no pair's distance exceeds truth by more than
+> 2" — **now passes**. The table row above and the "over-report 4" figure in the
+> original text are superseded.
+>
+> The under-reporting half stands: the worst under-report is still 7 and the sum
+> ratio is still 0.9421, short of the 0.99 T3 asks for, because unplaced sequence
+> at pivot contig junctions remains uncovered. The `-c 1` control stayed exact
+> through the fix (1225/1225, max error 0), confirming the fix added SNPs only
+> where contig ends exist.
 
 **What.** Section 10.3 T3 asks, for genomes cut into 100 contigs and shuffled and
 flipped, that no pair's distance exceeds the truth by more than 2 and that

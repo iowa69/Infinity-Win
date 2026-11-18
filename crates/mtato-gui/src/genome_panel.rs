@@ -6,7 +6,7 @@
 //! the same per frame as twenty: only the visible ones are built.
 
 use eframe::egui;
-use egui::{Align, Context, Layout, RichText, Sense, Vec2};
+use egui::{Align, Layout, RichText, Sense, Vec2};
 
 use crate::app::MtatoApp;
 use crate::state::{sorted_indices, SortColumn};
@@ -21,12 +21,12 @@ const W_LEN: f32 = 58.0;
 const W_CONTIGS: f32 = 34.0;
 const W_FOCUS: f32 = 40.0;
 
-pub fn show(ctx: &Context, app: &mut MtatoApp) {
-    egui::SidePanel::left("genomes")
-        .default_width(300.0)
-        .min_width(200.0)
+pub fn show(ui: &mut egui::Ui, app: &mut MtatoApp) {
+    egui::Panel::left("genomes")
+        .default_size(300.0)
+        .min_size(210.0)
         .resizable(true)
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             header(ui, app);
             list(ui, app);
         });
@@ -144,9 +144,10 @@ fn header_button(
     } else {
         " ↓"
     };
-    let text = RichText::new(format!("{label}{arrow}"))
-        .small()
-        .strong(sort.column == column);
+    let mut text = RichText::new(format!("{label}{arrow}")).small();
+    if sort.column == column {
+        text = text.strong();
+    }
     let resp = if width.is_finite() {
         ui.add_sized(Vec2::new(width, ROW_H), egui::Button::new(text).frame(false))
     } else {
@@ -198,7 +199,7 @@ fn list(ui: &mut egui::Ui, app: &mut MtatoApp) {
                 if is_selected {
                     painter.rect_filled(rect, 0, colors::wash(colors::SELECTED, 60));
                 } else if resp.hovered() {
-                    painter.rect_filled(rect, 0, ui.visuals().faint_bg_color());
+                    painter.rect_filled(rect, 0, ui.visuals().faint_bg_color);
                 }
                 let mut x = rect.left() + 2.0;
                 painter.text(
@@ -264,14 +265,14 @@ fn list(ui: &mut egui::Ui, app: &mut MtatoApp) {
                 );
 
                 if resp.clicked() {
-                    let additive = ui.input(|i| i.modifiers.command);
+                    let additive = ui.ctx().input(|i| i.modifiers.command);
                     click = Some((g.id, additive, false));
                 }
                 if resp.double_clicked() {
                     click = Some((g.id, false, true));
                 }
                 resp.on_hover_ui(|ui| {
-                    ui.set_layout(Layout::top_down(Align::LEFT), |ui| {
+                    ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
                         ui.label(RichText::new(&g.name).strong());
                         ui.label(format!(
                             "length {} | contigs {} | N50 {} | GC {}",

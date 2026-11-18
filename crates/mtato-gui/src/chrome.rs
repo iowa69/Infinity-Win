@@ -8,7 +8,7 @@
 //! stays one line high.
 
 use eframe::egui;
-use egui::{Context, RichText};
+use egui::RichText;
 
 use crate::app::MtatoApp;
 use crate::export::Item;
@@ -16,7 +16,7 @@ use crate::fmt;
 use crate::prefs::MAX_RECENT;
 
 /// The top bar: menus, transport controls, cluster distance and threads.
-pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
+pub fn toolbar(ui: &mut egui::Ui, app: &mut MtatoApp) {
     let mut show_inputs = app.show_inputs;
     let mut run_now = false;
     let mut stop_now = false;
@@ -25,7 +25,7 @@ pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
     let mut dist_changed = false;
     let mut params_changed = false;
 
-    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+    egui::Panel::top("toolbar").show(ui, |ui| {
         menu_bar(ui, app, &mut open_now, &mut export_now);
 
         ui.horizontal(|ui| {
@@ -42,7 +42,7 @@ pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
             let can_run = !app.running() && app.params_error.is_none() && !app.inputs.is_empty();
             ui.add_enabled_ui(can_run, |ui| {
                 if ui
-                    .button(RichText::new("▶ Run").strong())
+                    .button(RichText::new("Run ▶").strong())
                     .on_hover_text("Compare the listed genomes")
                     .clicked()
                 {
@@ -51,7 +51,7 @@ pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
             });
             ui.add_enabled_ui(app.running(), |ui| {
                 if ui
-                    .button("■ Stop")
+                    .button("Stop ■")
                     .on_hover_text("Ask the engine to stop after the current genome")
                     .clicked()
                 {
@@ -90,7 +90,9 @@ pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
             ui.separator();
             ui.label("output");
             let out = ui
-                .add(egui::TextEdit::singleline(&mut app.outdir_text).desired_width(160.0))
+                .add(
+                    egui::TextEdit::singleline(&mut app.outdir_text).desired_width(160.0),
+                )
                 .on_hover_text("Where the run writes its files, including events.jsonl");
             if out.changed() {
                 params_changed = true;
@@ -102,6 +104,7 @@ pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
         }
     });
 
+    let ctx = ui.ctx().clone();
     app.show_inputs = show_inputs;
     if dist_changed {
         app.validate_params();
@@ -112,17 +115,17 @@ pub fn toolbar(ctx: &Context, app: &mut MtatoApp) {
         app.save_prefs();
     }
     if run_now {
-        app.start_run(ctx);
+        app.start_run(&ctx);
     }
     if stop_now {
         app.stop_run();
     }
     if let Some(dir) = open_now {
-        app.open_folder(&dir, ctx);
+        app.open_folder(&dir, &ctx);
     }
     if let Some(item) = export_now {
         match item {
-            Some(Item::Png) => app.export_png(ctx),
+            Some(Item::Png) => app.export_png(&ctx),
             other => app.export_files(other),
         }
     }
@@ -144,7 +147,8 @@ fn menu_bar(
                         .hint_text("/path/to/mtato-out"),
                 );
                 let go = ui.button("Open").clicked()
-                    || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    || (resp.lost_focus()
+                        && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)));
                 if go {
                     *open_now = Some(app.open_text.clone());
                     ui.close();
@@ -225,7 +229,7 @@ fn input_area(ui: &mut egui::Ui, app: &mut MtatoApp, params_changed: &mut bool) 
                 .hint_text("a .fa / .fasta / .fna file, or a folder of them"),
         );
         let mut add = ui.button("Add").clicked();
-        add |= resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        add |= resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
         if add {
             let text = app.input_text.trim().to_string();
             if !text.is_empty() {
@@ -291,8 +295,8 @@ fn input_area(ui: &mut egui::Ui, app: &mut MtatoApp, params_changed: &mut bool) 
 }
 
 /// The bottom bar: one segment per stage, with its progress and elapsed time.
-pub fn status_bar(ctx: &Context, app: &MtatoApp) {
-    egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
+pub fn status_bar(ui: &mut egui::Ui, app: &MtatoApp) {
+    egui::Panel::bottom("statusbar").show(ui, |ui| {
         ui.horizontal(|ui| {
             for stage in &app.model.stages {
                 let text = match stage.fraction() {
@@ -349,9 +353,11 @@ pub fn status_bar(ctx: &Context, app: &MtatoApp) {
                 fmt::count(app.model.events_seen),
             ));
             match &app.model.source {
-                crate::state::Source::Live => ui.weak("(live run)"),
+                crate::state::Source::Live => {
+                    ui.weak("(live run)");
+                }
                 crate::state::Source::Folder(p) => {
-                    ui.weak(format!("(opened {})", p.display()))
+                    ui.weak(format!("(opened {})", p.display()));
                 }
                 crate::state::Source::Empty => {}
             }

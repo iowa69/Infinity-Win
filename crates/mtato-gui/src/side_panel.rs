@@ -6,18 +6,18 @@
 //! run, which is stated on the panel rather than left for the user to discover.
 
 use eframe::egui;
-use egui::{Context, RichText};
+use egui::RichText;
 
 use crate::app::MtatoApp;
 use crate::fmt;
 use crate::state::Note;
 
-pub fn show(ctx: &Context, app: &mut MtatoApp) {
-    egui::SidePanel::right("parameters")
-        .default_width(290.0)
-        .min_width(230.0)
+pub fn show(ui: &mut egui::Ui, app: &mut MtatoApp) {
+    egui::Panel::right("parameters")
+        .default_size(292.0)
+        .min_size(236.0)
         .resizable(true)
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {

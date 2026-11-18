@@ -1499,9 +1499,8 @@ mod tests {
         // The member differs over a stretch in the middle, so that stretch becomes
         // a difference piece rather than a matched block.
         let mut member = base;
-        for i in 1800..1860 {
-            let c = crate::seq::code(member[i]);
-            member[i] = b"ACGT"[(c + 1) as usize % 4];
+        for b in &mut member[1800..1860] {
+            *b = b"ACGT"[(crate::seq::code(*b) + 1) as usize % 4];
         }
         let member_data = GenomeData {
             name: "member".into(),
@@ -1555,10 +1554,7 @@ mod tests {
         for p in &f1.pieces {
             let alt = p.alt(seq);
             let ref_slice = &pivot.contig_seq(p.pcontig)[p.ps as usize..p.pe as usize];
-            cache.insert(
-                p.cache_key(),
-                crate::variant::diff(ref_slice, &alt, &dp),
-            );
+            cache.insert(p.cache_key(), crate::variant::diff(ref_slice, &alt, &dp));
         }
         assert_eq!(cache.len(), f1.pieces.len(), "every piece is warm");
 
@@ -1626,7 +1622,10 @@ mod tests {
         }
 
         let cmp = resolve_focus1(&pivot, &rec, &f1, &params, &cache).unwrap();
-        assert_eq!(cmp.counters.cache_hits, expected, "hits are the redundancies");
+        assert_eq!(
+            cmp.counters.cache_hits, expected,
+            "hits are the redundancies"
+        );
         assert!(
             cmp.counters.bases_aligned > 0,
             "the cold pieces were aligned"

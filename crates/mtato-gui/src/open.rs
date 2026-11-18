@@ -106,6 +106,7 @@ pub fn start(dir: PathBuf, ctx: Context) -> Result<OpenHandle, String> {
     let m2 = Arc::clone(&handle.model);
     let e2 = Arc::clone(&handle.error);
     let b2 = Arc::clone(&handle.read_bytes);
+    let spawn_err = format!("cannot start reading {}", dir.display());
     std::thread::Builder::new()
         .name("mtato-gui-open".into())
         .spawn(move || {
@@ -123,7 +124,7 @@ pub fn start(dir: PathBuf, ctx: Context) -> Result<OpenHandle, String> {
             }
             ctx.request_repaint();
         })
-        .map_err(|e| format!("cannot start reading {}: {e}", dir.display()))?;
+        .map_err(|_| spawn_err)?;
     Ok(handle)
 }
 
