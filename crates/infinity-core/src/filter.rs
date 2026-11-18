@@ -71,6 +71,11 @@ pub struct SnpFilter {
     pub scan_window: u64,
     /// Family-wise false-rejection rate of the SNP-cluster scan.
     pub scan_alpha: f64,
+    /// Window of the four-gamete test, in bases; `0` turns it off.
+    pub incompat_window: u64,
+    /// A site is rejected when it is incompatible with at least this many
+    /// other sites inside the window.
+    pub incompat_min: u32,
 }
 
 impl Default for SnpFilter {
@@ -86,6 +91,8 @@ impl Default for SnpFilter {
             keep_break_ext: false,
             scan_window: 1_000,
             scan_alpha: 0.01,
+            incompat_window: 1_000,
+            incompat_min: 2,
         }
     }
 }
@@ -309,6 +316,75 @@ pub fn soft_core_mask(profiles: &[Profile], fraction: f64) -> Vec<Iv> {
     merge(out)
 }
 
+/// Sites that fail the four-gamete test against at least `min_conflicts`
+/// other sites within `window` bases.
+///
+/// Two substitutions that each happened once on a clonal tree split the genomes
+/// in a nested or disjoint way, so at most three of the four combinations of
+/// their alleles occur (`00` is always present: the pivot). When all four occur,
+/// at least one of the two sites is not a single clonal mutation: recombination,
+/// or a collapsed repeat whose copies the assemblies resolved differently. Real
+/// outbreak SNPs essentially never conflict with their neighbours; collapsed
+/// repeats conflict with all of them. `survivors[i]` is genome `i`'s sorted
+/// (position, base) list after the other rules.
+pub fn incompatible_sites(
+    survivors: &[Vec<(u64, u8)>],
+    window: u64,
+    min_conflicts: u32,
+) -> Vec<u64> {
+    use std::collections::BTreeMap;
+    let n = survivors.len();
+    let words = n.div_ceil(64).max(1);
+    // position -> (base, carriers bitset, multi-allelic)
+    let mut sites: BTreeMap<u64, (u8, Vec<u64>, bool)> = BTreeMap::new();
+    for (gi, list) in survivors.iter().enumerate() {
+        for &(p, b) in list {
+            let e = sites
+                .entry(p)
+                .or_insert_with(|| (b, vec![0u64; words], false));
+            if e.0 != b {
+                e.2 = true;
+            }
+            e.1[gi / 64] |= 1u64 << (gi % 64);
+        }
+    }
+    let pos: Vec<u64> = sites.keys().copied().collect();
+    let info: Vec<&(u8, Vec<u64>, bool)> = sites.values().collect();
+    let mut valid = vec![!0u64; words];
+    if n % 64 != 0 {
+        valid[words - 1] = (1u64 << (n % 64)) - 1;
+    }
+    let mut conflicts = vec![0u32; pos.len()];
+    for i in 0..pos.len() {
+        if info[i].2 {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < pos.len() && pos[j] - pos[i] <= window {
+            if !info[j].2 {
+                let (a, b) = (&info[i].1, &info[j].1);
+                let (mut h11, mut h10, mut h01, mut h00) = (false, false, false, false);
+                for w in 0..words {
+                    h11 |= a[w] & b[w] != 0;
+                    h10 |= a[w] & !b[w] & valid[w] != 0;
+                    h01 |= !a[w] & b[w] & valid[w] != 0;
+                    h00 |= !a[w] & !b[w] & valid[w] != 0;
+                }
+                if h11 && h10 && h01 && h00 {
+                    conflicts[i] += 1;
+                    conflicts[j] += 1;
+                }
+            }
+            j += 1;
+        }
+    }
+    pos.iter()
+        .zip(&conflicts)
+        .filter(|(_, &c)| c >= min_conflicts)
+        .map(|(&p, _)| p)
+        .collect()
+}
+
 /// Apply the SNP rules to the profiles of one cluster.
 ///
 /// `profiles[0]` is conventionally the pivot (an empty profile), but nothing
@@ -388,20 +464,19 @@ pub fn apply(
     }
     let core_bp = pivot_len.saturating_sub(total_len(&cluster_mask));
 
-    // ---- per-member masks ----
+    // ---- per-member masks (pass 1) ----
     let flat = |c: u32, p: u64| offsets.get(c as usize).copied().unwrap_or(0) + p;
-    let mut out_profiles = Vec::with_capacity(profiles.len());
-    let mut reasons = Vec::with_capacity(profiles.len());
-    let mut pass_snps = Vec::with_capacity(profiles.len());
+    let counted_flags = |f: u32| -> u32 {
+        if rules.keep_break_ext {
+            f & !flags::BREAK_EXT
+        } else {
+            f
+        }
+    };
+    let mut member_masks: Vec<(Vec<Iv>, Vec<Iv>)> = Vec::with_capacity(profiles.len());
+    let mut survivors: Vec<Vec<(u64, u8)>> = Vec::with_capacity(profiles.len());
     for prof in profiles {
         let mut flagged_mask: Vec<Iv> = Vec::new();
-        let counted_flags = |f: u32| -> u32 {
-            if rules.keep_break_ext {
-                f & !flags::BREAK_EXT
-            } else {
-                f
-            }
-        };
         if rules.drop_flagged {
             for v in &prof.variants {
                 if counted_flags(v.flags) != 0 {
@@ -418,16 +493,58 @@ pub fn apply(
             .filter(|&p| !contains(&cluster_mask, p) && !contains(&flagged_mask, p))
             .collect();
         candidates.sort_unstable();
-        let scan_mask = merge(snp_cluster_windows(
-            &candidates,
-            core_bp,
-            rules.scan_window,
-            rules.scan_alpha,
-        ));
+        // Two scales: the configured window, and a window ten times finer that
+        // catches a tight run of three or more SNPs (a collapsed repeat or a
+        // misassembly) which a 1 kb window dilutes. Each scale is Bonferroni
+        // corrected over its own number of windows, so a real double mutation
+        // (two adjacent SNPs) is still kept.
+        let mut scan: Vec<Iv> =
+            snp_cluster_windows(&candidates, core_bp, rules.scan_window, rules.scan_alpha);
+        if rules.scan_window >= 500 {
+            scan.extend(snp_cluster_windows(
+                &candidates,
+                core_bp,
+                rules.scan_window / 10,
+                rules.scan_alpha,
+            ));
+        }
+        let scan_mask = merge(scan);
         let member_mask = merge(
             flagged_mask
                 .iter()
                 .chain(scan_mask.iter())
+                .copied()
+                .collect(),
+        );
+        let mut alive: Vec<(u64, u8)> = candidates
+            .iter()
+            .filter(|&&p| !contains(&member_mask, p))
+            .map(|&p| (p, prof.snp_map[&p]))
+            .collect();
+        alive.sort_unstable();
+        survivors.push(alive);
+        member_masks.push((scan_mask, member_mask));
+    }
+
+    // ---- cluster-wide: the four-gamete test ----
+    let incompatible: Vec<Iv> = if rules.incompat_window > 0 {
+        incompatible_sites(&survivors, rules.incompat_window, rules.incompat_min)
+            .into_iter()
+            .map(|p| (p, p + 1))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // ---- outputs (pass 2) ----
+    let mut out_profiles = Vec::with_capacity(profiles.len());
+    let mut reasons = Vec::with_capacity(profiles.len());
+    let mut pass_snps = Vec::with_capacity(profiles.len());
+    for (prof, (scan_mask, member_mask)) in profiles.iter().zip(member_masks) {
+        let member_mask = merge(
+            member_mask
+                .iter()
+                .chain(incompatible.iter())
                 .copied()
                 .collect(),
         );
@@ -457,6 +574,9 @@ pub fn apply(
             }
             if v.kind == VariantKind::Snp && hit(&scan_mask) {
                 r.push("snp_cluster".to_string());
+            }
+            if v.kind == VariantKind::Snp && hit(&incompatible) {
+                r.push("incompatible".to_string());
             }
             keep.push(r.is_empty());
             why.push(if r.is_empty() {
@@ -726,6 +846,24 @@ mod tests {
         assert_eq!(out.reasons[1][0], PASS, "genome 1 has its own call there");
         assert_eq!(soft_core_mask(&profs, 0.9), vec![]);
         assert_eq!(soft_core_mask(&profs, 1.0), vec![(9_000, 11_000)]);
+    }
+
+    #[test]
+    fn the_four_gamete_test_rejects_scrambled_sites_and_keeps_clonal_ones() {
+        // genomes 0 (pivot) .. 5. Clonal: site 100 in {1,2}, site 200 in {1}.
+        // Scrambled region: sites 5000.. carried by unrelated subsets.
+        let g = |sites: &[(u64, u8)]| sites.to_vec();
+        let survivors = vec![
+            g(&[]),
+            g(&[(100, b'A'), (200, b'C'), (5000, b'T'), (5100, b'T')]),
+            g(&[(100, b'A'), (5100, b'T'), (5200, b'G')]),
+            g(&[(5000, b'T'), (5200, b'G')]),
+            g(&[(5000, b'T'), (5100, b'T'), (5200, b'G')]),
+            g(&[]),
+        ];
+        let bad = incompatible_sites(&survivors, 1_000, 2);
+        assert_eq!(bad, vec![5000, 5100, 5200]);
+        assert!(incompatible_sites(&survivors, 1_000, 3).is_empty());
     }
 
     #[test]

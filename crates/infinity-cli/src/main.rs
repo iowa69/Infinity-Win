@@ -193,6 +193,14 @@ struct RunArgs {
     /// Family-wise error rate of the SNP-cluster test.
     #[arg(long, default_value_t = 0.01)]
     scan_alpha: f64,
+
+    /// Window (bp) of the four-gamete compatibility test. 0 turns it off.
+    #[arg(long, default_value_t = 1000)]
+    incompat_window: u64,
+
+    /// Reject a site incompatible with at least this many neighbours.
+    #[arg(long, default_value_t = 2)]
+    incompat_min: u32,
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -328,6 +336,8 @@ fn cmd_run(args: RunArgs) -> i32 {
             keep_break_ext: args.keep_break_ext,
             scan_window: args.scan_window,
             scan_alpha: args.scan_alpha,
+            incompat_window: args.incompat_window,
+            incompat_min: args.incompat_min,
         },
     };
     if let Err(e) = params.validate() {
