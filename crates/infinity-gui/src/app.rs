@@ -85,6 +85,8 @@ pub struct InfinityApp {
     pub(crate) show_notes: bool,
     /// Whether the "add genomes" input area under the toolbar is open.
     pub(crate) show_inputs: bool,
+    /// Whether the right-hand panel is open.
+    pub(crate) show_side: bool,
     /// The cluster distance the slider last sent, so dragging it does not queue
     /// a re-clustering per pixel.
     last_dist_sent: f64,
@@ -183,6 +185,7 @@ impl InfinityApp {
             // Open at start: the first thing a user has to do is get genomes in,
             // and there is no file dialog to discover.
             show_inputs: true,
+            show_side: true,
             last_dist_sent: params.cluster_dist,
         };
         app.validate_params();
@@ -759,14 +762,27 @@ impl eframe::App for InfinityApp {
         // mock-up of section 8 lays it out: the full-width bars first, then the
         // two sides, then the map across what is left, and the tree in the
         // middle.
-        egui::CentralPanel::default().show(ui, |ui| {
-            crate::chrome::toolbar(ui, self);
-            crate::chrome::status_bar(ui, self);
-            crate::genome_panel::show(ui, self);
-            crate::side_panel::show(ui, self);
-            crate::map_panel::show(ui, self);
-            crate::tree_panel::show(ui, self);
-        });
+        //
+        // The side panels are carved straight out of the root `Ui`, and the
+        // tree and the map live inside a `CentralPanel`. That panel's child
+        // `Ui` is bounded *and clipped* to what the side panels left over, so
+        // a header that is wider than the space it gets can never spill over
+        // a neighbouring panel: it wraps or is clipped instead. (Before, all
+        // five were shown inside one `CentralPanel`, so the tree header and
+        // canvas could widen past the right-hand panel and paint over it.)
+        crate::chrome::toolbar(ui, self);
+        crate::chrome::status_bar(ui, self);
+        let total_w = ui.available_width();
+        crate::genome_panel::show(ui, self, total_w);
+        crate::side_panel::show(ui, self, total_w);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(4)))
+            .show(ui, |ui| {
+                crate::map_panel::show(ui, self);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| crate::tree_panel::show(ui, self));
+            });
     }
 }
 

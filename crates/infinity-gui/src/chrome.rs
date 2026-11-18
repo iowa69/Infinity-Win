@@ -28,7 +28,9 @@ pub fn toolbar(ui: &mut egui::Ui, app: &mut InfinityApp) {
     egui::Panel::top("toolbar").show(ui, |ui| {
         menu_bar(ui, app, &mut open_now, &mut export_now);
 
-        ui.horizontal(|ui| {
+        // Wrapped, so a narrow window moves the tail of the bar onto a second
+        // line instead of pushing it off the edge.
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .selectable_label(show_inputs, "Add genomes")
                 .on_hover_text(
@@ -204,6 +206,7 @@ fn menu_bar(
 
         ui.menu_button("View", |ui| {
             ui.checkbox(&mut app.tree.show_legend, "Tree legend");
+            ui.checkbox(&mut app.show_side, "Side panel");
             ui.checkbox(&mut app.show_notes, "Warnings and notes");
             if ui.button("Fit tree").clicked() {
                 app.tree.needs_fit = true;
@@ -271,9 +274,11 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
 
     if !app.inputs.is_empty() {
         let mut remove: Option<usize> = None;
+        // Shrinks to its rows: a fixed height left a band of empty space
+        // between the input area and the panels when only one path was listed.
         egui::ScrollArea::vertical()
             .max_height(72.0)
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (i, p) in app.inputs.iter().enumerate() {
                     ui.horizontal(|ui| {

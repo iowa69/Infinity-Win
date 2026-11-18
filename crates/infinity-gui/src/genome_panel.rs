@@ -21,10 +21,13 @@ const W_LEN: f32 = 58.0;
 const W_CONTIGS: f32 = 34.0;
 const W_FOCUS: f32 = 40.0;
 
-pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
+/// `total_w` is the width of the whole window below the toolbar: the list may
+/// take at most about a third of it, so the tree always keeps room to draw.
+pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
+    let max_w = (total_w * 0.34).max(200.0);
     egui::Panel::left("genomes")
-        .default_size(300.0)
-        .min_size(210.0)
+        .default_size(260.0)
+        .size_range(190.0..=max_w)
         .resizable(true)
         .show(ui, |ui| {
             header(ui, app);

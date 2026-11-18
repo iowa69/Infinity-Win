@@ -12,12 +12,17 @@ use crate::app::InfinityApp;
 use crate::fmt;
 use crate::state::Note;
 
-pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
+/// The panel can be closed from the toolbar (or by dragging its edge shut), and
+/// its contents scroll rather than overflow, so at the smallest window size it
+/// costs the tree nothing but its own width.
+pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
+    let max_w = (total_w * 0.34).max(220.0);
+    let mut open = app.show_side;
     egui::Panel::right("parameters")
-        .default_size(292.0)
-        .min_size(236.0)
+        .default_size(270.0)
+        .size_range(220.0..=max_w)
         .resizable(true)
-        .show(ui, |ui| {
+        .show_collapsible(ui, &mut open, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -32,6 +37,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
                     export_area(ui, app);
                 });
         });
+    app.show_side = open;
 }
 
 fn parameters(ui: &mut egui::Ui, app: &mut InfinityApp) {

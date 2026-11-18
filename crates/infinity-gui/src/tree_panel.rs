@@ -91,7 +91,9 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mut zoom_by: Option<f32> = None;
     let mut picked: Option<u32> = None;
 
-    ui.horizontal(|ui| {
+    // Wrapped rather than one long row: at the smallest window the controls
+    // flow onto a second line instead of running under the side panel.
+    ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("TREE").strong());
         let sel = app.selected_cluster;
         let label = match sel.and_then(|c| app.model.cluster(c)) {
@@ -170,10 +172,10 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         if let Some(c) = app.selected_cluster.and_then(|c| app.model.cluster(c)) {
             ui.weak(format!("branch lengths in {}", fmt::marked_unit(c.focus)));
         }
-
-        ui.separator();
-        pair_readout(ui, app);
     });
+    // The pairwise readout gets a line of its own: it is the longest thing in
+    // the header and the one that changes most.
+    ui.horizontal_wrapped(|ui| pair_readout(ui, app));
 
     if let Some(f) = zoom_by {
         app.tree.zoom_request = Some(f);
@@ -277,8 +279,8 @@ struct Draw<'a> {
 }
 
 fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    let size = ui.available_size_before_wrap();
-    let (rect, resp) = ui.allocate_exact_size(size.max(Vec2::splat(40.0)), Sense::click_and_drag());
+    let rect = remaining_rect(ui);
+    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     app.tree_rect = Some((rect, ui.ctx().pixels_per_point()));
     let dark = ui.visuals().dark_mode;
     let bg = ui.visuals().panel_fill;
@@ -427,6 +429,27 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 ui.label(line);
             }
         });
+    }
+}
+
+/// What is left of the panel below the header, never wider than the panel
+/// itself. `available_size_before_wrap` can report more than the panel when a
+/// header row overflowed, and a canvas sized from it painted over the
+/// neighbouring panel.
+pub(crate) fn remaining_rect(ui: &egui::Ui) -> Rect {
+    let avail = ui.available_rect_before_wrap();
+    let bound = ui.max_rect();
+    let r = Rect::from_min_max(
+        avail.min,
+        Pos2::new(
+            avail.right().min(bound.right()),
+            avail.bottom().min(bound.bottom()),
+        ),
+    );
+    if r.width() < 40.0 || r.height() < 40.0 {
+        Rect::from_min_size(r.min, r.size().max(Vec2::splat(40.0)))
+    } else {
+        r
     }
 }
 
