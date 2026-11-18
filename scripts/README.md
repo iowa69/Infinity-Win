@@ -131,7 +131,23 @@ scripts/run_matrix.py --datasets ncbi_pd_cluster
 scripts/run_matrix.py --configs baseline flat --force
 scripts/run_matrix.py --threads 8 --k 31 --densities 16384,2048,256
 scripts/run_matrix.py --extra-run-arg --verbose       # repeatable pass-through
+scripts/run_matrix.py --repeats 5                     # default 3
+scripts/run_matrix.py --repeats 3 --keep-repeat-outputs
 ```
+
+**Repeats.** Many cells finish in under a second, where a 20% difference is
+noise, so every configuration runs `--repeats` times (default 3). Repeat 1
+writes the full output folder (used for accuracy, invariance and `bench`);
+repeats 2..N go to `<dataset>/<config>/repeats/r<k>/` and are pruned to
+`run.json` + logs unless `--keep-repeat-outputs` (the disk is nearly full).
+Repeats run **round-robin** - repeat 2 of every configuration, then repeat 3 -
+so slow drift of the machine does not land on one configuration. Every repeat is
+recorded in `cells[].repeats[]` (status, wall time, first/exact/total time, peak
+memory and its source), and `cells[].timing` holds `{n, median, min, max,
+values}` per metric. A failed repeat is a failure (exit 1, listed in
+`failures`) and adds no number; a configuration whose first run failed is not
+repeated. Re-running with a larger `--repeats` reuses the repeats that exist
+and only runs the missing ones.
 
 Per cell it records: the exact `run` and `bench` command lines, wall time,
 return code, `run.json` timings/counters/`focus_counts`/`peak_memory_bytes`,
@@ -335,15 +351,29 @@ commands.
 
 The verdict is exactly section 11's rule: *a part of the idea pays if turning it
 off makes time-to-exact or peak memory at least 20% worse on at least two of the
-three datasets.* Four outcomes are distinguished, because collapsing them would
-hide missing data:
+three datasets*, applied to measurements that are honest about noise:
+
+* **Medians.** The rule compares the median over the repeats of the switched-off
+  configuration with the baseline's median; every table prints `median
+  [min-max]` and the usable/total runs, and the verdict detail says whether the
+  two min-max ranges overlap (n/a with a single run - a point has no spread).
+* **Too short to judge.** When the baseline median time-to-exact is under 2 s
+  (`--min-judge-s`), the time metric is printed but marked *too short to judge*
+  and counts neither way. Peak memory on that dataset is still judged.
+* **Not a performance test.** `salmonella_trio` (3 genomes, the exactness check
+  of section 5) is left out of the performance verdict and out of its
+  denominator, and the report says so (`common.PERFORMANCE_EXCLUDED`; any
+  dataset.json can opt out with `"performance_verdict": false`).
+
+A summary from before `--repeats` existed still reports, as n = 1.
+Four outcomes are distinguished, because collapsing them would hide missing data:
 
 | Verdict | Meaning |
 |---|---|
 | **pays** | ≥ 2 datasets measurably ≥ 20% worse |
 | does not pay | ≥ 2 datasets measurable, fewer than 2 got 20% worse |
 | undetermined | only 1 dataset measurable — the rule cannot decide either way |
-| not measurable | no dataset had a usable time-to-exact or peak memory |
+| not measurable | no dataset had a usable (judgeable) time-to-exact or peak memory |
 
 "Undetermined" and "not measurable" are never reported as a pass.
 
@@ -542,7 +572,8 @@ in `tempfile.mkdtemp()` directories under `/tmp` and removed afterwards.
 ## 6. Assumptions worth knowing
 
 1. **Sequential runs.** Configurations run one at a time. Parallel runs would
-   make wall time and peak memory meaningless.
+   make wall time and peak memory meaningless. Each runs `--repeats` times,
+   round-robin, and only medians enter the verdict.
 2. **Genome names must match** between Infinity-Win's output, the SKA2 table and any
    truth tree, or the joins produce nothing. Infinity-Win uses the FASTA file stem; the
    real datasets were built so those agree. `baselines.py compare` reports a
