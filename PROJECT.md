@@ -1,11 +1,11 @@
-# M-Tato: project outline
+# Infinity-Win: project outline
 
 **Progressive, cluster-first, position-aware comparison of nearly identical genomes, with a live tree that sharpens while the computation runs.**
 
 | | |
 |---|---|
 | Status | Design outline, version 1, 2026-11-18. Ready for a builder. |
-| Name | "M-Tato" is a working name taken from the project folder. |
+| Name | Infinity-Win (owner, 2026-11-18). Earlier working name: M-Tato. |
 | Reader | An AI coding assistant (or a human developer) who builds this without access to the design conversation. |
 
 ---
@@ -42,7 +42,7 @@ Tools like Mash compare genomes very fast by reducing each genome to a small sam
 
 Exact tools (alignment, split k-mers) see every SNP but give nothing until they finish, and many of them compare everything against everything.
 
-M-Tato tests one idea **(owner)**:
+Infinity-Win tests one idea **(owner)**:
 
 > Treat genome comparison like a photo coming into focus. Start with a fast blurry answer, then raise the resolution step by step, and only where genomes actually differ. Keep the identity and position of the k-mers at every step so that each level can build on the previous one and every difference can be mapped back onto the genome.
 
@@ -101,7 +101,7 @@ This table comes from the author's knowledge plus a short search. It is not a sy
 | Anchors plus local alignment | MUMmer, Parsnp, minimap2, skani |
 | Storing repeated sequence once | prefix-free parsing, compressed pangenome indexes |
 
-What M-Tato tries that the search did not find in one tool:
+What Infinity-Win tries that the search did not find in one tool:
 
 1. **One hash pass feeds every level.** The same sampled k-mers serve as the sketch (blurry), as position anchors (mapping), and as cut points for nested blocks (zoom).
 2. **Nested content-defined blocks.** Genomes are cut at the anchors into blocks of about 16 kb, 2 kb, and 256 bp. A block whose hash is already known is identical and is skipped without looking inside.
@@ -470,13 +470,13 @@ In hierarchical mode, show a region that failed at level 1 as a wide pale box th
 ## 9. Command line and output files
 
 ```
-mtato run <files or folders...> -o <outdir> [--threads N] [--k 31]
+infinity run <files or folders...> -o <outdir> [--threads N] [--k 31]
           [--densities 16384,2048,256] [--cluster-dist 0.005]
           [--flat] [--no-block-skip] [--no-piece-cache] [--no-profile-grouping]
           [--single-cluster]
-mtato simulate ...          (section 10)
-mtato bench ...             (section 11)
-mtato-gui                   (the desktop program)
+infinity simulate ...          (section 10)
+infinity bench ...             (section 11)
+Infinity-Win               (the desktop program)
 ```
 
 Input files: `.fa`, `.fasta`, `.fna`, optionally `.gz`. One file is one genome. A folder means all such files inside it.
@@ -498,7 +498,7 @@ Output folder:
 
 ## 10. Testing
 
-### 10.1 Simulator (`mtato simulate`)
+### 10.1 Simulator (`infinity simulate`)
 
 Deterministic for a given seed. It produces genomes with known truth.
 
@@ -563,7 +563,7 @@ This section is a deliverable, not an appendix **(owner's purpose)**.
 
 **Outside baselines** (a separate script, Linux only, not part of the program): Mash plus neighbour-joining as the fast blurry reference; SKA2 as the exact alignment-free reference.
 
-**`mtato bench`** compares an output folder with a truth folder and writes the measurements as JSON. A script runs the full matrix and writes `REPORT.md` with tables and the accuracy-over-time figure.
+**`infinity bench`** compares an output folder with a truth folder and writes the measurements as JSON. A script runs the full matrix and writes `REPORT.md` with tables and the accuracy-over-time figure.
 
 **Proposed verdict rule (author's call).** A part of the idea "pays" if turning it off makes time-to-exact or peak memory at least 20% worse on at least two of the three datasets. Report every result, including the ones where it does not pay.
 
@@ -582,13 +582,13 @@ Build this last. Its payoff is the least certain part of the idea, and the repor
 - **Workspace:**
 
 ```
-mtato/
+infinity/
   Cargo.toml              workspace
   crates/
-    mtato-core/           engine library: scan, sketch, cluster, compare, tree, events
-    mtato-sim/            simulator and truth comparison
-    mtato-cli/            binary "mtato"
-    mtato-gui/            binary "mtato-gui"
+    infinity-core/           engine library: scan, sketch, cluster, compare, tree, events
+    infinity-sim/            simulator and truth comparison
+    infinity-cli/            binary "infinity"
+    infinity-gui/            binary "Infinity-Win"
   scripts/                benchmark matrix, outside baselines, report
   tests/                  integration tests
   DECISIONS.md            deviations from this outline
@@ -606,13 +606,13 @@ mtato/
 
 | # | Milestone | Done when |
 |---|---|---|
-| M0 | Workspace skeleton, formatting and lint checks, test runner, `mtato --version`. | Builds and tests run on Linux and Windows. |
+| M0 | Workspace skeleton, formatting and lint checks, test runner, `infinity --version`. | Builds and tests run on Linux and Windows. |
 | M1 | Scan (6.2), blocks (6.3), sketch, and the simulator (10.1). | Properties 1, 4, 5 pass. |
-| M2 | Clustering and backbone tree (6.4), event stream (7), `mtato run` writing `genomes.tsv`, `clusters.tsv`, `tree.nwk`, `events.jsonl`. | T5 passes. |
+| M2 | Clustering and backbone tree (6.4), event stream (7), `infinity run` writing `genomes.tsv`, `clusters.tsv`, `tree.nwk`, `events.jsonl`. | T5 passes. |
 | M3 | GUI skeleton: add genomes, run, live genome list, clusters, backbone tree drawn and updating. | A 100-genome simulated run shows a live blurry tree; the window never stalls. |
 | M4 | Exact engine in flat mode (6.5-6.9): variants, coverage, profiles, distances, cluster trees, full tree. | Properties 2, 3 and tests T1-T4 pass. |
 | M5 | GUI complete (section 8): focus styling, smooth updates, map panel, parameters and counters, export, open results. | Every item in section 8 can be demonstrated on a simulated run. |
-| M6 | Staged Focus 1 then Focus 2, hierarchical mode, caches, memory budget, all switches (6.10, 6.11), `mtato bench`. | Property 6 passes. Performance numbers reported against 10.4. |
+| M6 | Staged Focus 1 then Focus 2, hierarchical mode, caches, memory budget, all switches (6.10, 6.11), `infinity bench`. | Property 6 passes. Performance numbers reported against 10.4. |
 | M7 | Experiment (section 11): matrix script, outside baselines, `REPORT.md`. | Report exists with all configurations and datasets available. |
 | M8 | Experimental k dimension (section 11). | Findings added to `REPORT.md`. |
 | M9 | Release builds for both platforms, user guide in `README.md`. | A new user can install, load genomes, and read the tree from the guide alone. |
@@ -641,7 +641,7 @@ mtato/
 7. The window layout in section 8.
 8. The verdict rule in section 11.
 9. The k dimension is built last, as an experiment.
-10. The working name "M-Tato".
+10. The working name "M-Tato" (since renamed to Infinity-Win by the owner).
 
 **Open questions for the owner**
 

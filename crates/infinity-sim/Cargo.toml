@@ -1,0 +1,17 @@
+[package]
+name = "infinity-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Infinity-Win simulator: deterministic genomes with known truth"
+
+[dependencies]
+infinity-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lib]
+name = "infinity_sim"
+path = "src/lib.rs"

@@ -1,7 +1,7 @@
 //! Shared helpers for the integration tests of sections 10.2 and 10.3.
 //!
 //! These are integration tests rather than unit tests on purpose: they drive the
-//! engine through its public entry point, [`mtato_core::engine::run`], reading
+//! engine through its public entry point, [`infinity_core::engine::run`], reading
 //! and writing real files, so they exercise exactly the path the CLI and the GUI
 //! use.
 
@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mtato_core::engine::{run, RunConfig, RunResults};
-use mtato_core::events::{event_bus, Command, Envelope};
-use mtato_core::params::Parameters;
+use infinity_core::engine::{run, RunConfig, RunResults};
+use infinity_core::events::{event_bus, Command, Envelope};
+use infinity_core::params::Parameters;
 
 /// A scratch directory that removes itself when dropped.
 ///
@@ -25,7 +25,7 @@ impl TempDir {
     pub fn new(label: &str) -> Self {
         let mut path = std::env::temp_dir();
         let unique = format!(
-            "mtato-it-{}-{}-{:?}",
+            "infinity-it-{}-{}-{:?}",
             label,
             std::process::id(),
             std::thread::current().name().unwrap_or("main")

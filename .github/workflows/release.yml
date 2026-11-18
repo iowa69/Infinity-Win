@@ -1,4 +1,4 @@
-# Release builds for M-Tato (PROJECT.md milestone M9).
+# Release builds for Infinity-Win (PROJECT.md milestone M9).
 #
 # Why this exists: the development machine is Linux x86-64 with no mingw-w64
 # toolchain and no root, so Windows binaries cannot be cross-compiled there.
@@ -9,7 +9,7 @@
 #   - pushing a tag `v*`  -> builds both platforms AND publishes a GitHub release
 #   - manual dispatch     -> builds both platforms, artefacts only
 #
-# Artefacts (per run): mtato-x86_64-unknown-linux-gnu, mtato-x86_64-pc-windows-msvc
+# Artefacts (per run): infinity-x86_64-unknown-linux-gnu, infinity-x86_64-pc-windows-msvc
 
 name: release
 
@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The workspace pins its target dir in .cargo/config.toml to /tmp/mtato-target,
+  # The workspace pins its target dir in .cargo/config.toml to /tmp/infinity-target,
   # which does not exist on a runner; override it so caching and staging agree.
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
@@ -69,7 +69,7 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.triple }}-
 
       - name: Build the release binaries
-        run: cargo build --release --locked --target "${{ matrix.triple }}" --package mtato-cli --package mtato-gui
+        run: cargo build --release --locked --target "${{ matrix.triple }}" --package infinity-cli --package infinity-gui
 
       - name: Record the version
         run: |
@@ -81,8 +81,8 @@ jobs:
       - name: Stage the binaries
         run: |
           mkdir -p "dist/${{ matrix.triple }}"
-          cp "target/${{ matrix.triple }}/release/mtato${{ matrix.exe }}"     "dist/${{ matrix.triple }}/"
-          cp "target/${{ matrix.triple }}/release/mtato-gui${{ matrix.exe }}" "dist/${{ matrix.triple }}/"
+          cp "target/${{ matrix.triple }}/release/infinity${{ matrix.exe }}"     "dist/${{ matrix.triple }}/"
+          cp "target/${{ matrix.triple }}/release/Infinity-Win${{ matrix.exe }}" "dist/${{ matrix.triple }}/"
           cp VERSION.txt "dist/${{ matrix.triple }}/VERSION"
           cp LICENSE     "dist/${{ matrix.triple }}/LICENSE"
           ls -l "dist/${{ matrix.triple }}"
@@ -99,16 +99,16 @@ jobs:
 
       - name: Smoke-test the CLI binary
         run: |
-          "dist/${{ matrix.triple }}/mtato${{ matrix.exe }}" --version
+          "dist/${{ matrix.triple }}/infinity${{ matrix.exe }}" --version
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mtato-${{ matrix.triple }}
+          name: infinity-${{ matrix.triple }}
           path: dist/${{ matrix.triple }}/*
           if-no-files-found: error
 
   # The benchmark scripts are part of the deliverable (PROJECT.md section 11),
-  # and they need no Rust binary to be tested: they run against a fake `mtato`.
+  # and they need no Rust binary to be tested: they run against a fake `infinity`.
   scripts-tests:
     name: benchmark script tests
     runs-on: ubuntu-latest
@@ -139,9 +139,9 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release
-          for dir in artefacts/mtato-*; do
-            triple="${dir##*/mtato-}"
-            ( cd "$dir" && zip -r "../../release/mtato-${triple}.zip" . )
+          for dir in artefacts/infinity-*; do
+            triple="${dir##*/infinity-}"
+            ( cd "$dir" && zip -r "../../release/infinity-${triple}.zip" . )
           done
           cd release
           sha256sum *.zip > SHA256SUMS.txt
@@ -155,7 +155,7 @@ jobs:
           set -euxo pipefail
           NOTES_FILE="$(mktemp)"
           {
-            echo "M-Tato ${GITHUB_REF_NAME}"
+            echo "Infinity-Win ${GITHUB_REF_NAME}"
             echo
             echo "Binaries for Windows x86-64 and Linux x86-64."
             echo "Verify a download against \`SHA256SUMS.txt\`."
@@ -163,6 +163,6 @@ jobs:
             echo "Built from commit ${GITHUB_SHA} by the \`release\` workflow."
           } > "$NOTES_FILE"
           gh release create "$GITHUB_REF_NAME" \
-            --title "M-Tato ${GITHUB_REF_NAME}" \
+            --title "Infinity-Win ${GITHUB_REF_NAME}" \
             --notes-file "$NOTES_FILE" \
             release/*.zip release/SHA256SUMS.txt

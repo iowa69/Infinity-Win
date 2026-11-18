@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Outside baselines for PROJECT.md section 11 (Linux only, NOT part of M-Tato).
+"""Outside baselines for PROJECT.md section 11 (Linux only, NOT part of Infinity-Win).
 
-Two references are compared against M-Tato:
+Two references are compared against Infinity-Win:
 
 **Mash + neighbour-joining** -- the fast, blurry reference. Mash reduces each
 genome to a small sketch and forgets position, which is exactly the trade-off
-M-Tato claims to improve on. The neighbour-joining tree is built by this script
+Infinity-Win claims to improve on. The neighbour-joining tree is built by this script
 (pure Python, in ``common.py``), not by an external phylogenetics package.
 
 **SKA2** -- the exact, alignment-free reference. Split k-mers see every SNP that
@@ -31,7 +31,7 @@ Sub-commands::
     ska2   --dataset NAME        parse/normalise SKA2 distances  (or run ska2)
     mash   --dataset NAME        sketch + NJ tree                (or read a mash table)
     compare --dataset NAME --run-dir DIR
-                                 join SKA2 against M-Tato's cluster_*.dist.tsv
+                                 join SKA2 against Infinity-Win's cluster_*.dist.tsv
     all    --dataset NAME --run-dir DIR
 
 Outputs land in ``bench-work/baselines/<dataset>/`` and are always accompanied by
@@ -332,12 +332,12 @@ def normalise_ska(ska: common.SkaDistances, out_dir: Path) -> Path:
 
 
 def join_distances(
-    mtato_rows: Sequence[Dict[str, Any]], ska_index: Dict[Tuple[str, str], common.SkaPair]
+    infinity_rows: Sequence[Dict[str, Any]], ska_index: Dict[Tuple[str, str], common.SkaPair]
 ) -> Dict[str, Any]:
-    """Join M-Tato's pairwise distances with SKA2's, pair by pair."""
+    """Join Infinity-Win's pairwise distances with SKA2's, pair by pair."""
     joined: List[Dict[str, Any]] = []
-    mtato_index = {common.pair_key(r["a"], r["b"]): r for r in mtato_rows}
-    for key, row in mtato_index.items():
+    infinity_index = {common.pair_key(r["a"], r["b"]): r for r in infinity_rows}
+    for key, row in infinity_index.items():
         ska = ska_index.get(key)
         snps = row.get("snps")
         per_site = row.get("distance")
@@ -349,11 +349,11 @@ def join_distances(
                 "genome_a": key[0],
                 "genome_b": key[1],
                 "cluster": row.get("cluster"),
-                "mtato_snps": snps,
-                "mtato_snps_derived": row.get("snps") is None and snps is not None,
-                "mtato_distance": per_site,
-                "mtato_comparable_bp": comparable,
-                "mtato_focus": row.get("focus"),
+                "infinity_snps": snps,
+                "infinity_snps_derived": row.get("snps") is None and snps is not None,
+                "infinity_distance": per_site,
+                "infinity_comparable_bp": comparable,
+                "infinity_focus": row.get("focus"),
                 "ska2_snps": ska.distance if ska else None,
                 "ska2_match_count": ska.match_count if ska else None,
                 "in_both": ska is not None,
@@ -362,10 +362,10 @@ def join_distances(
     only_ska = [
         {"genome_a": k[0], "genome_b": k[1], "ska2_snps": v.distance}
         for k, v in ska_index.items()
-        if k not in mtato_index
+        if k not in infinity_index
     ]
     for entry in joined:
-        a, b = entry["mtato_snps"], entry["ska2_snps"]
+        a, b = entry["infinity_snps"], entry["ska2_snps"]
         entry["abs_diff"] = (
             abs(float(a) - float(b)) if a is not None and b is not None else None
         )
@@ -375,10 +375,10 @@ def join_distances(
         "pairs": sorted(joined, key=lambda e: (e["genome_a"], e["genome_b"])),
         "pairs_only_in_ska2": sorted(only_ska, key=lambda e: (e["genome_a"], e["genome_b"])),
         "summary": {
-            "mtato_pairs": len(mtato_index),
+            "infinity_pairs": len(infinity_index),
             "ska2_pairs": len(ska_index),
             "pairs_in_both": len(both),
-            "pairs_only_in_mtato": len([e for e in joined if not e["in_both"]]),
+            "pairs_only_in_infinity": len([e for e in joined if not e["in_both"]]),
             "pairs_only_in_ska2": len(only_ska),
             "exact_matches": sum(1 for d in diffs if d == 0),
             "within_1_snp": sum(1 for d in diffs if d <= 1),
@@ -388,17 +388,17 @@ def join_distances(
             "max_abs_diff_snps": max(diffs) if diffs else None,
             "p95_abs_diff_snps": common.quantile(diffs, 0.95),
             "pearson": common.pearson(
-                [e["mtato_snps"] for e in both], [e["ska2_snps"] for e in both]
+                [e["infinity_snps"] for e in both], [e["ska2_snps"] for e in both]
             ),
             "spearman": common.spearman(
-                [e["mtato_snps"] for e in both], [e["ska2_snps"] for e in both]
+                [e["infinity_snps"] for e in both], [e["ska2_snps"] for e in both]
             ),
         },
     }
 
 
 def compare_trees(run_tree: Path, reference_tree: Path, collapse: float) -> Dict[str, Any]:
-    """Robinson-Foulds distance between M-Tato's tree and a reference tree."""
+    """Robinson-Foulds distance between Infinity-Win's tree and a reference tree."""
     out: Dict[str, Any] = {
         "run_tree": str(run_tree),
         "reference_tree": str(reference_tree),
@@ -671,7 +671,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if not run_dir.is_dir():
         raise common.PrereqError(
             f"--run-dir is not a directory: {run_dir}\n"
-            "       point it at an mtato output folder (the one holding "
+            "       point it at an infinity output folder (the one holding "
             "cluster_<id>.dist.tsv), e.g. bench-work/matrix/<dataset>/<config>"
         )
     out_dir = _out_dir(args, args.dataset)
@@ -688,45 +688,45 @@ def cmd_compare(args: argparse.Namespace) -> int:
     ska = common.parse_ska2_distance_tsv(ska_source)
     ska_index = ska.as_dict()
 
-    mtato_rows, problems = common.load_cluster_distances(run_dir)
+    infinity_rows, problems = common.load_cluster_distances(run_dir)
     for problem in problems:
         print(f"NOTE: {problem}")
-    if not mtato_rows:
+    if not infinity_rows:
         raise common.PrereqError(
             f"no pairwise distances could be read from {run_dir}\n"
             "       expected cluster_<id>.dist.tsv files with two genome columns and "
             f"a SNP or distance column; problems were: {problems}"
         )
 
-    joined = join_distances(mtato_rows, ska_index)
+    joined = join_distances(infinity_rows, ska_index)
     summary = dict(joined["summary"])
-    tsv_path = out_dir / f"ska2_vs_mtato__{run_dir.name}.tsv"
+    tsv_path = out_dir / f"ska2_vs_infinity__{run_dir.name}.tsv"
     common.write_tsv(
         tsv_path,
         [
-            "genome_a", "genome_b", "cluster", "mtato_snps", "ska2_snps", "abs_diff",
-            "mtato_distance", "mtato_comparable_bp", "mtato_focus", "in_both",
-            "mtato_snps_derived_from_per_site",
+            "genome_a", "genome_b", "cluster", "infinity_snps", "ska2_snps", "abs_diff",
+            "infinity_distance", "infinity_comparable_bp", "infinity_focus", "in_both",
+            "infinity_snps_derived_from_per_site",
         ],
         [
-            [e["genome_a"], e["genome_b"], e["cluster"], e["mtato_snps"], e["ska2_snps"],
-             e["abs_diff"], e["mtato_distance"], e["mtato_comparable_bp"], e["mtato_focus"],
-             e["in_both"], e["mtato_snps_derived"]]
+            [e["genome_a"], e["genome_b"], e["cluster"], e["infinity_snps"], e["ska2_snps"],
+             e["abs_diff"], e["infinity_distance"], e["infinity_comparable_bp"], e["infinity_focus"],
+             e["in_both"], e["infinity_snps_derived"]]
             for e in joined["pairs"]
         ],
     )
     if joined["pairs_only_in_ska2"]:
         common.write_tsv(
-            out_dir / f"ska2_pairs_missing_from_mtato__{run_dir.name}.tsv",
+            out_dir / f"ska2_pairs_missing_from_infinity__{run_dir.name}.tsv",
             ["genome_a", "genome_b", "ska2_snps"],
             [[e["genome_a"], e["genome_b"], e["ska2_snps"]] for e in joined["pairs_only_in_ska2"]],
         )
 
-    print(f"M-Tato distances: {run_dir} ({len(mtato_rows)} pairs from "
-          f"{len({r['cluster'] for r in mtato_rows})} cluster file(s))")
+    print(f"Infinity-Win distances: {run_dir} ({len(infinity_rows)} pairs from "
+          f"{len({r['cluster'] for r in infinity_rows})} cluster file(s))")
     print(f"SKA2 distances:   {ska_source} ({len(ska_index)} pairs)")
     print(f"  pairs in both:        {summary['pairs_in_both']}")
-    print(f"  only in M-Tato:       {summary['pairs_only_in_mtato']}")
+    print(f"  only in Infinity-Win:       {summary['pairs_only_in_infinity']}")
     print(f"  only in SKA2:         {summary['pairs_only_in_ska2']}")
     if summary["pairs_in_both"]:
         print(f"  exact matches:        {summary['exact_matches']}")
@@ -753,7 +753,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     }
     if not summary["pairs_in_both"]:
         doc["reason"] = (
-            "no pair of genome names is present in both tables; M-Tato uses the "
+            "no pair of genome names is present in both tables; Infinity-Win uses the "
             "assembly file name as the genome name, SKA2 uses the sample name it "
             "was given - they must agree for this join to mean anything"
         )
@@ -852,19 +852,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_mash)
 
     s = sub.add_parser(
-        "compare", parents=[common_args, dataset_arg], help="join SKA2 with an M-Tato run"
+        "compare", parents=[common_args, dataset_arg], help="join SKA2 with an Infinity-Win run"
     )
-    s.add_argument("--run-dir", required=True, type=Path, help="mtato output folder")
+    s.add_argument("--run-dir", required=True, type=Path, help="infinity output folder")
     s.add_argument("--ska-dist", type=Path, default=None, help="pre-computed 'ska distance' TSV")
     s.add_argument("--truth-tree", type=Path, default=None, help="reference tree (default: dataset truth)")
-    s.add_argument("--run-tree", type=Path, default=None, help="M-Tato tree (default: <run-dir>/tree.nwk)")
+    s.add_argument("--run-tree", type=Path, default=None, help="Infinity-Win tree (default: <run-dir>/tree.nwk)")
     s.add_argument("--collapse-snps", type=float, default=0.5, help="RF collapse threshold in SNPs")
     s.set_defaults(func=cmd_compare)
 
     s = sub.add_parser("all", parents=[common_args, dataset_arg], help="ska2 + mash + compare")
     s.add_argument("--ska-dist", type=Path, default=None)
     s.add_argument("--mash-dist", type=Path, default=None)
-    s.add_argument("--run-dir", type=Path, default=None, help="mtato output folder for the comparison")
+    s.add_argument("--run-dir", type=Path, default=None, help="infinity output folder for the comparison")
     s.add_argument("--truth-tree", type=Path, default=None)
     s.add_argument("--run-tree", type=Path, default=None)
     s.add_argument("--collapse-snps", type=float, default=0.5)

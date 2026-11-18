@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end tests for the benchmark scripts, driven by a fake ``mtato``.
+"""End-to-end tests for the benchmark scripts, driven by a fake ``infinity``.
 
 The real binary does not exist yet, so ``scripts/tests/fixtures.py`` writes an
 executable double that speaks the documented CLI contract (PROJECT.md section 9)
@@ -51,22 +51,22 @@ CONFIG_NAMES = [c.name for c in common.CONFIGS]
 
 
 class ScriptCase(unittest.TestCase):
-    """Base class: a temp root, a fake mtato and a fixture bench-work tree."""
+    """Base class: a temp root, a fake infinity and a fixture bench-work tree."""
 
     genomes = 8
     dataset_names = ("fix_small",)
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="mtato-itest-")
+        self._tmp = tempfile.TemporaryDirectory(prefix="infinity-itest-")
         self.root = Path(self._tmp.name)
         self.work = self.root / "work"
         self.matrix = self.work / "matrix"
-        self.mtato = fixtures.write_fake_mtato(self.root / "mtato")
+        self.infinity = fixtures.write_fake_infinity(self.root / "infinity")
         fixtures.make_work_dir(
             self.work, dataset_names=self.dataset_names, genomes_per_dataset=self.genomes
         )
         self._env_backup = dict(os.environ)
-        os.environ["FAKE_MTATO_SLEEP"] = "0.01"
+        os.environ["FAKE_INFINITY_SLEEP"] = "0.01"
 
     def tearDown(self) -> None:
         os.environ.clear()
@@ -96,7 +96,7 @@ class ScriptCase(unittest.TestCase):
         return [
             "--work-dir", str(self.work),
             "--matrix-dir", str(self.matrix),
-            "--mtato", str(self.mtato),
+            "--infinity", str(self.infinity),
             *extra,
         ]
 
@@ -135,7 +135,7 @@ class TestRunMatrix(ScriptCase):
             self.assertEqual(c["run_command"][1], "run")
 
     def test_a_failing_configuration_is_reported_not_omitted(self) -> None:
-        os.environ["FAKE_MTATO_FAIL"] = "1"
+        os.environ["FAKE_INFINITY_FAIL"] = "1"
         code = run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
         self.assertEqual(code, 1, "a failed matrix must exit non-zero")
         summary = self.summary()
@@ -147,7 +147,7 @@ class TestRunMatrix(ScriptCase):
         self.assertEqual(summary["totals"]["failed"], 6)
 
     def test_exit_zero_without_run_json_counts_as_a_failure(self) -> None:
-        os.environ["FAKE_MTATO_NO_RUN_JSON"] = "1"
+        os.environ["FAKE_INFINITY_NO_RUN_JSON"] = "1"
         code = run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
         self.assertEqual(code, 1)
         c = self.cell("baseline")
@@ -160,7 +160,7 @@ class TestRunMatrix(ScriptCase):
         So the cell keeps its run status, the bench failure is recorded on the
         cell *and* in the summary failure list, and the exit code is non-zero.
         """
-        os.environ["FAKE_MTATO_BENCH_FAIL"] = "1"
+        os.environ["FAKE_INFINITY_BENCH_FAIL"] = "1"
         code = run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "flat"))
         self.assertEqual(code, 1)
         c = self.cell("flat")
@@ -173,7 +173,7 @@ class TestRunMatrix(ScriptCase):
         self.assertIn("fix_small/flat: bench failed", self.summary()["failures"])
 
     def test_a_switch_the_cli_ignored_is_flagged(self) -> None:
-        os.environ["FAKE_MTATO_IGNORE_SWITCH"] = "1"
+        os.environ["FAKE_INFINITY_IGNORE_SWITCH"] = "1"
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "flat"))
         c = self.cell("flat")
         self.assertIs(c["run"]["switch_verified"], False)
@@ -185,7 +185,7 @@ class TestRunMatrix(ScriptCase):
         Keeping the two apart matters: a proxy must never be written into the raw
         record as though the tool had reported it (PROJECT.md section 0 rule 8).
         """
-        os.environ["FAKE_MTATO_NO_TIMINGS"] = "1"
+        os.environ["FAKE_INFINITY_NO_TIMINGS"] = "1"
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
         c = self.cell("baseline")
         self.assertEqual(c["status"], "ok")
@@ -201,7 +201,7 @@ class TestRunMatrix(ScriptCase):
         self.assertTrue(any("wall time" in p for p in m["problems"]))
 
     def test_missing_peak_memory_is_recorded_as_a_floor_not_as_zero(self) -> None:
-        os.environ["FAKE_MTATO_NO_PEAKMEM"] = "1"
+        os.environ["FAKE_INFINITY_NO_PEAKMEM"] = "1"
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
         c = self.cell("baseline")
         self.assertIsNone(c["run"]["peak_memory_bytes"])
@@ -212,7 +212,7 @@ class TestRunMatrix(ScriptCase):
     def test_a_second_run_is_resumable_and_does_not_re_execute(self) -> None:
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
         first = self.cell("baseline")
-        marker = self.run_dir("baseline") / "mtato.run.log"
+        marker = self.run_dir("baseline") / "infinity.run.log"
         self.assertTrue(marker.exists())
         before = marker.stat().st_mtime_ns
         code = run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
@@ -239,7 +239,7 @@ class TestRunMatrix(ScriptCase):
     def test_a_missing_binary_is_an_actionable_error(self) -> None:
         with self.assertRaises(common.PrereqError) as ctx:
             run_matrix.main(
-                ["--work-dir", str(self.work), "--mtato", str(self.root / "no-such-mtato")]
+                ["--work-dir", str(self.work), "--infinity", str(self.root / "no-such-infinity")]
             )
         self.assertIn("cargo build --release", str(ctx.exception))
 
@@ -257,10 +257,10 @@ class TestRunMatrix(ScriptCase):
         self.assertIsNone(cell["bench"].get("rf"))
 
     def test_a_real_dataset_reference_folder_is_not_passed_to_bench(self) -> None:
-        """`mtato bench --truth` needs a simulator truth folder.
+        """`infinity bench --truth` needs a simulator truth folder.
 
         A real dataset carries an IQ-TREE tree and a SKA2 table instead. Handing
-        that to bench would produce a failure that looks like an M-Tato bug, so
+        that to bench would produce a failure that looks like an Infinity-Win bug, so
         the matrix must skip bench and point at the comparison that does work.
         """
         truth_dir = self.work / "fix_small" / "truth"
@@ -279,7 +279,7 @@ class TestRunMatrix(ScriptCase):
         self.assertEqual(cell["status"], "ok", "the run itself must still succeed")
         self.assertEqual(cell["bench"]["status"], "skipped")
         reason = cell["bench"]["reason"]
-        self.assertIn("not a `mtato simulate` truth folder", reason)
+        self.assertIn("not a `infinity simulate` truth folder", reason)
         self.assertIn("baselines.py compare", reason)
         self.assertIn("accuracy_over_time.py", reason)
         self.assertIsNone(cell["bench"].get("rf"))
@@ -296,7 +296,7 @@ class TestRunMatrix(ScriptCase):
     def test_the_summary_is_written_even_when_later_cells_fail(self) -> None:
         # First configuration succeeds, then the fake starts failing.
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
-        os.environ["FAKE_MTATO_FAIL"] = "1"
+        os.environ["FAKE_INFINITY_FAIL"] = "1"
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "flat"))
         summary = self.summary()
         statuses = {c["config"]: c["status"] for c in summary["cells"]}
@@ -595,7 +595,7 @@ class TestBaselines(ScriptCase):
                 )
         self.assertIn("--mash-dist", str(ctx.exception))
 
-    def test_compare_joins_ska2_against_the_mtato_cluster_distances(self) -> None:
+    def test_compare_joins_ska2_against_the_infinity_cluster_distances(self) -> None:
         code = baselines.main(
             [
                 "compare", "--dataset", "fix_small",
@@ -608,11 +608,11 @@ class TestBaselines(ScriptCase):
         doc = json.loads((out / "compare__baseline.json").read_text(encoding="utf-8"))
         summary = doc["summary"]
         self.assertEqual(summary["pairs_in_both"], 12, "8 genomes in 2 clusters = 2 x 6 pairs")
-        self.assertEqual(summary["pairs_only_in_mtato"], 0)
+        self.assertEqual(summary["pairs_only_in_infinity"], 0)
         self.assertEqual(summary["exact_matches"], 12, "the fixture truth and run agree exactly")
         self.assertEqual(summary["mean_abs_diff_snps"], 0.0)
         self.assertAlmostEqual(summary["pearson"], 1.0)
-        tsv = out / "ska2_vs_mtato__baseline.tsv"
+        tsv = out / "ska2_vs_infinity__baseline.tsv"
         self.assertTrue(tsv.exists())
         self.assertEqual(len(common.read_table(tsv).rows), 12)
         tree_cmp = doc["tree_vs_reference"]
@@ -704,7 +704,7 @@ class TestMakeReport(ScriptCase):
     def test_the_report_covers_every_configuration_and_dataset(self) -> None:
         run_matrix.main(self.matrix_argv())
         text = self.report()
-        self.assertIn("# M-Tato benchmark report", text)
+        self.assertIn("# Infinity-Win benchmark report", text)
         for config in CONFIG_NAMES:
             self.assertIn(config, text)
         for dataset in self.dataset_names:
@@ -715,9 +715,9 @@ class TestMakeReport(ScriptCase):
         self.assertIn("peak memory", text)
 
     def test_failed_cells_appear_in_the_report(self) -> None:
-        os.environ["FAKE_MTATO_FAIL"] = "1"
+        os.environ["FAKE_INFINITY_FAIL"] = "1"
         run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
-        del os.environ["FAKE_MTATO_FAIL"]
+        del os.environ["FAKE_INFINITY_FAIL"]
         run_matrix.main(self.matrix_argv("--datasets", "fix_pairs"))
         text = self.report()
         self.assertIn("FAILED", text)
@@ -727,7 +727,7 @@ class TestMakeReport(ScriptCase):
         self.assertIn("fix_small", text)
 
     def test_the_report_is_written_even_when_everything_failed(self) -> None:
-        os.environ["FAKE_MTATO_FAIL"] = "1"
+        os.environ["FAKE_INFINITY_FAIL"] = "1"
         run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
         text = self.report()
         self.assertIn("failed", text)
@@ -902,7 +902,7 @@ class TestAcceptanceCheck(ScriptCase):
         (self.work / "salmonella_trio" / "dataset.json").write_text(json.dumps(doc, indent=2))
         self.dist_json = self.root / "trio_distances.json"
         self.dist_json.write_text(json.dumps([list(d) for d in distances]), encoding="utf-8")
-        os.environ["FAKE_MTATO_DIST_JSON"] = str(self.dist_json)
+        os.environ["FAKE_INFINITY_DIST_JSON"] = str(self.dist_json)
         # A fixture expected-values file with no filtered secondary basis, so the
         # PASS/FAIL assertions below test one thing at a time. The shipped file
         # (which does declare one) is exercised by its own test.
@@ -970,7 +970,7 @@ class TestAcceptanceCheck(ScriptCase):
     def test_the_shipped_expected_file_adds_a_filtered_second_basis(self) -> None:
         """The real file declares a filtered basis, so both are shown and labelled.
 
-        M-Tato does not filter (section 2, section 15) while every published
+        Infinity-Win does not filter (section 2, section 15) while every published
         reference number is filtered, so the report must not compare them as
         though they were the same measurement.
         """

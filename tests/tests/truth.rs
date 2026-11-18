@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mtato_core::engine::RunResults;
-use mtato_core::params::Parameters;
-use mtato_core::tree::parse_newick;
-use mtato_sim::{RefSpec, SimConfig};
-use mtato_tests::{reported_pairs, run_engine, truth_pairs, TempDir};
+use infinity_core::engine::RunResults;
+use infinity_core::params::Parameters;
+use infinity_core::tree::parse_newick;
+use infinity_sim::{RefSpec, SimConfig};
+use infinity_tests::{reported_pairs, run_engine, truth_pairs, TempDir};
 
 /// Engine output plus the two pairwise distance maps a truth test compares:
 /// the simulated truth and what the run reported, both keyed by sorted pair.
@@ -28,7 +28,7 @@ type SimulatedRun = (
 fn simulate_and_run(label: &str, cfg: SimConfig, threads: usize) -> SimulatedRun {
     let dir = TempDir::new(label);
     let sim_dir = dir.join("sim");
-    let out = mtato_sim::simulate(&cfg, &sim_dir).expect("simulation failed");
+    let out = infinity_sim::simulate(&cfg, &sim_dir).expect("simulation failed");
     let params = Parameters {
         threads,
         ..Default::default()
@@ -123,7 +123,7 @@ fn t1_differing_positions_equal_truth() {
         // Every reported SNP must be a real substitution on the pivot, with a
         // single base on each side and no N.
         for v in &cmp.variants {
-            if v.kind == mtato_core::variant::VariantKind::Snp {
+            if v.kind == infinity_core::variant::VariantKind::Snp {
                 assert_eq!(v.ref_allele.len(), 1, "{v:?}");
                 assert_eq!(v.alt_allele.len(), 1, "{v:?}");
                 assert_ne!(
@@ -285,7 +285,7 @@ fn t3b_moderate_fragmentation_recovers_almost_everything() {
 fn t4_segment_events_appear_as_insertions_deletions_or_novel_bp() {
     let cfg = SimConfig {
         mean_indels_per_branch: 0.5,
-        segment_events: mtato_sim::SegmentEvents {
+        segment_events: infinity_sim::SegmentEvents {
             mean_gains_per_branch: 0.3,
             mean_losses_per_branch: 0.3,
             min_len: 500,
@@ -302,11 +302,11 @@ fn t4_segment_events_appear_as_insertions_deletions_or_novel_bp() {
     for cmp in results.comparisons.values() {
         for v in &cmp.variants {
             match v.kind {
-                mtato_core::variant::VariantKind::Insertion => {
+                infinity_core::variant::VariantKind::Insertion => {
                     insertions += 1;
                     inserted_bp += v.alt_allele.len() as u64;
                 }
-                mtato_core::variant::VariantKind::Deletion => {
+                infinity_core::variant::VariantKind::Deletion => {
                     deletions += 1;
                     deleted_bp += v.ref_allele.len() as u64;
                 }
@@ -338,7 +338,7 @@ fn t4_segment_events_appear_as_insertions_deletions_or_novel_bp() {
 fn t4_pairwise_accuracy_is_within_one_snp() {
     let cfg = SimConfig {
         mean_indels_per_branch: 0.5,
-        segment_events: mtato_sim::SegmentEvents {
+        segment_events: infinity_sim::SegmentEvents {
             mean_gains_per_branch: 0.3,
             mean_losses_per_branch: 0.3,
             min_len: 500,
@@ -381,7 +381,7 @@ fn t5_five_clusters_are_recovered_exactly() {
     };
     let dir = TempDir::new("t5");
     let sim_dir = dir.join("sim");
-    let out = mtato_sim::simulate(&cfg, &sim_dir).expect("simulation failed");
+    let out = infinity_sim::simulate(&cfg, &sim_dir).expect("simulation failed");
     let params = Parameters {
         threads: 8,
         ..Default::default()
@@ -455,7 +455,7 @@ fn every_emitted_tree_parses_and_has_the_right_leaves() {
         ..base_cfg(77, 3, 12)
     };
     let (results, _truth, _reported) = simulate_and_run("trees", cfg, 8);
-    let full = mtato_core::tree::to_newick(&results.full_tree);
+    let full = infinity_core::tree::to_newick(&results.full_tree);
     let parsed = parse_newick(&full).expect("the full tree must be parseable Newick");
     assert_eq!(
         parsed.leaf_count(),
@@ -471,7 +471,7 @@ fn every_emitted_tree_parses_and_has_the_right_leaves() {
         "leaf names must match the genomes exactly"
     );
     // No branch length may be negative or NaN in a tree we hand to a user.
-    fn check(t: &mtato_core::tree::Tree) {
+    fn check(t: &infinity_core::tree::Tree) {
         assert!(
             t.len().is_finite() && t.len() >= 0.0,
             "bad branch length {}",

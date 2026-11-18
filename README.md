@@ -1,9 +1,9 @@
-# M-Tato
+# Infinity-Win
 
 **Progressive, cluster-first, position-aware comparison of nearly identical
 genomes, with a live tree that sharpens while the computation runs.**
 
-M-Tato takes a set of assembled genomes and answers, in that order and as fast as
+Infinity-Win takes a set of assembled genomes and answers, in that order and as fast as
 it can: *which genomes are near each other* → *where do they differ* → *what
 exactly differs, base by base*. Every number it shows carries a **focus level**,
 so you always know whether you are looking at a sketch estimate or an exact count.
@@ -19,6 +19,24 @@ thousand genomes, that are **already close** — outbreak investigation,
 transmission clustering, within-host evolution. It is not a phylogenetics package
 and it is not a read mapper.
 
+Infinity-Win was developed under the working name **M-Tato**; older commits and
+`DECISIONS.md` entries use that name.
+
+## Screenshots
+
+**During a run.** 180 simulated genomes in 6 clusters. Two clusters are already
+exact (solid triangles, "sharp"); the other four still show their sketch-only
+estimate (dotted branches, "blurry ≈").
+
+![Infinity-Win during a run](docs/screenshots/live-run.png)
+
+**Finished.** Two clusters opened into their exact trees, two genomes selected
+(17 SNPs and 7 indels apart, shown above the tree), and the map of one cluster:
+each row is a genome against the cluster's pivot, red ticks are SNPs and blue
+ticks are insertions and deletions.
+
+![Infinity-Win after a run](docs/screenshots/finished-run.png)
+
 ---
 
 ## Install
@@ -32,7 +50,7 @@ distance are all implemented in the project.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-git clone <this repository> && cd M-Tato
+git clone <this repository> && cd Infinity-Win
 cargo build --release
 ```
 
@@ -40,8 +58,8 @@ Two binaries land in `target/release/`:
 
 | Binary | What it is |
 |---|---|
-| `mtato` | the command-line tool: `run`, `simulate`, `bench` |
-| `mtato-gui` | the desktop program |
+| `infinity` | the command-line tool: `run`, `simulate`, `bench` |
+| `Infinity-Win` | the desktop program |
 
 On Windows the same commands work in PowerShell or `cmd`. Prebuilt binaries for
 Windows x86-64 and Linux x86-64 are produced by `.github/workflows/release.yml`
@@ -56,7 +74,7 @@ Point it at a folder of assemblies. One file is one genome; `.fa`, `.fasta` and
 `.fna`, plain or gzipped, are accepted.
 
 ```sh
-mtato run ./assemblies -o ./results
+infinity run ./assemblies -o ./results
 ```
 
 ```
@@ -80,7 +98,7 @@ cat results/tree.nwk                        # the full tree
 Or open the folder in the GUI, which reads a finished run without recomputing it:
 
 ```sh
-mtato-gui
+Infinity-Win
 ```
 
 ### A worked example with known truth
@@ -89,9 +107,9 @@ The simulator produces genomes together with the answer, which is the fastest wa
 to see whether the tool is behaving:
 
 ```sh
-mtato simulate -o /tmp/sim --seed 42 --length 2000000 -m 1 -n 50 --mean-snps 3
-mtato run /tmp/sim/genomes -o /tmp/out
-mtato bench --output /tmp/out --truth /tmp/sim/truth
+infinity simulate -o /tmp/sim --seed 42 --length 2000000 -m 1 -n 50 --mean-snps 3
+infinity run /tmp/sim/genomes -o /tmp/out
+infinity bench --output /tmp/out --truth /tmp/sim/truth
 ```
 
 ```
@@ -107,10 +125,10 @@ mtato bench --output /tmp/out --truth /tmp/sim/truth
 
 ---
 
-## `mtato run`
+## `infinity run`
 
 ```
-mtato run <files or folders...> -o <outdir> [options]
+infinity run <files or folders...> -o <outdir> [options]
 ```
 
 ### Parameters (defaults from section 6.1 of the design outline)
@@ -187,13 +205,13 @@ because "instant" and "never" are different claims.
 
 ---
 
-## `mtato simulate`
+## `infinity simulate`
 
 Deterministic for a given seed: the same seed and configuration produce
 byte-identical FASTA files and truth files.
 
 ```sh
-mtato simulate -o <outdir> [--seed 1] [--reference REF.fasta | --length 2000000 --gc 0.5]
+infinity simulate -o <outdir> [--seed 1] [--reference REF.fasta | --length 2000000 --gc 0.5]
                [-m CLUSTERS] [-n LEAVES] [--divergence 0.02]
                [--mean-snps 3] [--mean-indels 0] [--mean-segments 0] [-c CONTIGS]
 ```
@@ -215,13 +233,13 @@ truth tree. That is what makes the truth tests meaningful.
 
 ---
 
-## `mtato bench`
+## `infinity bench`
 
 Compares an output folder with a truth folder and writes the measurements as
 JSON. This is what the experiment in section 11 is built on.
 
 ```sh
-mtato bench --output <outdir> --truth <truthdir> [--json bench.json] [--collapse-below 0.5] [--quiet]
+infinity bench --output <outdir> --truth <truthdir> [--json bench.json] [--collapse-below 0.5] [--quiet]
 ```
 
 It reports: distance accuracy (pairs exact, maximum absolute error, reported/true

@@ -1,0 +1,20 @@
+[package]
+name = "infinity-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Infinity-Win engine: scan, sketch, cluster, compare, tree, events"
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+flate2 = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[lib]
+name = "infinity_core"
+path = "src/lib.rs"

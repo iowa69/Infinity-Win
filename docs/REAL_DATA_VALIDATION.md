@@ -6,12 +6,12 @@ This is the acceptance check the project owner asked for: three similar
 **Data.** `<salmonella-data>/asm/`
 — `isolate-A.fasta`, `isolate-B.fasta`, `isolate-C.fasta`. Each about 5.13 Mb,
 57–66 contigs, 51.8% GC. Assemblies and the reference distances below come from
-the existing analysis in that folder (`analysis/results.json`), not from M-Tato.
+the existing analysis in that folder (`analysis/results.json`), not from Infinity-Win.
 
 **Command.**
 
 ```sh
-mtato run $ASM/isolate-A.fasta $ASM/isolate-B.fasta $ASM/isolate-C.fasta \
+infinity run $ASM/isolate-A.fasta $ASM/isolate-B.fasta $ASM/isolate-C.fasta \
           -o out --threads 8
 ```
 
@@ -23,13 +23,13 @@ tree 0.57 s, peak RSS 38 MB. Pivot chosen automatically: `isolate-B`
 
 ## Result
 
-| Pair | SKA2 (reads) | SKA2 (assemblies) | 1-to-1 alignment, raw | 1-to-1, filtered | **M-Tato, all variants** | **M-Tato, contigs ≥ 5 kb** |
+| Pair | SKA2 (reads) | SKA2 (assemblies) | 1-to-1 alignment, raw | 1-to-1, filtered | **Infinity-Win, all variants** | **Infinity-Win, contigs ≥ 5 kb** |
 |---|---|---|---|---|---|---|
 | isolate-A – isolate-B | 2 | 2 | 32 | 2 | 15 | **2** |
 | isolate-A – isolate-C | 2 | 2 | 16 | 2 | 6 | **2** |
 | isolate-B – isolate-C | 0 | 2 | 17 | 0 | 0 | **0** |
 
-**Filtering M-Tato's variants to pivot contigs of at least 5 kb reproduces the
+**Filtering Infinity-Win's variants to pivot contigs of at least 5 kb reproduces the
 published chromosomal SNP counts exactly.** The two SNPs it reports are:
 
 ```
@@ -54,7 +54,7 @@ pipeline in the comparison excludes this kind of region: SKA2 by restricting to
 the shared k-mer core, the alignment pipeline by its explicit filtering step
 (32 raw → 2 filtered).
 
-M-Tato does not filter, by design: section 2 lists no filtering among its goals,
+Infinity-Win does not filter, by design: section 2 lists no filtering among its goals,
 and section 15 states that repeats are flagged rather than corrected. What it
 does instead is give you everything needed to filter it yourself — the contig,
 the contig length and coverage are in the contig name, and the `repeat`,
@@ -70,9 +70,9 @@ genomes. It also shows something the reference numbers hide: the two isolates
 differ by 13 additional variants on a high-copy element, which a core-genome
 filter discards silently.
 
-**Does not show.** M-Tato is not a drop-in replacement for a filtered
+**Does not show.** Infinity-Win is not a drop-in replacement for a filtered
 core-genome SNP pipeline. Its raw counts are whole-assembly counts and are
-larger than a filtered core-genome number. Anyone comparing M-Tato output to
+larger than a filtered core-genome number. Anyone comparing Infinity-Win output to
 SKA2 or to a mapping pipeline must filter both, or filter neither.
 
 ---
@@ -94,15 +94,15 @@ cache hit 508 of 754 times.
 | mean absolute difference | 11.6 SNPs |
 | median absolute difference | 6 SNPs |
 | SKA2 range | 0–46 |
-| M-Tato range | 0–145 |
-| sum ratio (M-Tato / SKA2) | 1.618 |
+| Infinity-Win range | 0–145 |
+| sum ratio (Infinity-Win / SKA2) | 1.618 |
 | Pearson r | 0.44 |
 
 This disagreement is **not** a like-for-like comparison and should not be read as
 an accuracy figure. Three confounders, in order of importance:
 
 1. **Reads versus assemblies.** The SKA2 baseline is `cluster_reads_distance.tsv`
-   — computed from reads. M-Tato compares assemblies. The trio above shows the
+   — computed from reads. Infinity-Win compares assemblies. The trio above shows the
    same effect in miniature: SKA2 on reads gives 2/2/0 while SKA2 on the
    assemblies gives 2/2/2.
 2. **Mixed assemblers.** The three outbreak isolates were assembled locally; the
@@ -110,7 +110,7 @@ an accuracy figure. Three confounders, in order of importance:
    content and the error profile, and a whole-assembly comparison sees both.
    QUAST in the source analysis reports about 41 mismatches per 100 kbp and
    95.5% genome fraction for these assemblies, i.e. they are not error-free.
-3. **No filtering on either side of the comparison.** M-Tato reports 776 SNPs,
+3. **No filtering on either side of the comparison.** Infinity-Win reports 776 SNPs,
    48 deletions, 26 insertions and 11 complex variants over 31 genomes, with 849
    of 861 variants carrying no flag at all — so this is not predominantly a
    repeat artefact. It is a whole-assembly count against a core-genome count.

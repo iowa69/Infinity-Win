@@ -6,8 +6,8 @@ For every dataset and every one of the six configurations -- the baseline
 ``--flat``, ``--no-piece-cache``, ``--no-profile-grouping``,
 ``--single-cluster``) -- this script
 
-1. invokes ``mtato run`` into its own output folder,
-2. invokes ``mtato bench`` against the dataset's truth,
+1. invokes ``infinity run`` into its own output folder,
+2. invokes ``infinity bench`` against the dataset's truth,
 3. records wall time, peak memory, counters, timings and the bench result,
 4. appends the cell to ``<matrix-dir>/summary.json``.
 
@@ -51,7 +51,7 @@ import common  # noqa: E402
 SUMMARY_VERSION = 1
 SUMMARY_NAME = "summary.json"
 
-#: How long one ``mtato run`` may take before it is killed. Section 10.4 targets
+#: How long one ``infinity run`` may take before it is killed. Section 10.4 targets
 #: 5 minutes to exact on 1000 genomes, so the default is generous.
 DEFAULT_TIMEOUT_S = 6 * 3600.0
 
@@ -61,8 +61,8 @@ DEFAULT_TIMEOUT_S = 6 * 3600.0
 # ---------------------------------------------------------------------------
 
 
-def mtato_version(binary: Path) -> Tuple[Optional[str], Optional[str]]:
-    """``mtato --version`` output, or ``(None, reason)``."""
+def infinity_version(binary: Path) -> Tuple[Optional[str], Optional[str]]:
+    """``infinity --version`` output, or ``(None, reason)``."""
     try:
         res = common.run_child([binary, "--version"], capture=True, timeout=60, poll_memory=False)
     except OSError as exc:
@@ -81,7 +81,7 @@ def run_command(
     config: common.Config,
     args: argparse.Namespace,
 ) -> List[str]:
-    """The exact ``mtato run`` command line for one cell."""
+    """The exact ``infinity run`` command line for one cell."""
     cmd: List[str] = [str(binary), "run", *[str(p) for p in inputs], "-o", str(outdir)]
     if args.threads:
         cmd += ["--threads", str(args.threads)]
@@ -97,12 +97,12 @@ def run_command(
 
 
 def truth_arguments(dataset: Dict[str, Any]) -> Tuple[List[str], Optional[str]]:
-    """``mtato bench`` truth arguments for a dataset, or ``([], reason)``.
+    """``infinity bench`` truth arguments for a dataset, or ``([], reason)``.
 
-    ``mtato bench --truth`` requires a **simulator truth folder** (``tree_*.nwk``,
+    ``infinity bench --truth`` requires a **simulator truth folder** (``tree_*.nwk``,
     ``pairwise_snps.tsv``, ``clusters.tsv``). A real dataset's reference data -- a
     SKA2 distance table and an IQ-TREE tree -- is not that layout, and handing it
-    over would produce a bench failure that looks like an M-Tato bug. So for real
+    over would produce a bench failure that looks like an Infinity-Win bug. So for real
     datasets this returns no arguments and a reason naming what does the
     comparison instead: ``baselines.py compare`` (SKA2 join + RF against the
     reference tree) and ``accuracy_over_time.py --rf-mode internal``.
@@ -115,8 +115,8 @@ def truth_arguments(dataset: Dict[str, Any]) -> Tuple[List[str], Optional[str]]:
         if common.is_simulator_truth_dir(Path(tdir)):
             return ["--truth", str(tdir)], None
         return [], (
-            f"truth folder {tdir} is not a `mtato simulate` truth folder (it has no "
-            "tree_*.nwk / pairwise_snps.tsv), which `mtato bench --truth` requires; "
+            f"truth folder {tdir} is not a `infinity simulate` truth folder (it has no "
+            "tree_*.nwk / pairwise_snps.tsv), which `infinity bench --truth` requires; "
             "for this real dataset use `scripts/baselines.py compare` (SKA2 join and "
             "RF against the reference tree) and "
             "`scripts/accuracy_over_time.py --rf-mode internal`"
@@ -125,7 +125,7 @@ def truth_arguments(dataset: Dict[str, Any]) -> Tuple[List[str], Optional[str]]:
     if have_reference:
         return [], (
             "this dataset has reference data (a tree and/or a distance table) but no "
-            "`mtato simulate` truth folder, so `mtato bench` cannot score it; "
+            "`infinity simulate` truth folder, so `infinity bench` cannot score it; "
             "use `scripts/baselines.py compare` and "
             "`scripts/accuracy_over_time.py --rf-mode internal` instead"
         )
@@ -140,11 +140,11 @@ def bench_command(
     truth_args: Sequence[str],
     args: argparse.Namespace,
 ) -> List[str]:
-    """The exact ``mtato bench`` command line for one cell.
+    """The exact ``infinity bench`` command line for one cell.
 
     Matches the implemented interface::
 
-        mtato bench --output <dir> --truth <truth dir> [-j <json>]
+        infinity bench --output <dir> --truth <truth dir> [-j <json>]
                     [--collapse-below <float>] [--quiet]
     """
     cmd: List[str] = [str(binary), "bench", "--output", str(outdir)]
@@ -158,7 +158,7 @@ def bench_command(
 
 
 def dataset_inputs(dataset: Dict[str, Any]) -> List[Path]:
-    """What to hand ``mtato run`` for this dataset."""
+    """What to hand ``infinity run`` for this dataset."""
     explicit = dataset.get("inputs")
     if isinstance(explicit, list) and explicit:
         paths = [Path(p) for p in explicit]
@@ -379,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="where run outputs and summary.json go (default: <work-dir>/matrix)",
     )
-    p.add_argument("--mtato", default=None, help="path to the mtato binary")
+    p.add_argument("--infinity", default=None, help="path to the infinity binary")
     p.add_argument("--threads", type=int, default=None, help="passed through as --threads")
     p.add_argument("--k", type=int, default=None, help="passed through as --k")
     p.add_argument("--densities", default=None, help="passed through as --densities")
@@ -388,20 +388,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--extra-run-arg",
         action="append",
         default=[],
-        help="extra argument for every `mtato run` (repeatable)",
+        help="extra argument for every `infinity run` (repeatable)",
     )
     p.add_argument(
         "--extra-bench-arg",
         action="append",
         default=[],
-        help="extra argument for every `mtato bench` (repeatable)",
+        help="extra argument for every `infinity bench` (repeatable)",
     )
     p.add_argument(
         "--collapse-snps",
         type=float,
         default=0.5,
         help="branch length below which the truth tree is collapsed for RF "
-        "(section 11: 'half a SNP'); passed to `mtato bench` (default 0.5)",
+        "(section 11: 'half a SNP'); passed to `infinity bench` (default 0.5)",
     )
     p.add_argument(
         "--comparable-bp",
@@ -434,18 +434,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     version: Optional[str] = None
     version_problem: Optional[str] = None
     try:
-        binary = common.resolve_binary(args.mtato, required=not args.dry_run)
+        binary = common.resolve_binary(args.infinity, required=not args.dry_run)
     except common.PrereqError as exc:
         if not args.dry_run:
             raise
         print(f"NOTE: {exc}", file=sys.stderr)
     if binary is not None:
-        version, version_problem = mtato_version(binary)
+        version, version_problem = infinity_version(binary)
         if version_problem:
             print(f"NOTE: {version_problem}", file=sys.stderr)
-    binary_display = str(binary) if binary else "<mtato: NOT FOUND>"
+    binary_display = str(binary) if binary else "<infinity: NOT FOUND>"
 
-    print(f"mtato:      {binary_display}" + (f" ({version})" if version else ""))
+    print(f"infinity:      {binary_display}" + (f" ({version})" if version else ""))
     print(f"work dir:   {work}")
     print(f"matrix dir: {matrix_dir}")
     print(f"datasets:   {', '.join(d['name'] for d in datasets)}")
@@ -493,7 +493,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "schema_version": SUMMARY_VERSION,
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "dry_run": bool(args.dry_run),
-        "mtato": {
+        "infinity": {
             "path": str(binary) if binary else None,
             "version": version,
             "version_problem": version_problem,
@@ -544,7 +544,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for dataset in datasets:
         dname = str(dataset.get("name"))
-        sim_problem = materialise_simulated(dataset, binary or Path("mtato"), args, matrix_dir)
+        sim_problem = materialise_simulated(dataset, binary or Path("infinity"), args, matrix_dir)
         if sim_problem:
             failures.append(f"{dname}: {sim_problem}")
             print(f"[{dname}] simulation step FAILED: {sim_problem}", file=sys.stderr)
@@ -583,10 +583,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "problems": [],
             }
             cells.append(cell)
-            run_cmd = run_command(binary or Path("mtato"), inputs, outdir, config, args)
+            run_cmd = run_command(binary or Path("infinity"), inputs, outdir, config, args)
             cell["run_command"] = run_cmd
             bench_cmd = (
-                bench_command(binary or Path("mtato"), outdir, dataset, config, bargs, args)
+                bench_command(binary or Path("infinity"), outdir, dataset, config, bargs, args)
                 if bargs
                 else None
             )
@@ -611,7 +611,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             common.ensure_dir(outdir)
             child: Optional[common.ChildResult] = None
 
-            # ---- mtato run -------------------------------------------------
+            # ---- infinity run -------------------------------------------------
             if have_run_json and not args.force:
                 cell["status"] = "cached"
                 cell["reused"] = True
@@ -625,8 +625,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"  [{config.name}] running: {' '.join(run_cmd)}")
                 child = common.run_child(
                     run_cmd,
-                    stdout_path=outdir / "mtato.run.log",
-                    stderr_path=outdir / "mtato.run.err",
+                    stdout_path=outdir / "infinity.run.log",
+                    stderr_path=outdir / "infinity.run.err",
                     timeout=args.timeout,
                 )
                 cell["returncode"] = child.returncode
@@ -637,7 +637,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     cell["error"] = f"timed out after {args.timeout:.0f}s and was killed"
                 elif child.returncode != 0:
                     cell["status"] = "failed"
-                    cell["error"] = f"`mtato run` exited with code {child.returncode}"
+                    cell["error"] = f"`infinity run` exited with code {child.returncode}"
                     cell["stderr_tail"] = child.stderr_tail()
                 else:
                     cell["status"] = "ok"
@@ -658,7 +658,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not run_info.get("run_json_present"):
                 if cell["status"] == "ok":
                     cell["status"] = "failed"
-                    cell["error"] = "`mtato run` exited 0 but wrote no run.json"
+                    cell["error"] = "`infinity run` exited 0 but wrote no run.json"
                 failures.append(f"{dname}/{config.name}: no usable run.json")
             cell["memory"] = memory_summary(run_info, child)
             if cell["memory"]["source"] is None:
@@ -675,7 +675,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cell["memory"]["is_floor"] and cell["memory"]["bytes"] is not None
             )
 
-            # ---- mtato bench ----------------------------------------------
+            # ---- infinity bench ----------------------------------------------
             if bench_cmd is None:
                 cell["bench"] = {"status": "skipped", "reason": breason, "path": None}
             elif (outdir / "bench.json").exists() and not args.force_bench:
@@ -686,8 +686,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"      bench: {' '.join(bench_cmd)}")
                 bchild = common.run_child(
                     bench_cmd,
-                    stdout_path=outdir / "mtato.bench.log",
-                    stderr_path=outdir / "mtato.bench.err",
+                    stdout_path=outdir / "infinity.bench.log",
+                    stderr_path=outdir / "infinity.bench.err",
                     timeout=args.timeout,
                     poll_memory=False,
                 )
@@ -697,14 +697,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     cell["bench"] = summarise_bench(outdir / "bench.json")
                     if bchild.returncode != 0:
                         cell["bench"]["problems"].append(
-                            f"`mtato bench` exited {bchild.returncode} but wrote bench.json"
+                            f"`infinity bench` exited {bchild.returncode} but wrote bench.json"
                         )
                 else:
                     cell["bench"] = {
                         "status": "failed",
                         "path": str(outdir / "bench.json"),
                         "reason": (
-                            f"`mtato bench` exited {bchild.returncode} and wrote no bench.json: "
+                            f"`infinity bench` exited {bchild.returncode} and wrote no bench.json: "
                             + (bchild.stderr_tail(400) or "no stderr")
                         ),
                         "problems": [],

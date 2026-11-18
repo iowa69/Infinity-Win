@@ -6,7 +6,7 @@ elapsed time, one curve per configuration. It shows the 'photo coming into focus
 as a measurement."
 
 Accuracy at a given instant is the **Robinson-Foulds distance** between the tree
-M-Tato had emitted by then and the truth tree, *after collapsing branches shorter
+Infinity-Win had emitted by then and the truth tree, *after collapsing branches shorter
 than half a SNP* (a branch that short carries no evidence, so the split it implies
 must not be counted).
 
@@ -27,8 +27,8 @@ Where the RF values come from (``--rf-mode``)
     ``auto``     use a ``bench.json`` timeline when one exists, else compute RF here
     ``bench``    require RF values from a bench JSON (``--rf-from``)
     ``internal`` always compute RF in pure Python from the emitted Newick
-    ``mtato``    write each emitted tree to a temporary output folder and ask
-                 ``mtato bench`` to score it (works only once the CLI exists)
+    ``infinity``    write each emitted tree to a temporary output folder and ask
+                 ``infinity bench`` to score it (works only once the CLI exists)
 
 The numbers are always written as CSV. The PNG is a bonus: when matplotlib is not
 importable the script says so and still leaves the CSV behind.
@@ -357,7 +357,7 @@ def tree_points(
                 "focus": focus if isinstance(focus, int) else None,
                 "tree": tree,
                 # Snapshot of every cluster tree emitted so far, as Newick text.
-                # Scoring against a per-cluster truth (what `mtato simulate`
+                # Scoring against a per-cluster truth (what `infinity simulate`
                 # writes) needs the individual cluster trees, not just the
                 # assembled full tree.
                 "cluster_newicks": {
@@ -408,7 +408,7 @@ def score_internal(
 
 
 def load_truth_trees(truth_dir: Path) -> Tuple[List[Tuple[str, common.NewickNode]], List[str]]:
-    """Parse the per-cluster truth trees of a ``mtato simulate`` truth folder.
+    """Parse the per-cluster truth trees of a ``infinity simulate`` truth folder.
 
     The simulator writes one truth tree per cluster (``tree_c00.nwk``,
     ``tree_c01.nwk``, ...) in SNP units and **no** single full truth tree. The
@@ -455,7 +455,7 @@ def score_internal_per_cluster(
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Aggregate RF over the clusters emitted so far, at each instant.
 
-    Mirrors what ``mtato bench`` reports in ``trees[]`` (one RF per cluster
+    Mirrors what ``infinity bench`` reports in ``trees[]`` (one RF per cluster
     against that cluster's truth tree), but evaluated at *every* point of the
     event stream so the curve shows the picture sharpening. ``rf`` is the sum
     over clusters and ``rf_normalized`` their mean, both labelled as such in the
@@ -531,7 +531,7 @@ def score_internal_per_cluster(
     return rows, problems
 
 
-def score_with_mtato(
+def score_with_infinity(
     run_dir: Path,
     truth_dir: Path,
     binary: Path,
@@ -539,16 +539,16 @@ def score_with_mtato(
     dataset: str,
     config: str,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Ask the CLI's own ``mtato bench`` for the RF timeline.
+    """Ask the CLI's own ``infinity bench`` for the RF timeline.
 
-    ``mtato bench --output <run dir> --truth <truth dir>`` already replays the
+    ``infinity bench --output <run dir> --truth <truth dir>`` already replays the
     event stream and scores every emitted tree against the simulator truth, so
     this mode runs bench once and reads its ``timeline`` - no temporary folders.
     The curve then comes from the engine's own Robinson-Foulds code rather than
     from the Python reimplementation in this directory, which is the point of
     offering both.
 
-    It requires a ``mtato simulate`` truth folder. Real datasets have a reference
+    It requires a ``infinity simulate`` truth folder. Real datasets have a reference
     tree and a SKA2 table instead, which ``bench --truth`` does not accept; for
     those use ``--rf-mode internal`` with ``--truth-tree`` (one full reference
     tree) or ``--rf-mode bench`` against an existing ``bench.json``.
@@ -556,7 +556,7 @@ def score_with_mtato(
     problems: List[str] = []
     if not common.is_simulator_truth_dir(truth_dir):
         raise common.PrereqError(
-            f"--rf-mode mtato needs a `mtato simulate` truth folder; {truth_dir} is not "
+            f"--rf-mode infinity needs a `infinity simulate` truth folder; {truth_dir} is not "
             "one (expected tree_*.nwk, or pairwise_snps.tsv together with clusters.tsv)\n"
             "       for a real dataset use --rf-mode internal with --truth-tree <newick>, "
             "or --rf-mode bench with an existing bench.json"
@@ -572,8 +572,8 @@ def score_with_mtato(
     ]
     res = common.run_child(
         cmd,
-        stdout_path=run_dir / "mtato.bench.log",
-        stderr_path=run_dir / "mtato.bench.err",
+        stdout_path=run_dir / "infinity.bench.log",
+        stderr_path=run_dir / "infinity.bench.err",
         timeout=3600,
         poll_memory=False,
     )
@@ -587,7 +587,7 @@ def score_with_mtato(
     rows, bench_problems = rows_from_bench(bench, dataset, config)
     problems.extend(bench_problems)
     for row in rows:
-        row["rf_source"] = "mtato bench"
+        row["rf_source"] = "infinity bench"
     return rows, problems
 
 
@@ -793,7 +793,7 @@ def analyse_run_dir(
     collapse_length: Optional[float],
     comparable_bp: Optional[int],
     max_points: Optional[int],
-    mtato: Optional[Path],
+    infinity: Optional[Path],
 ) -> Dict[str, Any]:
     """Produce the accuracy-over-time rows for one output folder."""
     result: Dict[str, Any] = {
@@ -931,25 +931,25 @@ def analyse_run_dir(
 
     if rf_mode == "bench":
         rows, source = bench_rows, "bench.json"
-    elif rf_mode == "mtato":
-        binary = mtato or common.resolve_binary(None, required=False)
+    elif rf_mode == "infinity":
+        binary = infinity or common.resolve_binary(None, required=False)
         if binary is None:
             raise common.PrereqError(
-                "--rf-mode mtato needs the mtato binary; none was found. "
+                "--rf-mode infinity needs the infinity binary; none was found. "
                 "Use --rf-mode internal (pure Python RF) or --rf-from <bench.json>."
             )
         if not (truth_dir and common.is_simulator_truth_dir(Path(truth_dir))):
             raise common.PrereqError(
-                "--rf-mode mtato needs a `mtato simulate` truth folder; got "
+                "--rf-mode infinity needs a `infinity simulate` truth folder; got "
                 f"{truth_dir or 'nothing'}. Pass --truth-dir <truth folder>, or use "
                 "--rf-mode internal with --truth-tree <newick>."
             )
-        rows, problems = score_with_mtato(
+        rows, problems = score_with_infinity(
             run_dir, Path(truth_dir), Path(binary), collapse_snps, dataset, config
         )
         result["problems"].extend(problems)
         result["bench_json"] = str(run_dir / "bench.json")
-        source = "mtato bench" if rows else None
+        source = "infinity bench" if rows else None
     elif rf_mode == "internal":
         rows, source = internal_rows, internal_source
     else:  # auto
@@ -992,7 +992,7 @@ def analyse_run_dir(
     else:
         # An explicitly requested RF source that produced nothing is a failure;
         # `auto` producing nothing is an empty result with the reasons recorded.
-        result["status"] = "failed" if rf_mode in ("bench", "internal", "mtato") else "empty"
+        result["status"] = "failed" if rf_mode in ("bench", "internal", "infinity") else "empty"
         result["problems"].append(
             "no accuracy points could be produced; the CSV was written with a header only"
         )
@@ -1011,7 +1011,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--run-dir", type=Path, help="one mtato output folder (has events.jsonl)")
+    src.add_argument("--run-dir", type=Path, help="one infinity output folder (has events.jsonl)")
     src.add_argument("--matrix-dir", type=Path, help="a matrix folder: <dataset>/<config>/")
     p.add_argument("--dataset", default=None, help="dataset name (default: inferred/all)")
     p.add_argument("--configs", nargs="+", default=None, help="restrict to these configurations")
@@ -1020,8 +1020,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--truth-dir",
         type=Path,
         default=None,
-        help="a `mtato simulate` truth folder (tree_*.nwk, pairwise_snps.tsv); "
-        "lets --rf-mode mtato/auto ask the CLI's own bench for the RF timeline "
+        help="a `infinity simulate` truth folder (tree_*.nwk, pairwise_snps.tsv); "
+        "lets --rf-mode infinity/auto ask the CLI's own bench for the RF timeline "
         "(default: the dataset's truth.dir from dataset.json)",
     )
     p.add_argument("--work-dir", type=Path, default=None, help="bench-work folder (for truth lookup)")
@@ -1034,11 +1034,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--rf-mode",
-        choices=("auto", "bench", "internal", "mtato"),
+        choices=("auto", "bench", "internal", "infinity"),
         default="auto",
         help="where RF values come from (default: auto = bench.json if present, else internal)",
     )
-    p.add_argument("--mtato", default=None, help="mtato binary, for --rf-mode mtato")
+    p.add_argument("--infinity", default=None, help="infinity binary, for --rf-mode infinity")
     p.add_argument(
         "--collapse-mode",
         choices=("auto", "snps", "length", "none"),
@@ -1147,7 +1147,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 collapse_length=args.collapse_length,
                 comparable_bp=args.comparable_bp,
                 max_points=args.max_points,
-                mtato=Path(args.mtato) if args.mtato else None,
+                infinity=Path(args.infinity) if args.infinity else None,
             )
         except common.PrereqError as exc:
             res = {

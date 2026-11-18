@@ -11,7 +11,7 @@ Format: **what changed** — **why** — **what it affects**.
 
 ## D1. Build artefacts go to tmpfs, not `./target`
 
-**What.** `.cargo/config.toml` sets `target-dir = "/tmp/mtato-target"` and
+**What.** `.cargo/config.toml` sets `target-dir = "/tmp/infinity-target"` and
 `jobs = 12`. That directory is gitignored, so a normal checkout elsewhere builds
 into `./target` as usual.
 
@@ -76,7 +76,7 @@ code only in `params::peak_memory_bytes` and `summary::peak_memory_bytes`), but 
 
 **Affects.** The Windows `.exe` must be produced by running the workflow (or by
 `cargo build --release` on a Windows machine). The source is Windows-clean;
-`mtato-core` contains no platform-specific code beyond the two memory-reporting
+`infinity-core` contains no platform-specific code beyond the two memory-reporting
 functions, which fall back to `None` rather than failing.
 
 ---
@@ -180,7 +180,7 @@ suffix. `genomes.tsv` keeps the original name.
 
 ---
 
-## D11. `mtato run --focus0-only` is expressed as a degenerate threshold
+## D11. `infinity run --focus0-only` is expressed as a degenerate threshold
 
 **What.** The outline does not define a "stop at the blurry tree" flag; the GUI
 and the benchmark both need one. It is implemented as
@@ -395,7 +395,7 @@ difference.
 
 ## D17. Peak memory is measured on Linux only, to keep `forbid(unsafe_code)`
 
-**What.** `mtato-core` is declared `#![forbid(unsafe_code)]`. Reading total RAM on
+**What.** `infinity-core` is declared `#![forbid(unsafe_code)]`. Reading total RAM on
 Windows (`GlobalMemoryStatusEx`) and peak working set on Windows
 (`K32GetProcessMemoryInfo`) both require an FFI call, so both were removed. On
 non-Linux platforms `peak_memory_bytes()` returns `None` and the memory budget of
@@ -414,17 +414,17 @@ baselines are Linux-only by the outline's own note). Windows users see `unknown`
 for peak RSS.
 
 **Verified.** `cargo check --target x86_64-pc-windows-msvc` passes for
-`mtato-core`, `mtato-sim` and `mtato-cli` with no errors and no warnings, which is
+`infinity-core`, `infinity-sim` and `infinity-cli` with no errors and no warnings, which is
 the portability evidence available without a Windows linker (see D4).
 
 ---
 
-## D18. M-Tato reports unfiltered whole-assembly differences; baselines are filtered
+## D18. Infinity-Win reports unfiltered whole-assembly differences; baselines are filtered
 
 **What.** No filtering step was added. Every difference found between a member and
 its pivot is written to `cluster_<id>.variants.tsv`, with the contig, the contig
 length and coverage in the contig name, and the `repeat`, `low_identity`, `dup`
-and `end_ext` flags as columns. Comparing M-Tato's raw counts against SKA2 or a
+and `end_ext` flags as columns. Comparing Infinity-Win's raw counts against SKA2 or a
 mapping pipeline therefore requires filtering one side or the other.
 
 **Why.** Section 2 lists no filtering among the goals and section 15 says repeats
@@ -434,7 +434,7 @@ which is precisely the judgement a user investigating an outbreak needs to make
 themselves.
 
 **Affects.** Any comparison against an outside baseline. Measured on the three
-*Salmonella* Heidelberg isolates: unfiltered M-Tato reports 15 differences between
+*Salmonella* Heidelberg isolates: unfiltered Infinity-Win reports 15 differences between
 isolate-A and isolate-B where SKA2 reports 2, but restricting to pivot contigs of at
 least 5 kb gives **exactly 2**, matching SKA2 on reads, SKA2 on assemblies and the
 filtered 1-to-1 alignment. All 13 excluded differences sit on one 1,448 bp contig
@@ -519,7 +519,7 @@ hashed is deliberately not in memory.
 
 **What.** `Parameters::memory_budget_bytes` is defaulted to a quarter of physical
 RAM, accepted on the command line as `--memory-budget`, and written into
-`run.json`. Nothing in `mtato-core` reads it. The eviction rule of 6.10 —
+`run.json`. Nothing in `infinity-core` reads it. The eviction rule of 6.10 —
 "sequences of non-pivot genomes are not kept after use unless they fit a memory
 budget; otherwise the file is read again when needed" — is not implemented.
 

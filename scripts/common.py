@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for the M-Tato benchmark and reporting scripts.
+"""Shared helpers for the Infinity-Win benchmark and reporting scripts.
 
 Design rules this module exists to enforce:
 
@@ -66,13 +66,13 @@ def guard(main: Callable[[Optional[Sequence[str]]], int]) -> Callable[[], None]:
     """Wrap a ``main(argv)`` so missing prerequisites print, not traceback.
 
     Unexpected exceptions are summarised to one line unless ``--debug`` was
-    passed or ``MTATO_SCRIPTS_DEBUG=1`` is set; the full traceback is then
+    passed or ``INFINITY_SCRIPTS_DEBUG=1`` is set; the full traceback is then
     printed, because a real bug is easier to find with one.
     """
 
     def runner() -> None:
         argv = sys.argv[1:]
-        debug = bool(os.environ.get("MTATO_SCRIPTS_DEBUG")) or "--debug" in argv
+        debug = bool(os.environ.get("INFINITY_SCRIPTS_DEBUG")) or "--debug" in argv
         try:
             code = main(argv)
         except PrereqError as exc:
@@ -89,7 +89,7 @@ def guard(main: Callable[[Optional[Sequence[str]]], int]) -> Callable[[], None]:
                 raise
             print(
                 f"ERROR: unexpected {type(exc).__name__}: {exc}\n"
-                "       re-run with --debug (or MTATO_SCRIPTS_DEBUG=1) for a traceback",
+                "       re-run with --debug (or INFINITY_SCRIPTS_DEBUG=1) for a traceback",
                 file=sys.stderr,
             )
             raise SystemExit(1)
@@ -161,7 +161,7 @@ def run_child(
     """Run ``cmd`` and time it.
 
     ``capture=True`` keeps the output in memory instead of a file (used for
-    short helper calls such as ``mtato --version``). Long benchmark runs should
+    short helper calls such as ``infinity --version``). Long benchmark runs should
     pass file paths so the log survives a crash.
     """
     cmd = [str(c) for c in cmd]
@@ -259,7 +259,7 @@ def captured(result: ChildResult) -> Tuple[str, str]:
 
 
 def repo_root(start: Optional[Path] = None) -> Path:
-    """The M-Tato repository root (the folder holding ``Cargo.toml``)."""
+    """The Infinity-Win repository root (the folder holding ``Cargo.toml``)."""
     here = (start or Path(__file__)).resolve()
     for parent in [here, *here.parents]:
         if (parent / "Cargo.toml").exists() and (parent / "PROJECT.md").exists():
@@ -273,7 +273,7 @@ def default_work_dir() -> Path:
     The root partition of the build machine is 99% full, so every generated
     artefact lives here (and ``bench-work/`` is gitignored).
     """
-    env = os.environ.get("MTATO_BENCH_WORK")
+    env = os.environ.get("INFINITY_BENCH_WORK")
     return Path(env) if env else repo_root() / "bench-work"
 
 
@@ -283,7 +283,7 @@ def target_dirs() -> List[Path]:
     out: List[Path] = []
     for cand in (
         os.environ.get("CARGO_TARGET_DIR"),
-        "/tmp/mtato-target",  # set in .cargo/config.toml on this machine
+        "/tmp/infinity-target",  # set in .cargo/config.toml on this machine
         str(root / "target"),
     ):
         if not cand:
@@ -294,10 +294,10 @@ def target_dirs() -> List[Path]:
     return out
 
 
-def mtato_candidates(binary: str = "mtato") -> List[Path]:
-    """Every place the ``mtato`` binary might be, in preference order."""
+def infinity_candidates(binary: str = "infinity") -> List[Path]:
+    """Every place the ``infinity`` binary might be, in preference order."""
     out: List[Path] = []
-    env_bin = os.environ.get("MTATO_BIN")
+    env_bin = os.environ.get("INFINITY_BIN")
     if env_bin:
         out.append(Path(env_bin))
     for td in target_dirs():
@@ -308,12 +308,12 @@ def mtato_candidates(binary: str = "mtato") -> List[Path]:
 
 
 def resolve_binary(
-    explicit: Optional[str] = None, binary: str = "mtato", required: bool = True
+    explicit: Optional[str] = None, binary: str = "infinity", required: bool = True
 ) -> Optional[Path]:
     """Resolve the CLI binary.
 
-    Order: ``--mtato`` argument, ``$MTATO_BIN``, ``$CARGO_TARGET_DIR/release``,
-    ``/tmp/mtato-target/release`` (this machine's target dir), ``target/release``,
+    Order: ``--infinity`` argument, ``$INFINITY_BIN``, ``$CARGO_TARGET_DIR/release``,
+    ``/tmp/infinity-target/release`` (this machine's target dir), ``target/release``,
     ``target/debug``, then ``binary`` on ``PATH``.
     """
     tried: List[str] = []
@@ -324,11 +324,11 @@ def resolve_binary(
             return p
         if required:
             raise PrereqError(
-                f"{binary} binary not found or not executable at --mtato value {p}\n"
+                f"{binary} binary not found or not executable at --infinity value {p}\n"
                 f"       build it with: cargo build --release   (target dir: {target_dirs()[0]})"
             )
         return None
-    for cand in mtato_candidates(binary):
+    for cand in infinity_candidates(binary):
         tried.append(str(cand))
         if cand.is_file() and os.access(cand, os.X_OK):
             return cand
@@ -341,7 +341,7 @@ def resolve_binary(
             f"no {binary} binary found. Tried:\n         "
             + "\n         ".join(tried)
             + f"\n       build it with: cargo build --release\n"
-            f"       or point at an existing one with --mtato <path>"
+            f"       or point at an existing one with --infinity <path>"
         )
     return None
 
@@ -1455,7 +1455,7 @@ def guess_collapse_threshold(
 ) -> Tuple[float, str]:
     """Work out the branch-length threshold for "collapse < half a SNP".
 
-    M-Tato writes substitutions per site inside clusters (section 6.9) while the
+    Infinity-Win writes substitutions per site inside clusters (section 6.9) while the
     simulator's truth tree is in SNPs (section 10.1), so one number cannot serve
     both. Returns ``(threshold, explanation)``; ``threshold == 0`` means "do not
     collapse", which is recorded rather than silently applied.
@@ -1753,7 +1753,7 @@ def parse_ska2_distance_tsv(path: Path) -> SkaDistances:
 
 
 # ---------------------------------------------------------------------------
-# M-Tato output folder readers
+# Infinity-Win output folder readers
 # ---------------------------------------------------------------------------
 
 GENOME_NAME_ALIASES = ("name", "genome", "genome_name", "sample", "id", "genome_id")
@@ -1952,7 +1952,7 @@ def recompute_pairwise_snps(
 ) -> RecombinedDistances:
     """Recompute pairwise SNP counts from the variant lists, optionally filtered.
 
-    M-Tato does not filter its variants: section 2 lists no filtering among its
+    Infinity-Win does not filter its variants: section 2 lists no filtering among its
     goals and section 15 says repeats are flagged, not corrected. Published
     reference numbers, on the other hand, are always filtered (SKA2 restricts to
     the shared k-mer core; a mapping pipeline drops high-depth and low-identity
@@ -2565,7 +2565,7 @@ class ExpectedCheck:
 def check_expected_pairs(
     expected: Dict[str, Any], observed: Dict[Tuple[str, str], Optional[float]]
 ) -> List[ExpectedCheck]:
-    """Compare published SNP distances against what M-Tato reported.
+    """Compare published SNP distances against what Infinity-Win reported.
 
     ``observed`` keys are canonicalised, so the caller may index pairs in either
     order.
@@ -2585,7 +2585,7 @@ def check_expected_pairs(
         obs = index.get(key) if key else None
         if obs is None:
             passed = None
-            note = "M-Tato reported no distance for this pair (not in any cluster_*.dist.tsv)"
+            note = "Infinity-Win reported no distance for this pair (not in any cluster_*.dist.tsv)"
         else:
             try:
                 passed = abs(float(obs) - float(value)) <= tolerance
@@ -2615,7 +2615,7 @@ def check_expected_pairs(
 
 @dataclass
 class BenchJson:
-    """A ``mtato bench`` result, read defensively.
+    """A ``infinity bench`` result, read defensively.
 
     The schema the CLI actually writes is::
 
@@ -2804,7 +2804,7 @@ def load_bench_json(path: Path, *, required: bool = True) -> Optional[BenchJson]
         if required:
             raise PrereqError(
                 f"no bench result at {p}\n"
-                "       run 'mtato bench --output <run dir> --truth <truth dir>' for this "
+                "       run 'infinity bench --output <run dir> --truth <truth dir>' for this "
                 "output folder first (run_matrix.py does this automatically when the "
                 "dataset has a simulator truth folder)"
             )
@@ -2845,12 +2845,12 @@ def rf_values_from_bench(bench: BenchJson) -> Dict[str, List[Dict[str, Any]]]:
 
 
 def is_simulator_truth_dir(path: Optional[Path]) -> bool:
-    """True when ``path`` looks like a ``mtato simulate`` truth folder.
+    """True when ``path`` looks like a ``infinity simulate`` truth folder.
 
-    ``mtato bench --truth`` requires that layout (``tree_*.nwk``,
+    ``infinity bench --truth`` requires that layout (``tree_*.nwk``,
     ``pairwise_snps.tsv``, ``clusters.tsv``). A real dataset's reference folder --
     a SKA2 distance table and an IQ-TREE tree -- is *not* that, and passing it
-    would produce a bench failure that looks like an M-Tato bug.
+    would produce a bench failure that looks like an Infinity-Win bug.
     """
     if not path:
         return False

@@ -23,7 +23,7 @@ Three datasets are available on this machine:
     *Staphylococcus aureus* reference genomes from the MORI collection. **These
     are different clonal complexes, i.e. far apart.** That makes them useful for
     checking that clustering separates distinct lineages and useless for checking
-    SNP-level accuracy: at several percent divergence M-Tato's block shortcut
+    SNP-level accuracy: at several percent divergence Infinity-Win's block shortcut
     stops helping (PROJECT.md section 15, "Divergent clusters"). The dataset.json
     and the report both say so. The collection is large, so a deterministic
     sample is taken rather than all of it.
@@ -120,7 +120,7 @@ SPECS: Dict[str, DatasetSpec] = {
             "distance error only.",
         ],
         caveats=[
-            "Three genomes is far below the scale M-Tato is designed for; this "
+            "Three genomes is far below the scale Infinity-Win is designed for; this "
             "dataset tests exactness, not performance.",
         ],
     ),
@@ -145,11 +145,11 @@ SPECS: Dict[str, DatasetSpec] = {
             "are copied into truth/ so the dataset folder is self-contained.",
             "The IQ-TREE tree is a reference, not ground truth: it is a "
             "maximum-likelihood tree from a split-k-mer core alignment, and "
-            "M-Tato's neighbour-joining tree is not expected to match it "
+            "Infinity-Win's neighbour-joining tree is not expected to match it "
             "exactly.",
         ],
         caveats=[
-            "SKA2 distances were computed from reads, M-Tato distances from "
+            "SKA2 distances were computed from reads, Infinity-Win distances from "
             "assemblies, so small disagreements are expected and are reported "
             "rather than hidden.",
         ],
@@ -181,10 +181,10 @@ SPECS: Dict[str, DatasetSpec] = {
         caveats=[
             "DIFFERENT CLONAL COMPLEXES MEAN THESE GENOMES ARE FAR APART. This "
             "dataset can show that clustering separates distinct lineages; it "
-            "cannot validate SNP-level accuracy, and M-Tato's block shortcut is "
+            "cannot validate SNP-level accuracy, and Infinity-Win's block shortcut is "
             "expected to stop helping at this divergence (PROJECT.md section 15).",
             "No ground-truth tree and no ground-truth SNP distances exist for "
-            "this set, so `mtato bench` cannot score accuracy on it.",
+            "this set, so `infinity bench` cannot score accuracy on it.",
         ],
     ),
 }
@@ -344,7 +344,7 @@ def build_salmonella_trio(dest: Path, args: argparse.Namespace) -> Dict[str, Any
             "analyses of these three isolates; see the expected-values file for "
             "per-pair provenance.",
             "Fewer than four taxa: Robinson-Foulds accuracy is undefined here, so "
-            "`mtato bench` should compare pairwise distances only.",
+            "`infinity bench` should compare pairwise distances only.",
         ],
     }
     # A self-contained 3-row SKA2 extract, when the full table is available.
@@ -435,9 +435,9 @@ def build_ncbi_pd_cluster(dest: Path, args: argparse.Namespace) -> Dict[str, Any
         "tree": None,
         "distances": None,
         "notes": [
-            "Both reference files were produced outside M-Tato and are copied "
+            "Both reference files were produced outside Infinity-Win and are copied "
             "here unchanged so that this dataset folder is self-contained.",
-            "`mtato bench --truth` only accepts a `mtato simulate` truth folder "
+            "`infinity bench --truth` only accepts a `infinity simulate` truth folder "
             "(tree_*.nwk, pairwise_snps.tsv, clusters.tsv), so it cannot score "
             "this real dataset. The comparisons that do apply are made by the "
             "scripts: `baselines.py compare` joins these SKA2 distances against "
@@ -641,14 +641,14 @@ def build_s_aureus_cc(dest: Path, args: argparse.Namespace) -> Dict[str, Any]:
                 "folder name. Genomes labelled 'unassigned' have no expected "
                 "cluster. This is a WEAK expectation: distinct clonal complexes "
                 "are far enough apart that any reasonable method separates them, "
-                "so passing it says almost nothing about M-Tato's accuracy."
+                "so passing it says almost nothing about Infinity-Win's accuracy."
             ),
             "clusters": expected_clusters,
             "unassigned": [r.name for r in records if not r.clonal_complex],
         },
         "notes": [
             "No reference tree and no reference SNP distances exist for this set, "
-            "so `mtato bench` cannot score accuracy on it. It is included to test "
+            "so `infinity bench` cannot score accuracy on it. It is included to test "
             "that clustering separates lineages that are far apart, and to show "
             "where the block shortcut stops paying.",
         ],

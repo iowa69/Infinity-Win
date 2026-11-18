@@ -37,7 +37,7 @@ REAL_SKA2 = Path(
 
 class TempDirCase(unittest.TestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="mtato-test-")
+        self._tmp = tempfile.TemporaryDirectory(prefix="infinity-test-")
         self.tmp = Path(self._tmp.name)
 
     def tearDown(self) -> None:
@@ -323,7 +323,7 @@ class TestReadTable(TempDirCase):
 
 
 # ---------------------------------------------------------------------------
-# M-Tato output folder readers
+# Infinity-Win output folder readers
 # ---------------------------------------------------------------------------
 
 
@@ -858,7 +858,7 @@ class TestBenchJson(TempDirCase):
         )
         self.assertFalse(
             common.is_simulator_truth_dir(real),
-            "an IQ-TREE + SKA2 folder is not what `mtato bench --truth` accepts",
+            "an IQ-TREE + SKA2 folder is not what `infinity bench --truth` accepts",
         )
         self.assertFalse(common.is_simulator_truth_dir(None))
         self.assertFalse(common.is_simulator_truth_dir(self.tmp / "absent"))
@@ -894,7 +894,7 @@ class TestBenchJson(TempDirCase):
     def test_missing_file_is_actionable_when_required(self) -> None:
         with self.assertRaises(common.PrereqError) as ctx:
             common.load_bench_json(self.tmp / "nope.json")
-        self.assertIn("mtato bench", str(ctx.exception))
+        self.assertIn("infinity bench", str(ctx.exception))
         self.assertIsNone(common.load_bench_json(self.tmp / "nope.json", required=False))
 
 
@@ -969,7 +969,7 @@ class TestFormattingAndStats(unittest.TestCase):
 
 class TestBinaryResolution(TempDirCase):
     def test_an_explicit_path_must_exist_and_be_executable(self) -> None:
-        fake = fixtures.write_fake_mtato(self.tmp / "mtato")
+        fake = fixtures.write_fake_infinity(self.tmp / "infinity")
         self.assertEqual(common.resolve_binary(str(fake)), fake)
         with self.assertRaises(common.PrereqError) as ctx:
             common.resolve_binary(str(self.tmp / "missing"))
@@ -981,7 +981,7 @@ class TestBinaryResolution(TempDirCase):
             common.resolve_binary(binary="definitely-not-installed-xyz")
         message = str(ctx.exception)
         self.assertIn("Tried:", message)
-        self.assertIn("--mtato", message)
+        self.assertIn("--infinity", message)
 
 
 if __name__ == "__main__":

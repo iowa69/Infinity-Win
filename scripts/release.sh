@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Release builds for M-Tato (PROJECT.md milestone M9).
+# Release builds for Infinity-Win (PROJECT.md milestone M9).
 #
 # What this script does on THIS machine (Linux x86-64):
 #
-#   1. `cargo build --release` for the two binaries, `mtato` and `mtato-gui`.
+#   1. `cargo build --release` for the two binaries, `infinity` and `Infinity-Win`.
 #   2. Copies them out of the workspace target directory into ./dist/linux-x86_64/.
-#      The target directory is /tmp/mtato-target here (see .cargo/config.toml):
+#      The target directory is /tmp/infinity-target here (see .cargo/config.toml):
 #      the root partition is 99% full, so build artefacts live on tmpfs and only
 #      the finished binaries are copied onto disk.
 #   3. Writes dist/VERSION and dist/SHA256SUMS.txt.
@@ -28,8 +28,8 @@ set -euo pipefail
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)"
 
-BINARIES=(mtato mtato-gui)
-CRATES=(mtato-cli mtato-gui)
+BINARIES=(infinity Infinity-Win)
+CRATES=(infinity-cli infinity-gui)
 HOST_TARGET="x86_64-unknown-linux-gnu"
 WINDOWS_TARGET="x86_64-pc-windows-gnu"
 
@@ -63,7 +63,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # --------------------------------------------------------------------------
 # Resolve the target directory. $CARGO_TARGET_DIR wins, then the value in
-# .cargo/config.toml (which is what makes this /tmp/mtato-target here), then
+# .cargo/config.toml (which is what makes this /tmp/infinity-target here), then
 # the cargo default ./target.
 # --------------------------------------------------------------------------
 resolve_target_dir() {
@@ -105,7 +105,7 @@ version_of() {
 
 VERSION="$(version_of)"
 
-info "M-Tato release"
+info "Infinity-Win release"
 info "  repository:    $REPO_ROOT"
 info "  version:       $VERSION"
 info "  target dir:    $TARGET_DIR"
@@ -206,7 +206,7 @@ info "Staging into $DIST_DIR ..."
 stage "$HOST_TARGET" "$RELEASE_DIR" ""
 if [ "$DO_WINDOWS" -eq 1 ]; then
     ( cd "$REPO_ROOT" && cargo build --release --locked --target "$WINDOWS_TARGET" \
-        --package mtato-cli --package mtato-gui )
+        --package infinity-cli --package infinity-gui )
     stage "$WINDOWS_TARGET" "$TARGET_DIR/$WINDOWS_TARGET/release" ".exe"
 fi
 

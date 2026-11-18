@@ -1,0 +1,21 @@
+[package]
+name = "infinity-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Infinity-Win command line tool"
+
+[[bin]]
+name = "infinity"
+path = "src/main.rs"
+
+[dependencies]
+infinity-core = { workspace = true }
+infinity-sim = { workspace = true }
+clap = { workspace = true }
+crossbeam-channel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }

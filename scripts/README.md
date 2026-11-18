@@ -1,4 +1,4 @@
-# M-Tato benchmark and reporting scripts
+# Infinity-Win benchmark and reporting scripts
 
 This directory is the measurement half of PROJECT.md section 11: *"the project is
 an experiment as much as a tool, so measuring it honestly is part of the
@@ -14,7 +14,7 @@ Three rules the scripts are written to obey:
 |---|---|---|
 | A benchmark that only reports the cases where the idea wins is a failure | section 2 (anti-goal) | Failed configurations are written to `summary.json` with `status: "failed"`, their exit code and their stderr, and they are printed in `REPORT.md` section 8. Nothing is dropped. |
 | Never present an approximate number as exact | section 0, rule 8 | A missing timing, counter or memory value prints as `n/a`, never `0`. Peak memory sampled from `/proc` is flagged `is_floor: true`. A wall-time substitute for `exact_tree_ms` is labelled "proxy". |
-| The engine must never depend on the GUI; everything reachable from the CLI | section 0, rule 2 | These scripts drive `mtato run` / `mtato bench` only. The GUI is never involved. |
+| The engine must never depend on the GUI; everything reachable from the CLI | section 0, rule 2 | These scripts drive `infinity run` / `infinity bench` only. The GUI is never involved. |
 
 ---
 
@@ -22,13 +22,13 @@ Three rules the scripts are written to obey:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build --release          # -> /tmp/mtato-target/release/mtato   (see .cargo/config.toml)
+cargo build --release          # -> /tmp/infinity-target/release/infinity   (see .cargo/config.toml)
 python3 --version              # 3.8+ ; matplotlib optional
 ```
 
-Scripts find the binary in this order: `--mtato <path>` → `$MTATO_BIN` →
-`$CARGO_TARGET_DIR/release/mtato` → `/tmp/mtato-target/release/mtato` →
-`<repo>/target/release/mtato` → `<repo>/target/debug/mtato` → `mtato` on `PATH`.
+Scripts find the binary in this order: `--infinity <path>` → `$INFINITY_BIN` →
+`$CARGO_TARGET_DIR/release/infinity` → `/tmp/infinity-target/release/infinity` →
+`<repo>/target/release/infinity` → `<repo>/target/debug/infinity` → `infinity` on `PATH`.
 If none exists you get one actionable message naming every path that was tried —
 not a traceback.
 
@@ -58,14 +58,14 @@ scripts/run_matrix.py
 # 4. Accuracy-over-time curves (run_matrix's outputs + events.jsonl).
 scripts/accuracy_over_time.py --matrix-dir bench-work/matrix
 
-# 5. Outside baselines, joined against one M-Tato run.
+# 5. Outside baselines, joined against one Infinity-Win run.
 scripts/baselines.py all --dataset ncbi_pd_cluster \
     --run-dir bench-work/matrix/ncbi_pd_cluster/baseline
 
 # 6. The report. Writes REPORT.md at the repository root.
 scripts/make_report.py
 
-# 7. Tests for all of the above (no mtato binary needed).
+# 7. Tests for all of the above (no infinity binary needed).
 python3 -m unittest discover -s scripts/tests -t scripts -v
 
 # 8. Release binaries.
@@ -113,9 +113,9 @@ everything.
 > **Caveat recorded in `dataset.json` and repeated in the report:** the
 > *S. aureus* genomes are **different clonal complexes, i.e. far apart**. That
 > makes them useful for checking that clustering separates lineages and useless
-> for checking SNP-level accuracy — at several percent divergence M-Tato's block
+> for checking SNP-level accuracy — at several percent divergence Infinity-Win's block
 > shortcut stops helping (PROJECT.md section 15, "Divergent clusters"). There is
-> no ground-truth tree or distance for this set, so `mtato bench` cannot score
+> no ground-truth tree or distance for this set, so `infinity bench` cannot score
 > accuracy on it.
 
 ### `run_matrix.py` — the configuration x dataset matrix
@@ -157,10 +157,10 @@ bench-work/matrix/
   summary.json                       every cell, including the failed ones
   <dataset>/<config>/
     genomes.tsv clusters.tsv tree.nwk cluster_<id>.{nwk,dist.tsv,variants.tsv}
-    run.json events.jsonl            written by mtato run
-    bench.json                       written by mtato bench
-    mtato.run.log mtato.run.err      stdout/stderr of the run
-    mtato.bench.log mtato.bench.err
+    run.json events.jsonl            written by infinity run
+    bench.json                       written by infinity bench
+    infinity.run.log infinity.run.err      stdout/stderr of the run
+    infinity.bench.log infinity.bench.err
   figures/                           accuracy curves (CSV always, PNG if possible)
 ```
 
@@ -193,7 +193,7 @@ scripts/accuracy_over_time.py --run-dir <dir> --rf-from <dir>/bench.json --rf-mo
 scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode internal
 
 # let the CLI's own RF code do the scoring (one temp output folder per tree)
-scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode mtato --mtato <path>
+scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode infinity --infinity <path>
 ```
 
 `--rf-mode` decides where RF values come from:
@@ -203,13 +203,13 @@ scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode mtato --m
 | `auto` (default) | the best source that can actually form a curve: a `bench.json` series with RF at two or more instants, else RF recomputed here, else the bench series anyway. The choice is recorded per row in `rf_source` and explained in the notes. |
 | `bench` | require RF values from `--rf-from <bench.json>` (or `<run-dir>/bench.json`); no truth tree needed |
 | `internal` | always compute RF in pure Python from the emitted Newick, against per-cluster truth trees (`--truth-dir`) or one reference tree (`--truth-tree`) |
-| `mtato` | re-run `mtato bench --output <run dir> --truth <truth dir>` and read its series; needs a simulator truth folder |
+| `infinity` | re-run `infinity bench --output <run dir> --truth <truth dir>` and read its series; needs a simulator truth folder |
 
 `--rf-from`/`--rf-mode bench` is what makes the script usable **before** the CLI's
 `bench` subcommand exists, and `internal` is what makes it usable when `bench`
 exists but its series has no time resolution (see section 4).
 
-**"Half a SNP" needs a unit.** M-Tato writes substitutions per site inside
+**"Half a SNP" needs a unit.** Infinity-Win writes substitutions per site inside
 clusters (section 6.9) while the simulator's truth tree is in SNPs (section 10.1),
 so one number cannot serve both. `--collapse-mode`:
 
@@ -269,7 +269,7 @@ scripts/baselines.py ska2 --dataset X --ska-dist /path/to/cluster_reads_distance
   then builds the NJ tree. With neither, it records `status: "unavailable"` and
   exits 0 — a missing outside tool is a reported gap, not an error.
 - `compare` is the one that matters: it joins SKA2's pairwise distances against
-  M-Tato's `cluster_<id>.dist.tsv` by genome-name pair and reports pairs in both /
+  Infinity-Win's `cluster_<id>.dist.tsv` by genome-name pair and reports pairs in both /
   only in one, exact matches, within-1-SNP and within-2-SNP counts, mean, median,
   p95 and max absolute difference, and Pearson/Spearman correlation. It also
   computes the Robinson-Foulds distance between `tree.nwk` and the dataset's
@@ -322,8 +322,8 @@ so a different comparable-pair set is expected by design, not a violation.
 The report also carries an **acceptance check** for the Salmonella trio: the
 published pairwise SNP distances in `scripts/expected/salmonella_trio.json`
 (isolate-A–isolate-B = 2, isolate-A–isolate-C = 2, isolate-B–isolate-C = 0, each with
-its provenance) against what M-Tato reported in `cluster_<id>.dist.tsv`. A pair
-M-Tato never compared is "not measured", not a pass.
+its provenance) against what Infinity-Win reported in `cluster_<id>.dist.tsv`. A pair
+Infinity-Win never compared is "not measured", not a pass.
 
 ### `release.sh` — release binaries
 
@@ -335,7 +335,7 @@ scripts/release.sh --windows    # attempt a cross build; refuses with a clear
                                 # message when mingw is absent (it is, here)
 ```
 
-Copies `mtato` and `mtato-gui` from `$CARGO_TARGET_DIR` (`/tmp/mtato-target` on
+Copies `infinity` and `Infinity-Win` from `$CARGO_TARGET_DIR` (`/tmp/infinity-target` on
 this machine, via `.cargo/config.toml`) into `./dist/<triple>/`, and writes
 `dist/VERSION` and `dist/SHA256SUMS.txt`. Windows x86-64 binaries come from
 `.github/workflows/release.yml`, which builds both platforms, uploads them as
@@ -355,7 +355,7 @@ field the still-being-built CLI does not emit yet.
 The three pairwise SNP distances for the outbreak trio, each with the analysis
 that produced it, the file and field it was read from, the raw and filtered
 counts, and an independent cross-check. Tolerance is ±1 SNP with the reason
-written down: M-Tato compares **assemblies**, while these numbers come from
+written down: Infinity-Win compares **assemblies**, while these numbers come from
 **reads** (SKA2) and from a mapping-plus-filtering pipeline, so a one-SNP
 difference is evidence about the assemblies rather than automatically a bug.
 `make_report.py` prints expected, observed and the difference for every pair, so
@@ -363,13 +363,13 @@ a near-miss is visible.
 
 ---
 
-## 4. The `mtato bench` interface these scripts use
+## 4. The `infinity bench` interface these scripts use
 
-This matches the **implemented** CLI (`mtato bench --help`), not an assumed one:
+This matches the **implemented** CLI (`infinity bench --help`), not an assumed one:
 
 ```
-mtato bench --output <run dir>          # an M-Tato output folder (run.json + trees)
-            --truth  <truth dir>        # a `mtato simulate` truth folder
+infinity bench --output <run dir>          # an Infinity-Win output folder (run.json + trees)
+            --truth  <truth dir>        # a `infinity simulate` truth folder
             [-j, --json <path>]         # default <output>/bench.json
             [--collapse-below <float>]  # collapse branches shorter than this (default 0.5)
             [--quiet]                   # write the JSON, do not print the table
@@ -386,13 +386,13 @@ by the scripts instead:
 
 | dataset | accuracy comes from |
 |---|---|
-| simulated (`truth.dir` is a simulator folder) | `mtato bench` → `bench.json` |
+| simulated (`truth.dir` is a simulator folder) | `infinity bench` → `bench.json` |
 | `ncbi_pd_cluster` | `baselines.py compare` (SKA2 join + RF vs `cluster.treefile`) and `accuracy_over_time.py --rf-mode internal` |
 | `salmonella_trio` | the acceptance check in `make_report.py` (published SNP distances) and `baselines.py compare` |
 | `s_aureus_cc` | nothing — no truth exists; counters and timings only |
 
 `common.is_simulator_truth_dir()` is what decides this, so a reference folder is
-never handed to `--truth` where it would fail and look like an M-Tato bug.
+never handed to `--truth` where it would fail and look like an Infinity-Win bug.
 
 ### `bench.json` as written by the CLI
 
@@ -460,7 +460,7 @@ Today the engine's `timeline` reports `rf_normalised: null` for live trees, so o
 simulated data path 2 is what produces the curve. If `bench` later scores live
 trees against truth, path 1 takes over automatically with no script change. Use
 `--rf-mode bench` to force the bench values, `internal` to force the recomputed
-ones, or `mtato` to have the CLI re-run `bench` first.
+ones, or `infinity` to have the CLI re-run `bench` first.
 
 ### Output files the scripts parse, and how leniently
 
@@ -486,20 +486,20 @@ python3 -m unittest discover -s scripts/tests -t scripts -v
 python3 -m compileall -q scripts          # every script must compile
 ```
 
-`scripts/tests/fixtures.py` writes an executable **fake `mtato`** that speaks the
+`scripts/tests/fixtures.py` writes an executable **fake `infinity`** that speaks the
 documented CLI contract and emits every output file, so the whole pipeline is
 tested end to end without the real binary. Environment variables steer it:
 
 | Variable | Effect |
 |---|---|
-| `FAKE_MTATO_FAIL=1` | exit non-zero after writing a partial folder |
-| `FAKE_MTATO_NO_RUN_JSON=1` | exit 0 without writing `run.json` |
-| `FAKE_MTATO_NO_TIMINGS=1` | null every timing |
-| `FAKE_MTATO_NO_PEAKMEM=1` | `peak_memory_bytes: null` |
-| `FAKE_MTATO_IGNORE_SWITCH=1` | accept the flags but echo default params |
-| `FAKE_MTATO_BENCH_FAIL=1` | `bench` exits non-zero, writes nothing |
-| `FAKE_MTATO_DIST_JSON=<path>` | take pairwise SNP counts from a JSON list |
-| `FAKE_MTATO_SLEEP=<float>` | make wall time visible |
+| `FAKE_INFINITY_FAIL=1` | exit non-zero after writing a partial folder |
+| `FAKE_INFINITY_NO_RUN_JSON=1` | exit 0 without writing `run.json` |
+| `FAKE_INFINITY_NO_TIMINGS=1` | null every timing |
+| `FAKE_INFINITY_NO_PEAKMEM=1` | `peak_memory_bytes: null` |
+| `FAKE_INFINITY_IGNORE_SWITCH=1` | accept the flags but echo default params |
+| `FAKE_INFINITY_BENCH_FAIL=1` | `bench` exits non-zero, writes nothing |
+| `FAKE_INFINITY_DIST_JSON=<path>` | take pairwise SNP counts from a JSON list |
+| `FAKE_INFINITY_SLEEP=<float>` | make wall time visible |
 
 Covered: the SKA2 parser (including the real 496-row table when present), the
 `events.jsonl` parser, the `run.json` reader, defensive table reading, Newick /
@@ -516,21 +516,21 @@ in `tempfile.mkdtemp()` directories under `/tmp` and removed afterwards.
 
 1. **Sequential runs.** Configurations run one at a time. Parallel runs would
    make wall time and peak memory meaningless.
-2. **Genome names must match** between M-Tato's output, the SKA2 table and any
-   truth tree, or the joins produce nothing. M-Tato uses the FASTA file stem; the
+2. **Genome names must match** between Infinity-Win's output, the SKA2 table and any
+   truth tree, or the joins produce nothing. Infinity-Win uses the FASTA file stem; the
    real datasets were built so those agree. `baselines.py compare` reports a
    zero-overlap join explicitly instead of printing an empty comparison.
 3. **Three taxa have no RF.** The Salmonella trio contributes distance accuracy
    and the acceptance check only.
 4. **The IQ-TREE tree is a reference, not ground truth** — a maximum-likelihood
-   tree from a SKA2 split-k-mer core alignment. M-Tato builds
+   tree from a SKA2 split-k-mer core alignment. Infinity-Win builds
    neighbour-joining trees, so exact agreement is not expected; the RF distance
    is reported as a number, not judged pass/fail. It also has **43 leaves while
    the dataset has 32 assemblies**: 11 reference/outgroup genomes (`GCF_*`) are
    in the tree but were not part of the cluster download. Comparisons are
    restricted to the shared leaves, and `real_datasets.py` records the exact
    mismatch in `dataset.json` under `truth.tree_leaf_check`.
-5. **SKA2 distances came from reads, M-Tato's from assemblies.** Small
+5. **SKA2 distances came from reads, Infinity-Win's from assemblies.** Small
    disagreements are expected and are reported per pair.
 6. **`s_aureus_cc` has no accuracy truth.** It tests clustering separation and
    shows where the block shortcut stops paying, nothing more.

@@ -7,11 +7,11 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use mtato_core::blocks::{block_ranges, hash_block};
-use mtato_core::engine::RunResults;
-use mtato_core::params::Parameters;
-use mtato_core::seq::{contig_anchors, Thresholds, LEVELS};
-use mtato_tests::{
+use infinity_core::blocks::{block_ranges, hash_block};
+use infinity_core::engine::RunResults;
+use infinity_core::params::Parameters;
+use infinity_core::seq::{contig_anchors, Thresholds, LEVELS};
+use infinity_tests::{
     diff_output_dirs, random_dna, reported_pairs, revcomp as revcomp_str, run_engine, with_snps,
     write_genomes, TempDir,
 };
@@ -77,7 +77,7 @@ fn property_1_reverse_complement_is_invisible() {
 
     // The same for block hashes, at every level.
     for level in 1..=LEVELS {
-        let pick = |anchors: &[mtato_core::seq::Anchor], s: &[u8]| -> HashSet<u64> {
+        let pick = |anchors: &[infinity_core::seq::Anchor], s: &[u8]| -> HashSet<u64> {
             let pos: Vec<u64> = anchors
                 .iter()
                 .filter(|a| a.level <= level as u8)
@@ -240,7 +240,7 @@ fn property_3_one_snp_gives_exactly_one_snp_at_the_right_place() {
         cmp.variants
     );
     let v = &cmp.variants[0];
-    assert_eq!(v.kind, mtato_core::variant::VariantKind::Snp);
+    assert_eq!(v.kind, infinity_core::variant::VariantKind::Snp);
     // The reference is the pivot ("aaa_ref"), so the pivot coordinate is the
     // position the SNP was introduced at.
     assert_eq!(v.pivot_start as usize, pos, "wrong position");
@@ -265,7 +265,7 @@ fn property_3b_several_snps_are_all_found_at_their_positions() {
     let snps: Vec<(u64, char, char)> = cmp
         .variants
         .iter()
-        .filter(|v| v.kind == mtato_core::variant::VariantKind::Snp)
+        .filter(|v| v.kind == infinity_core::variant::VariantKind::Snp)
         .map(|v| {
             (
                 v.pivot_start,
@@ -410,8 +410,8 @@ fn variants_and_distances(paths: &[PathBuf], params: &Parameters) -> (String, St
 
 /// A canonical, order-independent signature of a tree's topology: its leaf set
 /// plus its bipartitions, after collapsing branches shorter than half a SNP.
-fn split_signature(t: &mtato_core::tree::Tree) -> String {
-    let collapsed = mtato_core::tree::collapse_short(t.clone(), 0.5);
+fn split_signature(t: &infinity_core::tree::Tree) -> String {
+    let collapsed = infinity_core::tree::collapse_short(t.clone(), 0.5);
     let mut names = collapsed.leaf_names();
     names.sort();
     let index: std::collections::HashMap<String, usize> = names
@@ -419,7 +419,7 @@ fn split_signature(t: &mtato_core::tree::Tree) -> String {
         .enumerate()
         .map(|(i, n)| (n.clone(), i))
         .collect();
-    let mut sp: Vec<String> = mtato_core::tree::splits(&collapsed, &index)
+    let mut sp: Vec<String> = infinity_core::tree::splits(&collapsed, &index)
         .iter()
         .map(|s| {
             s.iter()

@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/mtato-core",
-    "crates/mtato-sim",
-    "crates/mtato-cli",
-    "crates/mtato-gui",
+    "crates/infinity-core",
+    "crates/infinity-sim",
+    "crates/infinity-cli",
+    "crates/infinity-gui",
     "tests",
 ]
 
@@ -13,12 +13,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.77"
 license = "MIT"
-authors = ["M-Tato contributors"]
+authors = ["Infinity-Win contributors"]
 description = "Progressive, cluster-first, position-aware comparison of nearly identical genomes"
 
 [workspace.dependencies]
-mtato-core = { path = "crates/mtato-core" }
-mtato-sim = { path = "crates/mtato-sim" }
+infinity-core = { path = "crates/infinity-core" }
+infinity-sim = { path = "crates/infinity-sim" }
 clap = { version = "4.5", features = ["derive"] }
 crossbeam-channel = "0.5"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

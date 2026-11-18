@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Synthetic fixtures for testing the M-Tato benchmark scripts.
+"""Synthetic fixtures for testing the Infinity-Win benchmark scripts.
 
-The real ``mtato`` binary does not exist yet, so these fixtures build everything
+The real ``infinity`` binary does not exist yet, so these fixtures build everything
 the scripts consume -- a tiny dataset, a truth tree, ``run.json``,
-``events.jsonl``, ``cluster_*.dist.tsv`` -- plus a **fake ``mtato`` executable**
+``events.jsonl``, ``cluster_*.dist.tsv`` -- plus a **fake ``infinity`` executable**
 that speaks the documented CLI contract. That makes it possible to test
 ``run_matrix.py``, ``accuracy_over_time.py``, ``baselines.py`` and
 ``make_report.py`` end to end, including their failure paths, before the Rust
@@ -64,9 +64,9 @@ def write_simulator_truth(
     clusters: int = 2,
     distances: Optional[Sequence[Tuple[str, str, float]]] = None,
 ) -> Dict[str, Any]:
-    """A truth folder in the layout ``mtato simulate`` writes and ``bench`` reads.
+    """A truth folder in the layout ``infinity simulate`` writes and ``bench`` reads.
 
-    ``mtato bench --truth`` requires ``tree_*.nwk`` plus ``pairwise_snps.tsv`` and
+    ``infinity bench --truth`` requires ``tree_*.nwk`` plus ``pairwise_snps.tsv`` and
     ``clusters.tsv``. The per-cluster truth trees are built with the same split
     the fake engine uses (first half / second half), so a correct fake run scores
     RF 0 and a wrong one does not.
@@ -148,8 +148,8 @@ def write_dataset(
             dist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             truth["distances"] = {"format": "ska2", "path": str(dist_path), "rows": len(truth_distances)}
         if simulator_truth:
-            # Also lay the folder out the way `mtato simulate` does, so the real
-            # `mtato bench --truth` (and the fake one) can consume it.
+            # Also lay the folder out the way `infinity simulate` does, so the real
+            # `infinity bench --truth` (and the fake one) can consume it.
             meta = write_simulator_truth(
                 truth_dir,
                 names,
@@ -445,7 +445,7 @@ def write_output_folder(
     comparable_bp: int = 2048,
     only_listed_pairs: bool = False,
 ) -> Path:
-    """A complete-looking ``mtato run`` output folder."""
+    """A complete-looking ``infinity run`` output folder."""
     outdir.mkdir(parents=True, exist_ok=True)
     items = list(names)
     tree = tree or balanced_tree(items)
@@ -481,7 +481,7 @@ def write_output_folder(
                     if key in dist_index:
                         snps = dist_index[key]
                     elif only_listed_pairs:
-                        # A pair M-Tato never reported must stay absent, so an
+                        # A pair Infinity-Win never reported must stay absent, so an
                         # acceptance check can see it as "not measured".
                         continue
                     else:
@@ -526,25 +526,25 @@ def write_ska2_table(path: Path, rows: Sequence[Tuple[str, str, float]], *,
 
 
 # ---------------------------------------------------------------------------
-# The fake mtato executable
+# The fake infinity executable
 # ---------------------------------------------------------------------------
 
-FAKE_MTATO_TEMPLATE = r'''#!/usr/bin/env python3
-"""Fake `mtato` used only by the benchmark-script tests. Not part of the product.
+FAKE_INFINITY_TEMPLATE = r'''#!/usr/bin/env python3
+"""Fake `infinity` used only by the benchmark-script tests. Not part of the product.
 
 Speaks the CLI contract from PROJECT.md section 9 and writes the documented
 output files. Behaviour is steered with environment variables so the failure
 paths of the benchmark scripts can be exercised:
 
-  FAKE_MTATO_FAIL=1          exit non-zero after writing a partial folder
-  FAKE_MTATO_NO_RUN_JSON=1   exit 0 without writing run.json
-  FAKE_MTATO_NO_TIMINGS=1    write run.json with null timings
-  FAKE_MTATO_NO_PEAKMEM=1    write run.json with peak_memory_bytes = null
-  FAKE_MTATO_IGNORE_SWITCH=1 accept the switch flags but echo default params
-  FAKE_MTATO_BENCH_FAIL=1    `bench` exits non-zero and writes nothing
-  FAKE_MTATO_DIST_JSON=<p>   take the pairwise SNP counts from a JSON list of
+  FAKE_INFINITY_FAIL=1          exit non-zero after writing a partial folder
+  FAKE_INFINITY_NO_RUN_JSON=1   exit 0 without writing run.json
+  FAKE_INFINITY_NO_TIMINGS=1    write run.json with null timings
+  FAKE_INFINITY_NO_PEAKMEM=1    write run.json with peak_memory_bytes = null
+  FAKE_INFINITY_IGNORE_SWITCH=1 accept the switch flags but echo default params
+  FAKE_INFINITY_BENCH_FAIL=1    `bench` exits non-zero and writes nothing
+  FAKE_INFINITY_DIST_JSON=<p>   take the pairwise SNP counts from a JSON list of
                              [genome_a, genome_b, snps] triples
-  FAKE_MTATO_SLEEP=<float>   sleep this many seconds (to make wall time visible)
+  FAKE_INFINITY_SLEEP=<float>   sleep this many seconds (to make wall time visible)
 """
 import json
 import os
@@ -610,19 +610,19 @@ def cmd_run(argv):
             inputs.append(token)
         i += 1
     if outdir is None:
-        print("fake mtato run: -o <outdir> is required", file=sys.stderr)
+        print("fake infinity run: -o <outdir> is required", file=sys.stderr)
         return 2
-    time.sleep(float(os.environ.get("FAKE_MTATO_SLEEP", "0.02")))
+    time.sleep(float(os.environ.get("FAKE_INFINITY_SLEEP", "0.02")))
     names = collect_inputs(inputs)
     if not names:
-        print(f"fake mtato run: no genomes found in {{inputs}}", file=sys.stderr)
+        print(f"fake infinity run: no genomes found in {{inputs}}", file=sys.stderr)
         return 3
     clusters = 1 if params.get("single_cluster") else (2 if len(names) > 3 else 1)
-    if env_flag("FAKE_MTATO_IGNORE_SWITCH"):
+    if env_flag("FAKE_INFINITY_IGNORE_SWITCH"):
         params = {{}}
-    # FAKE_MTATO_DIST_JSON lets a test dictate the exact pairwise SNP counts the
+    # FAKE_INFINITY_DIST_JSON lets a test dictate the exact pairwise SNP counts the
     # fake reports, so acceptance checks against published values can be tested.
-    dist_json = os.environ.get("FAKE_MTATO_DIST_JSON")
+    dist_json = os.environ.get("FAKE_INFINITY_DIST_JSON")
     if dist_json:
         raw = json.loads(Path(dist_json).read_text())
         distances = [(r[0], r[1], float(r[2])) for r in raw]
@@ -632,10 +632,10 @@ def cmd_run(argv):
     per = max(1, (len(names) + clusters - 1) // clusters)
     groups = [g for g in (names[i2 * per:(i2 + 1) * per] for i2 in range(clusters)) if g]
     cluster_trees = [fixtures.balanced_tree(g) for g in groups]
-    if env_flag("FAKE_MTATO_FAIL"):
+    if env_flag("FAKE_INFINITY_FAIL"):
         outdir.mkdir(parents=True, exist_ok=True)
         (outdir / "tree.nwk").write_text(tree + "\n")
-        print("fake mtato: simulated crash", file=sys.stderr)
+        print("fake infinity: simulated crash", file=sys.stderr)
         return 17
     fixtures.write_output_folder(
         outdir,
@@ -645,16 +645,16 @@ def cmd_run(argv):
         cluster_trees=cluster_trees,
         distances=distances,
         only_listed_pairs=bool(dist_json),
-        write_run_json=not env_flag("FAKE_MTATO_NO_RUN_JSON"),
+        write_run_json=not env_flag("FAKE_INFINITY_NO_RUN_JSON"),
     )
     run_json_path = outdir / "run.json"
     if run_json_path.exists():
         doc = json.loads(run_json_path.read_text())
         doc["params"].update(params)
-        if env_flag("FAKE_MTATO_NO_TIMINGS"):
+        if env_flag("FAKE_INFINITY_NO_TIMINGS"):
             for key in list(doc["timings"]):
                 doc["timings"][key] = None
-        if env_flag("FAKE_MTATO_NO_PEAKMEM"):
+        if env_flag("FAKE_INFINITY_NO_PEAKMEM"):
             doc["peak_memory_bytes"] = None
         run_json_path.write_text(json.dumps(doc, indent=2))
     return 0
@@ -663,7 +663,7 @@ def cmd_run(argv):
 def cmd_bench(argv):
     """Mimics the real interface and the real bench.json schema.
 
-    Real CLI:   mtato bench --output <dir> --truth <truth dir> [-j <json>]
+    Real CLI:   infinity bench --output <dir> --truth <truth dir> [-j <json>]
                             [--collapse-below F] [--quiet]
     Real JSON:  {{output, truth, run, distance, clusters, trees, timeline, problems}}
     """
@@ -691,8 +691,8 @@ def cmd_bench(argv):
         elif outdir is None:
             outdir = Path(token)
         i += 1
-    if env_flag("FAKE_MTATO_BENCH_FAIL"):
-        print("fake mtato bench: simulated failure", file=sys.stderr)
+    if env_flag("FAKE_INFINITY_BENCH_FAIL"):
+        print("fake infinity bench: simulated failure", file=sys.stderr)
         return 19
     if outdir is None or not outdir.is_dir():
         print(f"error: --output must be an existing output folder (got {{outdir}})", file=sys.stderr)
@@ -865,13 +865,13 @@ def main():
         print(__doc__)
         return 2
     if argv[0] in ("--version", "-V"):
-        print("mtato 0.0.0-fake")
+        print("infinity 0.0.0-fake")
         return 0
     if argv[0] == "run":
         return cmd_run(argv[1:])
     if argv[0] == "bench":
         return cmd_bench(argv[1:])
-    print(f"fake mtato: unknown subcommand {{argv[0]}}", file=sys.stderr)
+    print(f"fake infinity: unknown subcommand {{argv[0]}}", file=sys.stderr)
     return 2
 
 
@@ -880,10 +880,10 @@ if __name__ == "__main__":
 '''
 
 
-def write_fake_mtato(dest: Path, scripts_dir: Path = SCRIPTS_DIR) -> Path:
-    """Write an executable fake ``mtato`` and return its path."""
+def write_fake_infinity(dest: Path, scripts_dir: Path = SCRIPTS_DIR) -> Path:
+    """Write an executable fake ``infinity`` and return its path."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    source = FAKE_MTATO_TEMPLATE.replace(
+    source = FAKE_INFINITY_TEMPLATE.replace(
         "__r__{scripts_dir!r}__r__", repr(str(scripts_dir))
     ).replace("{{", "{").replace("}}", "}")
     dest.write_text(source, encoding="utf-8")
