@@ -286,8 +286,10 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_tolerate_missing_fields() {
-        let mut s = ResolutionSettings::default();
-        s.resolution = Resolution::Blocks;
+        let mut s = ResolutionSettings {
+            resolution: Resolution::Blocks,
+            ..Default::default()
+        };
         s.snp_filter.core_only = false;
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("\"blocks\""), "{j}");

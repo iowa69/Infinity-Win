@@ -373,6 +373,9 @@ struct Builder<'o> {
 }
 
 impl<'o> Builder<'o> {
+    // The recursion carries the region and cluster context down the tree; a
+    // struct for it would only move the same eight values elsewhere.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         &mut self,
         node: &DisplayNode,

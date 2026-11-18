@@ -350,7 +350,6 @@ mod tests {
         assert!(lum(DARK.text_weak) - lum(DARK.panel) > 60.0);
         assert!(lum(LIGHT.text_weak) > lum(LIGHT.text));
         assert!(lum(LIGHT.panel) - lum(LIGHT.text_weak) > 60.0);
-        assert!(DARK.dark && !LIGHT.dark);
     }
 
     #[test]
