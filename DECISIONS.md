@@ -259,6 +259,20 @@ threshold ever starts passing, so this entry cannot go stale unnoticed. Note the
 real assemblies used for validation (57-66 contigs over 5.1 Mb, N50 ≈ 0.4 Mb) sit
 in the regime where the effect is small: about 0.8% of the pivot uncovered.
 
+**Orientation was checked separately.** Section 10.3 T3 says "shuffled *and
+flipped*", and the simulator keeps orientation as its own switch
+(`random_orientation`, default off) so that a plain fragmented run is not silently
+half-reversed. Measured at 100 contigs over 2 Mb with 50 leaves, shuffled only
+versus shuffled and flipped: sum ratio 0.9344 vs 0.9360, breakpoints 4609 in both,
+mean uncovered 73,123 vs 73,531 bp, tree RF normalised 0.0562 in both. Flipping
+therefore costs nothing measurable, which is the expected result given that block
+hashes are strand-independent by construction (6.3) and is independently asserted
+by properties 1, 2b and 2c. At 20 contigs flipping does introduce exactly one
+over-reported SNP across 435 pairs, where shuffling alone introduces none — so the
+small residual over-reporting attaches to reverse-complemented contigs rather than
+to fragmentation as such. Both T3 tests now set `random_orientation: true` to match
+the wording of the outline.
+
 ---
 
 ## D14. Test T4's "99% of pairs exact" is not met; the maximum error is 1

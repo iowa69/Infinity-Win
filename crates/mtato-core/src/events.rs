@@ -146,7 +146,13 @@ pub enum Event {
     Warning {
         text: String,
     },
-    Finished(RunSummary),
+    /// Boxed because [`RunSummary`] is by far the largest payload here
+    /// (440 bytes, against 112 for the next largest, `Counters`). Without the
+    /// box every event moved through the channel and every `Envelope` cloned
+    /// by a consumer would carry that much inline. Boxing is transparent to
+    /// serde, so `events.jsonl` is unchanged — the same reasoning that already
+    /// boxes `MapUpdate`.
+    Finished(Box<RunSummary>),
 }
 
 /// Consumer to engine (section 7).
@@ -419,7 +425,10 @@ mod tests {
                 elapsed_ms: 3,
             },
             Event::Warning { text: "w".into() },
-            Event::Finished(RunSummary::new("t", crate::params::Parameters::default())),
+            Event::Finished(Box::new(RunSummary::new(
+                "t",
+                crate::params::Parameters::default(),
+            ))),
         ];
         for e in &events {
             let env = Envelope {

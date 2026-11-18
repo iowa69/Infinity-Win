@@ -356,6 +356,15 @@ def tree_points(
                 "cluster": None if cluster_id is None else str(cluster_id),
                 "focus": focus if isinstance(focus, int) else None,
                 "tree": tree,
+                # Snapshot of every cluster tree emitted so far, as Newick text.
+                # Scoring against a per-cluster truth (what `mtato simulate`
+                # writes) needs the individual cluster trees, not just the
+                # assembled full tree.
+                "cluster_newicks": {
+                    cid: state.latest_newick
+                    for cid, state in clusters.items()
+                    if state.latest_newick
+                },
                 "notes": notes,
             }
         )
@@ -382,7 +391,7 @@ def score_internal(
                 "dataset": dataset,
                 "config": config,
                 **{k: point[k] for k in ("t_ms", "seq", "event", "cluster", "focus")},
-                "rf_source": "internal",
+                "rf_source": "internal RF",
                 "rf": result.rf,
                 "rf_normalized": result.rf_normalized,
                 "leaves_run": result.leaves_a,
@@ -396,6 +405,130 @@ def score_internal(
             }
         )
     return rows
+
+
+def load_truth_trees(truth_dir: Path) -> Tuple[List[Tuple[str, common.NewickNode]], List[str]]:
+    """Parse the per-cluster truth trees of a ``mtato simulate`` truth folder.
+
+    The simulator writes one truth tree per cluster (``tree_c00.nwk``,
+    ``tree_c01.nwk``, ...) in SNP units and **no** single full truth tree. The
+    engine's own ``bench`` scores each emitted cluster tree against its matching
+    truth tree, so this script does the same: comparing an assembled full tree
+    against a made-up join of the per-cluster truths would invent inter-cluster
+    splits that no truth file ever claimed.
+    """
+    problems: List[str] = []
+    trees: List[Tuple[str, common.NewickNode]] = []
+    if not truth_dir or not Path(truth_dir).is_dir():
+        return trees, [f"no truth folder at {truth_dir}"]
+    paths = sorted(Path(truth_dir).glob("tree_*.nwk"))
+    if not paths:
+        return trees, [f"no tree_*.nwk truth trees in {truth_dir}"]
+    for path in paths:
+        try:
+            trees.append((path.stem, common.read_newick_file(path)))
+        except common.PrereqError as exc:
+            problems.append(str(exc))
+    return trees, problems
+
+
+def match_truth_tree(
+    leaves: set, truth_trees: Sequence[Tuple[str, common.NewickNode]]
+) -> Tuple[Optional[str], Optional[common.NewickNode], int]:
+    """The truth tree sharing the most leaves with ``leaves``."""
+    best_name = None
+    best_tree = None
+    best_overlap = 0
+    for name, tree in truth_trees:
+        overlap = len(leaves & set(tree.leaf_names()))
+        if overlap > best_overlap:
+            best_name, best_tree, best_overlap = name, tree, overlap
+    return best_name, best_tree, best_overlap
+
+
+def score_internal_per_cluster(
+    points: List[Dict[str, Any]],
+    truth_trees: Sequence[Tuple[str, common.NewickNode]],
+    collapse: float,
+    dataset: str,
+    config: str,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Aggregate RF over the clusters emitted so far, at each instant.
+
+    Mirrors what ``mtato bench`` reports in ``trees[]`` (one RF per cluster
+    against that cluster's truth tree), but evaluated at *every* point of the
+    event stream so the curve shows the picture sharpening. ``rf`` is the sum
+    over clusters and ``rf_normalized`` their mean, both labelled as such in the
+    CSV's ``note`` column.
+    """
+    rows: List[Dict[str, Any]] = []
+    problems: List[str] = []
+    for point in points:
+        newicks = point.get("cluster_newicks") or {}
+        rf_sum = 0
+        norms: List[float] = []
+        leaves_shared = 0
+        splits_run = 0
+        splits_truth = 0
+        scored = 0
+        unscored: List[str] = []
+        for cid in sorted(newicks):
+            try:
+                tree = common.parse_newick(newicks[cid])
+            except common.PrereqError as exc:
+                unscored.append(f"cluster {cid}: unparsable ({exc})")
+                continue
+            leaves = set(tree.leaf_names())
+            name, truth, overlap = match_truth_tree(leaves, truth_trees)
+            if truth is None or overlap < 4:
+                unscored.append(
+                    f"cluster {cid}: only {overlap} shared leaves with the closest "
+                    f"truth tree ({name}); RF needs at least 4"
+                )
+                continue
+            result = common.rf_distance(tree, truth, collapse=collapse)
+            if not result.ok:
+                unscored.append(f"cluster {cid}: {result.problems[0] if result.problems else 'RF undefined'}")
+                continue
+            scored += 1
+            rf_sum += result.rf or 0
+            if result.rf_normalized is not None:
+                norms.append(result.rf_normalized)
+            leaves_shared += result.leaves_shared or 0
+            splits_run += result.splits_a or 0
+            splits_truth += result.splits_b or 0
+        notes = list(point.get("notes") or [])
+        notes.append(
+            f"rf is the sum over {scored} cluster tree(s) and rf_normalized their mean"
+        )
+        if point.get("event") == "backbone_tree" and not newicks:
+            notes.append("backbone only: no cluster resolved yet, so accuracy is undefined")
+        for item in dict.fromkeys(unscored):
+            notes.append(item)
+        rows.append(
+            {
+                "dataset": dataset,
+                "config": config,
+                **{k: point[k] for k in ("t_ms", "seq", "event", "cluster", "focus")},
+                "rf_source": "internal RF (per cluster)",
+                "rf": rf_sum if scored else None,
+                "rf_normalized": (sum(norms) / len(norms)) if norms else None,
+                "leaves_run": None,
+                "leaves_truth": None,
+                "leaves_shared": leaves_shared if scored else None,
+                "splits_run": splits_run if scored else None,
+                "splits_truth": splits_truth if scored else None,
+                "splits_shared": None,
+                "collapse_threshold": collapse or None,
+                "note": "; ".join(notes),
+            }
+        )
+    if not any(r["rf"] is not None for r in rows):
+        problems.append(
+            "no cluster tree could be scored against the per-cluster truth trees; "
+            "check that genome names match between the run and truth/tree_*.nwk"
+        )
+    return rows, problems
 
 
 def score_with_mtato(
@@ -726,67 +859,127 @@ def analyse_run_dir(
     }
 
     # --- rows -----------------------------------------------------------
-    # Precedence: an existing bench.json timeline (the engine's own RF), then the
-    # engine run on demand (--rf-mode mtato / auto with a simulator truth folder),
-    # then the pure-Python RF against a single full truth tree.
+    # Which RF source gives the best accuracy-over-time curve:
+    #
+    #   an explicit --rf-mode   that mode, and nothing else
+    #   auto                    1. a bench.json series that has RF at more than
+    #                               one instant - the engine's own numbers
+    #                            2. RF recomputed here at every emitted tree,
+    #                               against per-cluster truth (simulated data) or
+    #                               one reference tree (real data). Today this is
+    #                               the only source with real time resolution: the
+    #                               engine scores its live trees against nothing,
+    #                               and its final per-cluster trees all share one
+    #                               timestamp.
+    #                            3. the bench.json series anyway, labelled,
+    #                               because one point beats none
     rows: List[Dict[str, Any]] = []
-    source = None
-    if rf_mode in ("bench",) or (rf_mode == "auto" and bench_rows):
-        rows, source = bench_rows, "bench.json"
-    if not rows and rf_mode in ("auto", "mtato"):
-        binary = mtato or common.resolve_binary(None, required=False)
-        if truth_dir and common.is_simulator_truth_dir(Path(truth_dir)):
-            if binary is None:
-                raise common.PrereqError(
-                    "--rf-mode mtato needs the mtato binary; none was found. "
-                    "Use --rf-mode internal (pure Python RF) or --rf-from <bench.json>."
-                )
-            rows, problems = score_with_mtato(
-                run_dir, Path(truth_dir), Path(binary), collapse_snps, dataset, config
-            )
-            result["problems"].extend(problems)
-            result["bench_json"] = str(run_dir / "bench.json")
-            if rows:
-                source = "mtato bench"
-        elif rf_mode == "mtato":
-            raise common.PrereqError(
-                "--rf-mode mtato needs a `mtato simulate` truth folder; "
-                f"got {truth_dir or 'nothing'}. Pass --truth-dir <truth folder>, or use "
-                "--rf-mode internal with --truth-tree <newick>."
-            )
-    if not rows and rf_mode in ("auto", "internal", "mtato"):
+    source: Optional[str] = None
+
+    def defined_instants(series: Sequence[Dict[str, Any]]) -> int:
+        return len(
+            {
+                round(float(r["t_ms"]), 6)
+                for r in series
+                if r.get("rf_normalized") is not None and r.get("t_ms") is not None
+            }
+        )
+
+    # --- internal (pure Python) RF, computed once and then selected ------
+    internal_rows: List[Dict[str, Any]] = []
+    internal_source: Optional[str] = None
+    cluster_threshold = threshold
+    if rf_mode in ("auto", "internal"):
         points, problems = tree_points(log, max_points=max_points)
         result["problems"].extend(problems)
-        if truth_node is None:
-            if rf_mode == "internal":
-                result["status"] = "failed"
-                result["problems"].append(
-                    "cannot compute RF internally without a truth tree (--truth-tree)"
-                )
-                return result
-            result["problems"].append(
-                "no truth tree and no bench timeline, so no RF could be computed for "
-                "this run (pass --truth-tree <newick>, or --truth-dir <simulator truth "
-                "folder> so `mtato bench` can score it)"
+        # Simulated truth is a set of per-cluster trees in SNP units; real truth
+        # is one reference tree in substitutions per site. Which one exists
+        # decides how RF is computed and what "half a SNP" means.
+        per_cluster_truth: List[Tuple[str, common.NewickNode]] = []
+        if truth_dir and common.is_simulator_truth_dir(Path(truth_dir)):
+            per_cluster_truth, tc_problems = load_truth_trees(Path(truth_dir))
+            result["problems"].extend(tc_problems)
+        if per_cluster_truth:
+            cluster_threshold, cluster_why = common.guess_collapse_threshold(
+                per_cluster_truth[0][1],
+                collapse_snps=collapse_snps,
+                comparable_bp=None,
+                mode=collapse_mode,
+                explicit_length=collapse_length,
             )
-        elif not points:
-            result["problems"].append("no tree-emitting events were found in the stream")
+            result["collapse"]["per_cluster_threshold"] = cluster_threshold
+            result["collapse"]["per_cluster_explanation"] = cluster_why
+        internal_reason: Optional[str] = None
+        if not points:
+            internal_reason = "no tree-emitting events were found in the stream"
+        elif per_cluster_truth:
+            internal_rows, problems = score_internal_per_cluster(
+                points, per_cluster_truth, cluster_threshold, dataset, config
+            )
+            result["problems"].extend(problems)
+            internal_source = "internal RF (per cluster)"
+        elif truth_node is not None:
+            internal_rows = score_internal(points, truth_node, threshold, dataset, config)
+            internal_source = "internal RF"
         else:
-            rows = score_internal(points, truth_node, threshold, dataset, config)
-            source = "internal RF"
-            if truth_dir and common.is_simulator_truth_dir(Path(truth_dir)):
-                result["problems"].append(
-                    "the truth for this dataset is a set of per-cluster simulator trees "
-                    "(tree_*.nwk), not one full tree; the internal RF below compares the "
-                    "assembled full tree against --truth-tree, while `mtato bench` "
-                    "scores each cluster separately. Use --rf-mode mtato (or bench) for "
-                    "the engine's own per-cluster numbers."
-                )
-    if bench_rows and rows and source != "bench.json":
-        result["problems"].append(
-            "both a bench.json RF timeline and another RF source were available; "
-            f"{source} was used (choose with --rf-mode)"
+            internal_reason = (
+                "no truth tree (--truth-tree) and no simulator truth folder "
+                "(--truth-dir), so RF cannot be recomputed here"
+            )
+        if internal_reason:
+            result["problems"].append(internal_reason)
+
+    if rf_mode == "bench":
+        rows, source = bench_rows, "bench.json"
+    elif rf_mode == "mtato":
+        binary = mtato or common.resolve_binary(None, required=False)
+        if binary is None:
+            raise common.PrereqError(
+                "--rf-mode mtato needs the mtato binary; none was found. "
+                "Use --rf-mode internal (pure Python RF) or --rf-from <bench.json>."
+            )
+        if not (truth_dir and common.is_simulator_truth_dir(Path(truth_dir))):
+            raise common.PrereqError(
+                "--rf-mode mtato needs a `mtato simulate` truth folder; got "
+                f"{truth_dir or 'nothing'}. Pass --truth-dir <truth folder>, or use "
+                "--rf-mode internal with --truth-tree <newick>."
+            )
+        rows, problems = score_with_mtato(
+            run_dir, Path(truth_dir), Path(binary), collapse_snps, dataset, config
         )
+        result["problems"].extend(problems)
+        result["bench_json"] = str(run_dir / "bench.json")
+        source = "mtato bench" if rows else None
+    elif rf_mode == "internal":
+        rows, source = internal_rows, internal_source
+    else:  # auto
+        instants = defined_instants(bench_rows)
+        if bench_rows and instants >= 2:
+            rows, source = bench_rows, "bench.json"
+            if internal_rows:
+                result["problems"].append(
+                    f"RF was also recomputed here ({len(internal_rows)} points); the "
+                    "engine's own bench values were preferred because they cover "
+                    f"{instants} distinct instants. Use --rf-mode internal for the "
+                    "recomputed curve."
+                )
+        elif internal_rows:
+            rows, source = internal_rows, internal_source
+            if bench_rows:
+                result["problems"].append(
+                    f"the bench.json RF series has {len(bench_rows)} entries but only "
+                    f"{instants} distinct timestamp(s) with a defined normalised RF, "
+                    "which cannot show accuracy growing over time; RF was recomputed "
+                    "here from the emitted Newick instead. Use --rf-mode bench to "
+                    "force the bench values."
+                )
+        elif bench_rows:
+            rows, source = bench_rows, "bench.json"
+            result["problems"].append(
+                f"only the bench.json series was available and it has {instants} "
+                "distinct timestamp(s) with a defined normalised RF, so this curve has "
+                "little or no time resolution"
+            )
 
     result["points"] = len(rows)
     result["rf_source"] = source
@@ -794,8 +987,12 @@ def analyse_run_dir(
     write_rows(csv_path, rows)
     result["csv"] = str(csv_path)
     result["rows"] = rows
-    result["status"] = "ok" if rows else "empty"
-    if not rows:
+    if rows:
+        result["status"] = "ok"
+    else:
+        # An explicitly requested RF source that produced nothing is a failure;
+        # `auto` producing nothing is an empty result with the reasons recorded.
+        result["status"] = "failed" if rf_mode in ("bench", "internal", "mtato") else "empty"
         result["problems"].append(
             "no accuracy points could be produced; the CSV was written with a header only"
         )

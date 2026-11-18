@@ -8,3 +8,5 @@ Cargo.lock.bak
 # benchmark scratch space (regenerable, large)
 /bench-work/
 /out/
+__pycache__/
+*.pyc

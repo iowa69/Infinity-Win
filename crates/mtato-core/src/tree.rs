@@ -452,11 +452,10 @@ fn get(d: &[Vec<f64>], i: usize, j: usize) -> f64 {
 }
 
 fn set(d: &mut [Vec<f64>], i: usize, j: usize, v: f64) {
-    if i < d.len() {
-        if j < d[i].len() {
+    if i < d.len()
+        && j < d[i].len() {
             d[i][j] = v;
         }
-    }
     if j < d.len() && i < d[j].len() {
         d[j][i] = v;
     }
@@ -488,7 +487,7 @@ pub fn midpoint_root(t: Tree) -> Tree {
     if leaves <= 1 {
         return t;
     }
-    let (names, adj) = to_graph(&t);
+    let Graph { names, adj } = to_graph(&t);
     let leaf_idx: Vec<usize> = (0..names.len()).filter(|&i| adj[i].len() == 1).collect();
     if leaf_idx.len() < 2 {
         return t;
@@ -555,13 +554,22 @@ fn remove_edge(adj: &mut [Vec<(usize, f64)>], u: usize, v: usize) {
     }
 }
 
-/// Flatten a tree into an undirected graph: node names (leaves only) plus
-/// adjacency lists of `(neighbour, edge length)`.
-fn to_graph(t: &Tree) -> (Vec<Option<String>>, Vec<Vec<(usize, f64)>>) {
-    let mut names: Vec<Option<String>> = Vec::new();
-    let mut adj: Vec<Vec<(usize, f64)>> = Vec::new();
-    build_graph(t, &mut names, &mut adj);
-    (names, adj)
+/// A tree flattened into an undirected graph: node names, plus adjacency lists
+/// of `(neighbour, edge length)`. Only leaves are named; internal nodes carry
+/// `None`.
+struct Graph {
+    names: Vec<Option<String>>,
+    adj: Vec<Vec<(usize, f64)>>,
+}
+
+/// Flatten a tree into an undirected graph (see [`Graph`]).
+fn to_graph(t: &Tree) -> Graph {
+    let mut g = Graph {
+        names: Vec::new(),
+        adj: Vec::new(),
+    };
+    build_graph(t, &mut g.names, &mut g.adj);
+    g
 }
 
 fn build_graph(
@@ -988,11 +996,11 @@ mod tests {
 
     #[test]
     fn nj_handles_one_and_two_taxa() {
-        let one = neighbor_joining(&["a".to_string()], &vec![vec![0.0]]);
+        let one = neighbor_joining(&["a".to_string()], &[vec![0.0]]);
         assert_eq!(one.leaf_count(), 1);
         let two = neighbor_joining(
             &["a".to_string(), "b".to_string()],
-            &vec![vec![0.0, 4.0], vec![4.0, 0.0]],
+            &[vec![0.0, 4.0], vec![4.0, 0.0]],
         );
         assert_eq!(two.leaf_count(), 2);
         assert!((two.total_length() - 4.0).abs() < 1e-9);
@@ -1061,7 +1069,7 @@ mod tests {
 
     /// Leaf-to-leaf distances of a tree, for the tests above.
     fn pairwise(t: &Tree, names: &[String]) -> Vec<Vec<f64>> {
-        let (ns, adj) = to_graph(t);
+        let Graph { names: ns, adj } = to_graph(t);
         let mut idx = HashMap::new();
         for (i, n) in names.iter().enumerate() {
             // find node with this name

@@ -368,10 +368,12 @@ mod tests {
 
     #[test]
     fn scan_produces_sorted_deduped_sketch() {
-        let mut p = Parameters::default();
-        p.k = 21;
-        p.densities = [64, 16, 4];
-        p.sketch_level = 2;
+        let p = Parameters {
+            k: 21,
+            densities: [64, 16, 4],
+            sketch_level: 2,
+            ..Default::default()
+        };
         let seq: Vec<u8> = (0..5000u32).map(|i| b"ACGT"[(i % 4) as usize]).collect();
         let g = genome(&[&seq]);
         let scan = scan_data(&g, &p);
@@ -403,9 +405,11 @@ mod tests {
     fn separator_blocks_cross_contig_anchors() {
         // A k-mer spanning the separator must contain an N and be skipped, so
         // no anchor may sit within k bases of a contig junction on both sides.
-        let mut p = Parameters::default();
-        p.k = 5;
-        p.densities = [4, 2, 1];
+        let p = Parameters {
+            k: 5,
+            densities: [4, 2, 1],
+            ..Default::default()
+        };
         let g = genome(&[b"AAAAAAAAAA", b"CCCCCCCCCC"]);
         let (buf, _idx) = concat_with_index(&g);
         let mut hits = 0;

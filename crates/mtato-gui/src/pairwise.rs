@@ -155,25 +155,72 @@ pub fn in_any(merged: &[Iv], pos: u64) -> bool {
     i > 0 && pos < merged[i - 1].1
 }
 
+/// One member's contribution to a pairwise comparison, precomputed so that
+/// comparing every pair of a cluster is quadratic in *pairs*, not in variants.
+#[derive(Debug, Clone, Default)]
+pub struct MemberProfile {
+    pub id: u32,
+    /// SNP alt bases by flat pivot position.
+    pub snps: HashMap<u64, u8>,
+    /// Sorted, de-duplicated indel keys in flat pivot coordinates.
+    pub indels: Vec<IndelKey>,
+    /// Merged pivot intervals this member does not cover.
+    pub uncovered: Vec<Iv>,
+    pub pivot_len: u64,
+}
+
+/// Reduce one member's map data to a [`MemberProfile`].
+pub fn profile(m: &MapUpdateInfo, id: u32) -> MemberProfile {
+    MemberProfile {
+        id,
+        snps: snp_map(m),
+        indels: indel_keys(m),
+        uncovered: merge(m.uncovered.clone()),
+        pivot_len: pivot_len(m),
+    }
+}
+
 /// Recompute 6.9 from two members' variant lists.
 ///
 /// `focus` is the weaker of the two members' focus levels; below Focus 2 the
 /// variant lists do not exist and the result is [`PairView::unavailable`].
-pub fn pair_from_maps(a: &MapUpdateInfo, b: &MapUpdateInfo, a_id: u32, b_id: u32, focus: u8) -> PairView {
-    if focus < fmt::FOCUS_EXACT {
-        return PairView::unavailable(a_id, b_id, focus);
-    }
+pub fn pair_from_maps(
+    a: &MapUpdateInfo,
+    b: &MapUpdateInfo,
+    a_id: u32,
+    b_id: u32,
+    focus: u8,
+) -> PairView {
     let plen = pivot_len(a).min(pivot_len(b));
-    let uncovered_union = union_len(&merge(a.uncovered.clone()), &merge(b.uncovered.clone()));
+    let pa = MemberProfile {
+        id: a_id,
+        snps: snp_map(a),
+        indels: indel_keys(a),
+        uncovered: merge(a.uncovered.clone()),
+        pivot_len: plen,
+    };
+    let pb = MemberProfile {
+        id: b_id,
+        snps: snp_map(b),
+        indels: indel_keys(b),
+        uncovered: merge(b.uncovered.clone()),
+        pivot_len: plen,
+    };
+    pair_from_profiles(&pa, &pb, focus)
+}
+
+/// The same computation over two precomputed profiles.
+pub fn pair_from_profiles(a: &MemberProfile, b: &MemberProfile, focus: u8) -> PairView {
+    if focus < fmt::FOCUS_EXACT {
+        return PairView::unavailable(a.id, b.id, focus);
+    }
+    let plen = a.pivot_len.min(b.pivot_len);
+    let uncovered_union = union_len(&a.uncovered, &b.uncovered);
     let comparable = plen.saturating_sub(uncovered_union);
 
-    let ua = merge(a.uncovered.clone());
-    let ub = merge(b.uncovered.clone());
-    let ma = snp_map(a);
-    let mb = snp_map(b);
-    let mut positions: Vec<u64> = Vec::with_capacity(ma.len() + mb.len());
-    positions.extend(ma.keys().copied());
-    positions.extend(mb.keys().copied());
+    let mut positions: Vec<u64> = Vec::with_capacity(a.snps.len() + b.snps.len());
+    positions.extend(a.snps.keys().copied());
+    positions.extend(b.snps.keys().copied());
     positions.sort_unstable();
     positions.dedup();
 
@@ -182,19 +229,22 @@ pub fn pair_from_maps(a: &MapUpdateInfo, b: &MapUpdateInfo, a_id: u32, b_id: u32
         if p >= plen {
             continue;
         }
-        if uncovered_union > 0 && (in_any(&ua, p) || in_any(&ub, p)) {
+        if uncovered_union > 0 && (in_any(&a.uncovered, p) || in_any(&b.uncovered, p)) {
             continue;
         }
-        if ma.get(&p) != mb.get(&p) {
+        // A member with no entry has the pivot's base, and a variant's alt
+        // always differs from that base, so the two differ exactly when the
+        // entries differ. The pivot's own sequence is not needed.
+        if a.snps.get(&p) != b.snps.get(&p) {
             snps += 1;
         }
     }
 
-    let ia = indel_keys(a);
-    let ib = indel_keys(b);
-    let indels = symmetric_difference(&ia, &ib)
+    let indels = symmetric_difference(&a.indels, &b.indels)
         .into_iter()
-        .filter(|k| k.0 < plen && !(in_any(&ua, k.0) || in_any(&ub, k.0)))
+        .filter(|k| {
+            k.0 < plen && !(in_any(&a.uncovered, k.0) || in_any(&b.uncovered, k.0))
+        })
         .count() as u64;
 
     let dist = if comparable > 0 {
@@ -203,8 +253,8 @@ pub fn pair_from_maps(a: &MapUpdateInfo, b: &MapUpdateInfo, a_id: u32, b_id: u32
         None
     };
     PairView {
-        a: a_id,
-        b: b_id,
+        a: a.id,
+        b: b.id,
         snps,
         indels,
         comparable,
@@ -456,6 +506,34 @@ mod tests {
         let p1 = pair_from_matrix(&m, 0, 1, 7, 9, 1);
         assert!(p1.approximate);
         assert!(p1.dist_text().starts_with('≈'));
+    }
+
+    #[test]
+    fn precomputed_profiles_agree_with_the_direct_path() {
+        let a = member(
+            "a",
+            vec![
+                variant(VariantKind::Snp, 0, 10, 11, "A", "G"),
+                variant(VariantKind::Deletion, 0, 40, 45, "ACGTG", ""),
+            ],
+            vec![(50, 60)],
+        );
+        let b = member(
+            "b",
+            vec![
+                variant(VariantKind::Snp, 0, 10, 11, "A", "G"),
+                variant(VariantKind::Insertion, 0, 41, 41, "", "TT"),
+            ],
+            vec![(70, 72)],
+        );
+        let direct = pair_from_maps(&a, &b, 1, 2, 2);
+        let plen = pivot_len(&a).min(pivot_len(&b));
+        let mut pa = profile(&a, 1);
+        let mut pb = profile(&b, 2);
+        pa.pivot_len = plen;
+        pb.pivot_len = plen;
+        assert_eq!(pair_from_profiles(&pa, &pb, 2), direct);
+        assert!(!pair_from_profiles(&pa, &pb, 1).available());
     }
 
     #[test]

@@ -164,18 +164,18 @@ pub fn scan_windows(seq: &[u8], k: usize, mut f: impl FnMut(usize, u64, bool)) {
     };
 
     let mut fwd: u64 = 0;
-    for i in 0..k {
-        fwd = (fwd << 2) | u64::from(code(seq[i]) & 3);
+    for &b in &seq[..k] {
+        fwd = (fwd << 2) | u64::from(code(b) & 3);
     }
     let mut rc: u64 = 0;
-    for i in (0..k).rev() {
-        rc = (rc << 2) | u64::from(3 - (code(seq[i]) & 3));
+    for &b in seq[..k].iter().rev() {
+        rc = (rc << 2) | u64::from(3 - (code(b) & 3));
     }
 
     // Start of the most recent N seen, or -1.
     let mut last_n: i64 = -1;
-    for i in 0..k {
-        if code(seq[i]) == 4 {
+    for (i, &b) in seq[..k].iter().enumerate() {
+        if code(b) == 4 {
             last_n = i as i64;
         }
     }

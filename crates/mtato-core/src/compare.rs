@@ -73,6 +73,13 @@ impl MatchedBlock {
         self.ge - self.gs
     }
 
+    /// True when the block spans no bases. A matched block always covers at
+    /// least `k` bases, so this is the defensive partner of [`Self::len`]
+    /// rather than a case the engine produces.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Map a member base position inside this block to the pivot (6.6 A).
     pub fn map_base(&self, x: u64) -> u64 {
         if self.rel {
@@ -585,6 +592,21 @@ enum Gap {
     },
 }
 
+/// What walking the shared points of one contig produced (6.6 step C).
+#[derive(Debug, Default)]
+pub struct ContigPieces {
+    /// Compared and found different: the Focus 1 records.
+    pub pieces: Vec<DiffPiece>,
+    /// Shared points that were not collinear with their neighbours.
+    pub breakpoints: Vec<Breakpoint>,
+    /// Member intervals that could not be placed on the pivot, as
+    /// `(contig, start, end)`.
+    pub unplaced: Vec<(u32, u64, u64)>,
+    /// Pivot intervals this contig covers, each carrying the member interval
+    /// that produced it, which is what makes the `dup` rule of 6.8 work (D12).
+    pub covered: Vec<CoverSeg>,
+}
+
 /// Walk the shared points of one contig and classify every gap (6.6 C).
 ///
 /// Returns the difference pieces, the breakpoints, the unplaced member
@@ -597,13 +619,16 @@ pub fn build_pieces(
     matched: &[MatchedBlock],
     params: &Parameters,
     counters: &mut Counters,
-) -> (
-    Vec<DiffPiece>,
-    Vec<Breakpoint>,
-    Vec<(u32, u64, u64)>,
-    Vec<CoverSeg>,
-) {
+) -> ContigPieces {
     let k = params.k as u64;
+    let ctx = GapCtx {
+        pivot,
+        contig,
+        seq,
+        matched,
+        k,
+        params,
+    };
     let mut diff_pieces = Vec::new();
     let mut breakpoints = Vec::new();
     let mut unplaced = Vec::new();
@@ -626,7 +651,7 @@ pub fn build_pieces(
         if y.gpos <= x.gpos {
             continue;
         }
-        match classify_gap(pivot, contig, seq, &x, &y, matched, k, params) {
+        match classify_gap(&ctx, &x, &y) {
             Gap::InsideMatchedBlock => {}
             Gap::IdenticalPiece { cover } => covered.push(cover),
             Gap::Piece(p) => {
@@ -648,19 +673,39 @@ pub fn build_pieces(
             }
         }
     }
-    (diff_pieces, breakpoints, unplaced, covered)
+    ContigPieces {
+        pieces: diff_pieces,
+        breakpoints,
+        unplaced,
+        covered,
+    }
 }
 
-fn classify_gap(
-    pivot: &PivotIndex,
+/// Everything [`classify_gap`] needs that is the same for every gap in one
+/// contig. Grouped so that the function's own signature lists only the two
+/// shared points that actually vary from gap to gap.
+#[derive(Clone, Copy)]
+struct GapCtx<'a> {
+    pivot: &'a PivotIndex,
+    /// Member contig index.
     contig: u32,
-    seq: &[u8],
-    x: &SharedPoint,
-    y: &SharedPoint,
-    matched: &[MatchedBlock],
+    /// Member contig sequence.
+    seq: &'a [u8],
+    matched: &'a [MatchedBlock],
+    /// Anchor length: `params.k` widened to `u64` once, per contig.
     k: u64,
-    params: &Parameters,
-) -> Gap {
+    params: &'a Parameters,
+}
+
+fn classify_gap(ctx: &GapCtx<'_>, x: &SharedPoint, y: &SharedPoint) -> Gap {
+    let GapCtx {
+        pivot,
+        contig,
+        seq,
+        matched,
+        k,
+        params,
+    } = *ctx;
     // "If the only thing between them is one matched block, there is nothing to
     // do." Generalised to: if the whole gap lies inside one matched block, the
     // sequence is already known to be identical. This also covers anchors that
@@ -987,7 +1032,12 @@ pub fn compare_member(
 
         let matched = match_blocks(pivot, &contig.seq, &anchor_pos, params, &mut counters);
         let points = shared_points(pivot, &anchors, &matched, params, &mut counters);
-        let (diff_pieces, breakpoints, unplaced, covered) = build_pieces(
+        let ContigPieces {
+            pieces: diff_pieces,
+            breakpoints,
+            unplaced,
+            covered,
+        } = build_pieces(
             pivot,
             cid,
             &contig.seq,
@@ -1343,7 +1393,7 @@ mod tests {
         assert_eq!(rev.map_anchor(0, k), 1100 - k);
         assert_eq!(rev.map_anchor(100 - k, k), 1000);
         // The anchor start is the base mapping minus (k - 1) when reversed.
-        assert_eq!(rev.map_anchor(0, k), rev.map_base(0) - (k as u64 - 1));
+        assert_eq!(rev.map_anchor(0, k), rev.map_base(0) - (k - 1));
     }
 
     #[test]

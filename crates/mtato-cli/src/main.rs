@@ -181,10 +181,22 @@ struct SimulateArgs {
     #[arg(long, default_value_t = 0.0)]
     mean_segments: f64,
 
-    /// Cut each genome into this many contigs, shuffled and flipped. 1 keeps it
+    /// Cut each genome into this many contigs, in random order. 1 keeps it
     /// unfragmented.
     #[arg(short = 'c', long, default_value_t = 1)]
     contigs: usize,
+
+    /// Also reverse-complement each contig independently, with probability one
+    /// half. Section 10.3 T3 asks for contigs "shuffled and flipped", so any
+    /// run meant to reproduce T3 needs this as well as `--contigs`.
+    ///
+    /// It is a separate flag rather than implied by `--contigs` because a plain
+    /// fragmented simulation that also flips half its contigs would be
+    /// surprising, and because the two effects are worth measuring apart:
+    /// flipping exercises the strand-independent block hashes of 6.3, while
+    /// shuffling exercises the collinearity rule of 6.6 C.
+    #[arg(long)]
+    random_orientation: bool,
 }
 
 fn parse_densities(s: &str) -> Result<[u64; LEVELS], String> {
@@ -462,6 +474,7 @@ fn cmd_simulate(args: SimulateArgs) -> i32 {
             ..Default::default()
         },
         contigs: args.contigs,
+        random_orientation: args.random_orientation,
         ..Default::default()
     };
     if let Err(e) = cfg.validate() {

@@ -446,6 +446,6 @@ mod tests {
         assert_eq!(idx.contig_blocks(1, 0).len(), 0);
         // A contig shorter than k has no anchors, so it is one block.
         assert_eq!(idx.contig_blocks(3, 1).len(), 1);
-        assert_eq!(idx.total_len, 0 + 2 + 24);
+        assert_eq!(idx.total_len, 2 + 24);
     }
 }

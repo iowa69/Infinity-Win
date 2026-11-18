@@ -158,6 +158,10 @@ pub struct UiModel {
     pub events_seen: u64,
     pub highest_seq: u64,
     pub finished: bool,
+    /// Bumped whenever the *shape* of the tree could have changed, so that the
+    /// tree panel knows when to relayout and start the move animation instead of
+    /// rebuilding both every frame.
+    pub version: u64,
     pub source: Source,
 }
 
@@ -230,6 +234,14 @@ impl UiModel {
     }
 
     // -- the fold -----------------------------------------------------------
+
+    /// Apply one whole envelope, remembering its sequence number so that a
+    /// dropped message can be told from a late one.
+    pub fn apply_envelope(&mut self, env: mtato_core::events::Envelope) {
+        self.highest_seq = self.highest_seq.max(env.seq);
+        let t_ms = env.t_ms;
+        self.apply(t_ms, env.event);
+    }
 
     /// Apply one event, timestamped `t_ms` milliseconds into the run.
     pub fn apply(&mut self, t_ms: f64, event: Event) {
@@ -327,6 +339,7 @@ impl UiModel {
     }
 
     fn on_clustered(&mut self, t_ms: f64, threshold: f64, clusters: Vec<ClusterInfo>) {
+        self.version += 1;
         self.threshold = threshold;
         // Results keyed by membership, exactly like the engine's own cache: a
         // cluster that survives a re-clustering keeps its tree and its focus.
@@ -438,6 +451,7 @@ impl UiModel {
     fn on_backbone(&mut self, t_ms: f64, newick: String, pivots: Vec<String>) {
         match parse_newick(&newick) {
             Ok(t) => {
+                self.version += 1;
                 self.backbone = Some(t);
                 self.backbone_pivots = pivots;
             }
@@ -491,6 +505,7 @@ impl UiModel {
                 c.numbers = numbers;
             }
         }
+        self.version += 1;
         let members = self.clusters[ci].members.clone();
         for &gid in &members {
             if let Some(&gi) = self.index.get(&gid) {
@@ -751,13 +766,52 @@ pub fn sorted_indices(genomes: &[GenomeRow], filter: &str, spec: &SortSpec) -> V
     idx
 }
 
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+/// A `GenomeScanned` event, so that any module's tests can drive the fold.
+#[cfg(test)]
+pub fn scan_event(id: u32, name: &str, length: u64, contigs: u32) -> Event {
+    Event::GenomeScanned(mtato_core::events::GenomeScannedInfo {
+        id,
+        name: name.to_string(),
+        length,
+        contigs,
+        n50: length,
+        gc: 0.5,
+        sketch_size: 100,
+    })
+}
+
+/// A `Clustered` event. Each entry is `(cluster id, pivot id, member ids)`; the
+/// member names are `g<id>`, matching [`scan_event`].
+#[cfg(test)]
+pub fn clustered_event(specs: &[(u32, u32, &[u32])]) -> Event {
+    let clusters = specs
+        .iter()
+        .map(|&(id, pivot, members)| mtato_core::events::ClusterInfo {
+            id,
+            pivot,
+            pivot_name: format!("g{pivot}"),
+            members: members.to_vec(),
+            member_names: members.iter().map(|m| format!("g{m}")).collect(),
+            focus: 0,
+            cluster_dist: 0.005,
+        })
+        .collect();
+    Event::Clustered {
+        threshold: 0.005,
+        clusters,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mtato_core::events::{stage, PieceView};
     use mtato_core::params::Parameters;
     use mtato_core::variant::{Variant, VariantKind};
-
     fn scanned(id: u32, name: &str, length: u64, contigs: u32) -> Event {
         Event::GenomeScanned(GenomeScannedInfo {
             id,

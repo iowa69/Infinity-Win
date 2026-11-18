@@ -411,7 +411,7 @@ fn compare_clusters(
     for (g, c) in truth {
         by_true.entry(c.as_str()).or_default().push(g.as_str());
     }
-    for (_tc, members) in &by_true {
+    for members in by_true.values() {
         let reported_ids: HashSet<&str> = members
             .iter()
             .filter_map(|g| reported.get(*g).map(|s| s.as_str()))
@@ -673,7 +673,7 @@ fn file_stem(p: &Path) -> String {
 /// child. Used to compare two trees over their shared leaf set.
 fn prune(t: &Tree, keep: &[String]) -> Tree {
     let set: HashSet<&str> = keep.iter().map(|s| s.as_str()).collect();
-    prune_rec(t, &set).unwrap_or_else(|| Tree::default())
+    prune_rec(t, &set).unwrap_or_default()
 }
 
 fn prune_rec(t: &Tree, keep: &HashSet<&str>) -> Option<Tree> {
@@ -809,29 +809,6 @@ fn pct(v: Option<f64>) -> String {
         Some(x) => format!("{:.4}", x),
         None => "n/a".to_string(),
     }
-}
-
-/// A compact one-line form, used by the report script.
-pub fn one_line(r: &BenchReport) -> String {
-    let s = r.run.as_ref();
-    format!(
-        "first_tree_ms={} exact_tree_ms={} peak_bytes={} pairs={} exact={} max_err={} rf_norm={} cluster_f1={}",
-        s.and_then(|s| s.timings.first_tree_ms).map(|v| v.to_string()).unwrap_or_else(|| "NA".into()),
-        s.and_then(|s| s.timings.exact_tree_ms).map(|v| v.to_string()).unwrap_or_else(|| "NA".into()),
-        s.and_then(|s| s.peak_memory_bytes).map(|v| v.to_string()).unwrap_or_else(|| "NA".into()),
-        r.distance.pairs_compared,
-        r.distance.pairs_exact,
-        r.distance.max_abs_error,
-        r.trees
-            .first()
-            .and_then(|t| t.rf_normalised)
-            .map(|v| format!("{v:.4}"))
-            .unwrap_or_else(|| "NA".into()),
-        r.clusters
-            .pairwise_f1
-            .map(|v| format!("{v:.4}"))
-            .unwrap_or_else(|| "NA".into()),
-    )
 }
 
 #[allow(dead_code)]

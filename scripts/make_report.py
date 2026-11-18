@@ -135,10 +135,18 @@ def measurements_for_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
     bench = out["bench"]
     out["rf"] = bench.get("rf")
     out["rf_normalized"] = bench.get("rf_normalized")
+    out["trees_scored"] = bench.get("trees_scored")
     out["distance_mae_snps"] = bench.get("distance_mae_snps")
     out["distance_max_error_snps"] = bench.get("distance_max_error_snps")
+    out["pairs_in_truth"] = bench.get("pairs_in_truth")
     out["pairs_compared"] = bench.get("pairs_compared")
     out["pairs_exact"] = bench.get("pairs_exact")
+    out["pairs_missing_from_output"] = bench.get("pairs_missing_from_output")
+    out["fraction_pairs_exact"] = bench.get("fraction_pairs_exact")
+    out["worst_pair"] = bench.get("worst_pair")
+    out["cluster_f1"] = bench.get("cluster_f1")
+    out["clusters_recovered_exactly"] = bench.get("clusters_recovered_exactly")
+    out["clusters_true"] = bench.get("clusters_true")
     out["bench_status"] = bench.get("status")
     out["bench_reason"] = bench.get("reason")
     return out
@@ -446,12 +454,55 @@ def verdict_mark(passed: Optional[bool]) -> str:
     return "not measured"
 
 
+def render_accuracy_table(cells: Dict[str, Dict[str, Any]]) -> str:
+    """Accuracy against truth, per configuration.
+
+    The engine scores each cluster tree against its own truth tree, so `RF` is
+    the **sum** over clusters and `RF (norm)` their **mean**; both are labelled.
+    A run with no scorable truth shows `n/a` and the reason, never a zero.
+    """
+    header = [
+        "config", "bench", "clusters scored", "RF (sum over clusters)",
+        "RF (mean normalised)", "pairs in truth", "pairs compared",
+        "pairs exact", "fraction exact", "max |err| SNPs", "mean |err| SNPs",
+        "cluster F1", "clusters recovered",
+    ]
+    rows: List[List[Any]] = []
+    order = [c.name for c in common.CONFIGS if c.name in cells]
+    order += [c for c in sorted(cells) if c not in order]
+    for config in order:
+        m = cells[config]
+        status = m.get("bench_status") or "n/a"
+        if status == "skipped":
+            status = "skipped (no simulator truth)"
+        recovered = None
+        if m.get("clusters_recovered_exactly") is not None and m.get("clusters_true") is not None:
+            recovered = f"{m['clusters_recovered_exactly']}/{m['clusters_true']}"
+        rows.append(
+            [
+                config,
+                status,
+                common.fmt(m.get("trees_scored")),
+                common.fmt(m.get("rf"), ".4g"),
+                common.fmt(m.get("rf_normalized"), ".4f"),
+                common.fmt(m.get("pairs_in_truth")),
+                common.fmt(m.get("pairs_compared")),
+                common.fmt(m.get("pairs_exact")),
+                common.fmt(m.get("fraction_pairs_exact"), ".4f"),
+                common.fmt(m.get("distance_max_error_snps"), ".4g"),
+                common.fmt(m.get("distance_mae_snps"), ".4g"),
+                common.fmt(m.get("cluster_f1"), ".4f"),
+                recovered if recovered else "n/a",
+            ]
+        )
+    return common.markdown_table(header, rows)
+
+
 def render_dataset_table(cells: Dict[str, Dict[str, Any]]) -> str:
     header = [
         "config", "status", "wall", "time to first tree", "time to exact tree",
         "peak memory", "block identity", "pieces compared", "cache hits",
-        "alignments", "bases aligned", "breakpoints", "RF", "RF (norm)",
-        "SNP MAE", "switch applied",
+        "alignments", "bases aligned", "breakpoints", "switch applied",
     ]
     rows: List[List[Any]] = []
     order = [c.name for c in common.CONFIGS if c.name in cells]
@@ -485,9 +536,6 @@ def render_dataset_table(cells: Dict[str, Dict[str, Any]]) -> str:
                 common.fmt(counters.get("alignments_run")),
                 common.fmt(counters.get("bases_aligned")),
                 common.fmt(counters.get("breakpoints")),
-                common.fmt(m.get("rf"), ".4g"),
-                common.fmt(m.get("rf_normalized"), ".4f"),
-                common.fmt(m.get("distance_mae_snps"), ".4g"),
                 {True: "yes", False: "**NO**", None: "n/a"}[m.get("switch_verified")],
             ]
         )
@@ -857,6 +905,24 @@ def render_report(
             continue
         out.append(render_dataset_table(cells_for))
         out.append("")
+        out.append("**Accuracy against truth** (from `mtato bench`; `skipped` means the "
+                   "dataset has no simulator truth folder, so the engine could not "
+                   "score it and `scripts/baselines.py compare` is the comparison to "
+                   "read instead):")
+        out.append("")
+        out.append(render_accuracy_table(cells_for))
+        out.append("")
+        worst = [
+            (config, m.get("worst_pair"))
+            for config, m in sorted(cells_for.items())
+            if m.get("worst_pair")
+        ]
+        if worst:
+            out.append("Worst-scoring pair per configuration (true SNPs vs reported):")
+            out.append("")
+            for config, wp in worst:
+                out.append(f"- `{config}`: {wp[0]} vs {wp[1]} - true {wp[2]}, reported {wp[3]}")
+            out.append("")
         focus_rows = []
         for config, m in sorted(cells_for.items()):
             fc = m.get("focus_counts") or []

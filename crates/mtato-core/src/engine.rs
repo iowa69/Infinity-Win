@@ -210,11 +210,11 @@ pub fn run(
     sink.progress(stage::DISCOVER, files.len() as u64, files.len() as u64);
 
     // ---- scan (6.11.1) ----
-    let (records, contig_names, mut notes, scan_ms) =
-        scan_all(&pool, &files, &params, &sink, &controls)?;
-    results.records = records;
-    results.contig_names = contig_names;
-    let mut scan_ms_total = scan_ms;
+    let scanned = scan_all(&pool, &files, &params, &sink, &controls)?;
+    results.records = scanned.records;
+    results.contig_names = scanned.contig_names;
+    let mut notes = scanned.notes;
+    let mut scan_ms_total = scanned.elapsed_ms;
 
     // The small-genome rule of 6.1 can only be judged once the lengths are
     // known, so it is applied after a first scan and the scan is repeated with
@@ -225,16 +225,22 @@ pub fn run(
     if let Some(msg) = effective.apply_small_genome_rule(median) {
         sink.warn(msg.clone());
         notes.push(msg);
-        let (records, contig_names, _, rescan_ms) =
-            scan_all(&pool, &files, &effective, &sink, &controls)?;
-        results.records = records;
-        results.contig_names = contig_names;
-        scan_ms_total = scan_ms_total.saturating_add(rescan_ms);
+        let rescan = scan_all(&pool, &files, &effective, &sink, &controls)?;
+        results.records = rescan.records;
+        results.contig_names = rescan.contig_names;
+        scan_ms_total = scan_ms_total.saturating_add(rescan.elapsed_ms);
         params = effective.clone();
         results.params = params.clone();
     }
     results.notes = notes;
     results.timings.scan_ms = Some(scan_ms_total);
+    // `genomes_scanned` counts the genomes that really contributed, so it is
+    // set once, here: after unreadable files have been dropped and after the
+    // small-genome rescan of 6.1 (D8) has replaced the records. Setting it per
+    // pass would double-count a rescan; setting it from `files.len()` would
+    // count a file that could not be read. The per-cluster counters merged in
+    // during refinement leave this field at zero, so the value survives.
+    results.counters.genomes_scanned = results.records.len() as u64;
     if controls.cancelled() {
         return Ok(finish(results, &sink, started));
     }
@@ -301,10 +307,25 @@ pub fn run(
     if let Some(dir) = &cfg.outdir {
         let t = Instant::now();
         sink.progress(stage::OUTPUT, 0, 1);
-        let preview = summary_of(&results);
-        crate::output::write_all(dir, &results, &preview)
+        // The tables are written first and `run.json` last, so the timings it
+        // carries are complete. Writing everything in one call used to
+        // serialise `run.json` before `output_ms` was known and before
+        // `total_ms` was ever set, leaving both `null` in a file that section
+        // 9 says holds "timings per stage" and that section 11 reads
+        // time-to-first-tree and time-to-exact from.
+        crate::output::write_tables(dir, &results)
             .map_err(|e| format!("writing output to {}: {e}", dir.display()))?;
         results.timings.output_ms = Some(t.elapsed().as_millis() as u64);
+        // `total_ms` in `run.json` necessarily excludes the writing of
+        // `run.json` itself: that step has not happened yet, and the file
+        // cannot report its own duration. It is the whole run up to this point,
+        // which is the honest figure, and it must not be "fixed" later by
+        // rewriting the file. The `Finished` event's `total_ms`, set in
+        // `finish()`, does include the `run.json` write.
+        results.timings.total_ms = Some(started.elapsed().as_millis() as u64);
+        let summary = summary_of(&results);
+        crate::output::write_run_json(dir, &results, &summary)
+            .map_err(|e| format!("writing output to {}: {e}", dir.display()))?;
         sink.progress(stage::OUTPUT, 1, 1);
     }
 
@@ -315,7 +336,7 @@ fn finish(mut results: RunResults, sink: &EventSink, started: Instant) -> RunRes
     results.timings.total_ms = Some(started.elapsed().as_millis() as u64);
     let summary = summary_of(&results);
     sink.emit(Event::Counters(results.counters.clone()));
-    sink.emit(Event::Finished(summary));
+    sink.emit(Event::Finished(Box::new(summary)));
     sink.flush_log();
     results
 }
@@ -350,21 +371,28 @@ fn median_length(records: &[GenomeRecord]) -> u64 {
 // Scan
 // ---------------------------------------------------------------------------
 
+/// What one scan pass produced (6.11.1).
+struct ScanOutcome {
+    /// One record per genome that could be read. Ids are renumbered densely,
+    /// so an id and a position in this list always agree even when a file
+    /// failed to read.
+    records: Vec<GenomeRecord>,
+    /// Contig names per genome id, captured here so that output writing never
+    /// has to reopen the inputs (D9).
+    contig_names: HashMap<u32, Vec<String>>,
+    /// Read failures and anything else worth telling the user about.
+    notes: Vec<String>,
+    /// Wall-clock milliseconds this pass took.
+    elapsed_ms: u64,
+}
+
 fn scan_all(
     pool: &ThreadPool,
     files: &[PathBuf],
     params: &Parameters,
     sink: &EventSink,
     controls: &Controls,
-) -> Result<
-    (
-        Vec<GenomeRecord>,
-        HashMap<u32, Vec<String>>,
-        Vec<String>,
-        u64,
-    ),
-    String,
-> {
+) -> Result<ScanOutcome, String> {
     let t = Instant::now();
     let total = files.len() as u64;
     sink.progress(stage::SCAN, 0, total);
@@ -434,7 +462,12 @@ fn scan_all(
         records.push(rec);
     }
     sink.progress(stage::SCAN, total, total);
-    Ok((records, contig_names, notes, t.elapsed().as_millis() as u64))
+    Ok(ScanOutcome {
+        records,
+        contig_names,
+        notes,
+        elapsed_ms: t.elapsed().as_millis() as u64,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -889,10 +922,7 @@ fn resolve_focus1(
         .iter()
         .any(|p| cache.cached(&p.cache_key()).is_none());
     let data = if needs_data {
-        match crate::fasta::read_genome(&rec.path) {
-            Ok(d) => Some(d),
-            Err(_) => None,
-        }
+        crate::fasta::read_genome(&rec.path).ok()
     } else {
         None
     };
@@ -1085,22 +1115,24 @@ mod tests {
 
     #[test]
     fn summary_counts_focus_levels() {
-        let mut r = RunResults::default();
-        r.params = Parameters::default();
-        r.records = (0..2u32)
-            .map(|i| {
-                let mut rec = GenomeRecord::new(
-                    i,
-                    format!("g{i}"),
-                    PathBuf::from("a.fa"),
-                    Default::default(),
-                    vec![],
-                );
-                rec.focus = if i == 0 { 2 } else { 0 };
-                rec.stats.length = 1000;
-                rec
-            })
-            .collect();
+        let r = RunResults {
+            params: Parameters::default(),
+            records: (0..2u32)
+                .map(|i| {
+                    let mut rec = GenomeRecord::new(
+                        i,
+                        format!("g{i}"),
+                        PathBuf::from("a.fa"),
+                        Default::default(),
+                        vec![],
+                    );
+                    rec.focus = if i == 0 { 2 } else { 0 };
+                    rec.stats.length = 1000;
+                    rec
+                })
+                .collect(),
+            ..Default::default()
+        };
         let s = summary_of(&r);
         assert_eq!(s.focus_counts, [1, 0, 1]);
         assert_eq!(s.genomes, 2);

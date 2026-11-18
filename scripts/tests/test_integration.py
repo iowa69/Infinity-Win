@@ -253,7 +253,38 @@ class TestRunMatrix(ScriptCase):
         cell = [c for c in summary["cells"] if c["dataset"] == "no_truth"][0]
         self.assertEqual(cell["status"], "ok")
         self.assertEqual(cell["bench"]["status"], "skipped")
-        self.assertIn("no truth reference", cell["bench"]["reason"])
+        self.assertIn("no truth", cell["bench"]["reason"])
+        self.assertIsNone(cell["bench"].get("rf"))
+
+    def test_a_real_dataset_reference_folder_is_not_passed_to_bench(self) -> None:
+        """`mtato bench --truth` needs a simulator truth folder.
+
+        A real dataset carries an IQ-TREE tree and a SKA2 table instead. Handing
+        that to bench would produce a failure that looks like an M-Tato bug, so
+        the matrix must skip bench and point at the comparison that does work.
+        """
+        truth_dir = self.work / "fix_small" / "truth"
+        # strip the simulator layout, leave only real-dataset-style references
+        for path in list(truth_dir.glob("tree_*.nwk")) + [
+            truth_dir / "pairwise_snps.tsv",
+            truth_dir / "clusters.tsv",
+        ]:
+            if path.exists():
+                path.unlink()
+        (truth_dir / "cluster.treefile").write_text("(a,b,c,d);", encoding="utf-8")
+        self.assertFalse(common.is_simulator_truth_dir(truth_dir))
+        code = run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "baseline"))
+        self.assertEqual(code, 0)
+        cell = self.cell("baseline")
+        self.assertEqual(cell["status"], "ok", "the run itself must still succeed")
+        self.assertEqual(cell["bench"]["status"], "skipped")
+        reason = cell["bench"]["reason"]
+        self.assertIn("not a `mtato simulate` truth folder", reason)
+        self.assertIn("baselines.py compare", reason)
+        self.assertIn("accuracy_over_time.py", reason)
+        self.assertIsNone(cell["bench"].get("rf"))
+        # the bench command must never have been attempted
+        self.assertIsNone(cell.get("bench_command"))
 
     def test_selecting_a_switch_also_runs_the_baseline(self) -> None:
         run_matrix.main(self.matrix_argv("--datasets", "fix_small", "--configs", "flat"))
@@ -310,31 +341,67 @@ class TestAccuracyOverTime(ScriptCase):
         self.assertEqual(times, sorted(times), "the curve must be in time order")
 
     def test_a_wrong_tree_gives_a_nonzero_rf(self) -> None:
-        """The internal RF path must actually detect a topology difference."""
-        truth = common.read_newick_file(self.truth_tree())
-        wrong_truth = self.root / "wrong_truth.nwk"
-        wrong_truth.write_text(
-            fixtures.perturb_tree(common.write_newick(truth), swaps=2) + "\n", encoding="utf-8"
-        )
-        self.assertNotEqual(
-            wrong_truth.read_text(encoding="utf-8").strip(),
-            self.truth_tree().read_text(encoding="utf-8").strip(),
-            "the perturbed tree must differ from the real one",
-        )
+        """Internal RF must detect a topology difference.
+
+        The fixture dataset has a simulator truth folder, so the internal path
+        scores each emitted cluster tree against its own `tree_c*.nwk`; that is
+        the tree this perturbs.
+        """
+        truth_dir = self.work / "fix_small" / "truth"
+        per_cluster = sorted(truth_dir.glob("tree_*.nwk"))
+        self.assertTrue(per_cluster, "the fixture must provide per-cluster truth trees")
+        original = per_cluster[0].read_text(encoding="utf-8")
+        perturbed = fixtures.perturb_tree(original, swaps=1)
+        self.assertNotEqual(perturbed.strip(), original.strip())
+        per_cluster[0].write_text(perturbed + "\n", encoding="utf-8")
         out = self.root / "curves2"
-        accuracy_over_time.main(
+        code = accuracy_over_time.main(
             [
                 "--run-dir", str(self.run_dir("flat")),
                 "--work-dir", str(self.work),
-                "--truth-tree", str(wrong_truth),
                 "--out-dir", str(out),
                 "--rf-mode", "internal",
                 "--no-plot",
             ]
         )
+        self.assertEqual(code, 0)
         rows = self.read_csv(out / "accuracy_over_time__fix_small__flat.csv")
-        self.assertGreater(float(rows[-1]["rf"]), 0.0)
-        self.assertGreater(float(rows[-1]["rf_normalized"]), 0.0)
+        scored = [r for r in rows if r["rf_normalized"] not in ("", None)]
+        self.assertTrue(scored, "at least one point must have a defined RF")
+        self.assertGreater(float(scored[-1]["rf"]), 0.0)
+        self.assertGreater(float(scored[-1]["rf_normalized"]), 0.0)
+        self.assertIn("per cluster", scored[-1]["rf_source"])
+
+    def test_a_single_full_truth_tree_is_used_when_there_is_no_simulator_truth(self) -> None:
+        """Real datasets have one reference tree, not per-cluster truth trees."""
+        truth_dir = self.work / "fix_small" / "truth"
+        for path in truth_dir.glob("tree_*.nwk"):
+            path.unlink()
+        for name in ("pairwise_snps.tsv", "clusters.tsv"):
+            if (truth_dir / name).exists():
+                (truth_dir / name).unlink()
+        self.assertFalse(common.is_simulator_truth_dir(truth_dir))
+        names = sorted(p.stem for p in (self.work / "fix_small" / "asm").glob("*.fasta"))
+        self.assertEqual(len(names), self.genomes)
+        full_truth = self.root / "full_truth.nwk"
+        full_truth.write_text(fixtures.balanced_tree(names) + "\n", encoding="utf-8")
+        out = self.root / "curves-full"
+        code = accuracy_over_time.main(
+            [
+                "--run-dir", str(self.run_dir("baseline")),
+                "--work-dir", str(self.work),
+                "--truth-tree", str(full_truth),
+                "--out-dir", str(out),
+                "--rf-mode", "internal",
+                "--no-plot",
+            ]
+        )
+        self.assertEqual(code, 0)
+        rows = self.read_csv(out / "accuracy_over_time__fix_small__baseline.csv")
+        scored = [r for r in rows if r["rf_normalized"] not in ("", None)]
+        self.assertTrue(scored)
+        self.assertEqual(scored[-1]["rf_source"], "internal RF")
+        self.assertEqual(float(scored[-1]["rf"]), 0.0, "the fixture run tree equals truth")
 
     def test_rf_can_come_from_a_bench_json_instead_of_being_recomputed(self) -> None:
         bench_json = self.run_dir("baseline") / "bench.json"

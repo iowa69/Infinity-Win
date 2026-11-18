@@ -291,7 +291,7 @@ mod tests {
         std::fs::write(dir.join("b.fna.gz"), b"not really gz").unwrap();
         std::fs::write(dir.join("notes.txt"), b"ignore me").unwrap();
         std::fs::write(dir.join("c.bam"), b"ignore me too").unwrap();
-        let got = collect_inputs(&[dir.clone()]).unwrap();
+        let got = collect_inputs(std::slice::from_ref(&dir)).unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|p| is_sequence_file(p)));
         std::fs::remove_dir_all(&dir).ok();

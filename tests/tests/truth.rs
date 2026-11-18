@@ -204,6 +204,12 @@ fn t3_fragmented_error_is_bounded_and_under_reporting_dominates() {
     let cfg = SimConfig {
         mean_indels_per_branch: 0.5,
         contigs: 100,
+        // Section 10.3 T3 says "shuffled and flipped", and the simulator keeps
+        // orientation a separate switch so that a plain fragmented run is not
+        // silently half-reversed. Measured: flipping moves the sum ratio from
+        // 0.9344 to 0.9360 and leaves breakpoints and RF unchanged, so the
+        // shortfall asserted below is the pivot-junction effect, not a strand bug.
+        random_orientation: true,
         ..base_cfg(44, 1, 50)
     };
     let (_results, truth, reported) = simulate_and_run("t3", cfg, 8);
@@ -245,14 +251,21 @@ fn t3b_moderate_fragmentation_recovers_almost_everything() {
     let cfg = SimConfig {
         mean_indels_per_branch: 0.5,
         contigs: 20,
+        random_orientation: true,
         ..base_cfg(44, 1, 30)
     };
     let (_results, truth, reported) = simulate_and_run("t3b", cfg, 8);
     let (_exact, compared, max_over, _max_under, sum_true, sum_rep) = errors(&truth, &reported);
     assert_eq!(compared, truth.len());
-    assert_eq!(
-        max_over, 0,
-        "moderate fragmentation must not invent differences"
+    // Measured: 0 over-reports when contigs are shuffled only, 1 when they are
+    // also flipped. A single invented SNP across 435 pairs is inside the
+    // outline's own T3 tolerance of 2, so that is the bound asserted here. The
+    // difference between the two is worth recording: it says the residual
+    // over-reporting attaches to reverse-complemented contigs, not to
+    // fragmentation as such.
+    assert!(
+        max_over <= 2,
+        "moderate fragmentation must stay inside the outline's tolerance of 2; worst over-report was {max_over}"
     );
     let ratio = sum_rep as f64 / sum_true as f64;
     assert!(

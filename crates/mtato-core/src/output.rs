@@ -17,11 +17,16 @@ use crate::summary::RunSummary;
 use crate::tree::to_newick;
 use crate::variant::VariantKind;
 
-/// Write every output file of section 9 into `dir`.
+/// Write every output file of section 9 *except* `run.json` into `dir`.
+///
+/// `run.json` is deliberately left out: [`crate::engine::run`] calls this
+/// first, fills in the last of the timings, and only then calls
+/// [`write_run_json`], so that `run.json` reports complete timings instead of
+/// `null` for the stages that were still running when it was serialised.
 ///
 /// `events.jsonl` is not written here: the event sink appends to it live, so
 /// that a consumer can follow the run while it is still going.
-pub fn write_all(dir: &Path, results: &RunResults, summary: &RunSummary) -> std::io::Result<()> {
+pub fn write_tables(dir: &Path, results: &RunResults) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     write_genomes(dir, results)?;
     write_clusters(dir, results)?;
@@ -31,8 +36,20 @@ pub fn write_all(dir: &Path, results: &RunResults, summary: &RunSummary) -> std:
         write_cluster_distances(dir, results, c.id)?;
         write_cluster_variants(dir, results, c.id)?;
     }
-    write_run_json(dir, results, summary)?;
     Ok(())
+}
+
+/// Write every output file of section 9 into `dir`: the tables written by
+/// [`write_tables`], then `run.json`.
+///
+/// Callers that need the timings inside `run.json` to be complete should call
+/// the two halves separately instead; see [`write_tables`].
+///
+/// `events.jsonl` is not written here: the event sink appends to it live, so
+/// that a consumer can follow the run while it is still going.
+pub fn write_all(dir: &Path, results: &RunResults, summary: &RunSummary) -> std::io::Result<()> {
+    write_tables(dir, results)?;
+    write_run_json(dir, results, summary)
 }
 
 fn writer(dir: &Path, name: &str) -> std::io::Result<BufWriter<File>> {

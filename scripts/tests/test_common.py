@@ -778,11 +778,118 @@ class TestBenchJson(TempDirCase):
         self.assertEqual(series["timeline"][1]["rf"], 0)
 
     def test_missing_rf_is_reported_not_invented(self) -> None:
-        path = self.write("bench.json", json.dumps({"distances": {}}))
+        path = self.write("bench.json", json.dumps({"distance": {}}))
         bench = common.load_bench_json(path)
         self.assertIsNone(bench.rf)
-        self.assertTrue(any("no tree.rf" in p for p in bench.problems))
+        self.assertTrue(any("no RF value" in p for p in bench.problems))
         self.assertEqual(common.rf_values_from_bench(bench), {})
+
+    def test_reads_the_schema_the_cli_actually_writes(self) -> None:
+        """The real bench.json: run/distance/clusters/trees/timeline/problems."""
+        path = self.write(
+            "bench.json",
+            json.dumps(
+                {
+                    "output": "/run",
+                    "truth": "/truth",
+                    "run": {"version": "0.1.0", "timings": {"exact_tree_ms": 76}},
+                    "distance": {
+                        "pairs_in_truth": 20, "pairs_compared": 20,
+                        "pairs_missing_from_output": 0, "pairs_exact": 16,
+                        "max_abs_error": 1, "sum_abs_error": 4,
+                        "sum_true_snps": 210, "sum_reported_snps": 212,
+                        "worst_pair": ["a", "b", 10, 11],
+                    },
+                    "clusters": {
+                        "genomes_in_truth": 10, "genomes_compared": 10,
+                        "true_clusters": 2, "reported_clusters": 2,
+                        "recovered_exactly": 2, "pairwise_f1": 1.0,
+                    },
+                    "trees": [
+                        {"source": "cluster_1", "truth": "tree_c00", "leaves": 5,
+                         "rf": 1, "splits_emitted": 2, "splits_true": 1,
+                         "rf_normalised": 0.3333, "t_ms": 75.1,
+                         "approximate": False, "focus": 2, "units": "snps"},
+                        {"source": "cluster_0", "truth": "tree_c01", "leaves": 5,
+                         "rf": 0, "splits_emitted": 2, "splits_true": 2,
+                         "rf_normalised": 0.0, "t_ms": 75.1,
+                         "approximate": False, "focus": 2, "units": "snps"},
+                    ],
+                    "timeline": [
+                        {"source": "backbone (live)", "leaves": 2, "rf": 0,
+                         "rf_normalised": None, "t_ms": 24.9, "focus": 0},
+                    ],
+                    "problems": [],
+                }
+            ),
+        )
+        bench = common.load_bench_json(path)
+        # RF is per cluster, so the aggregate is the sum / the mean, and the
+        # British spelling of the normalised field must be understood.
+        self.assertEqual(bench.rf, 1)
+        self.assertAlmostEqual(bench.rf_normalized, 0.3333 / 2)
+        self.assertEqual(bench.n_trees_scored, 2)
+        self.assertEqual(bench.pairs_compared, 20)
+        self.assertEqual(bench.pairs_exact, 16)
+        self.assertEqual(bench.pairs_in_truth, 20)
+        self.assertEqual(bench.pairs_missing_from_output, 0)
+        self.assertAlmostEqual(bench.distance_mae, 4 / 20)
+        self.assertEqual(bench.distance_max_error, 1)
+        self.assertAlmostEqual(bench.fraction_exact, 0.8)
+        self.assertEqual(bench.worst_pair, ["a", "b", 10, 11])
+        self.assertEqual(bench.cluster_f1, 1.0)
+        self.assertEqual(bench.clusters_recovered, 2)
+        self.assertEqual(bench.run_summary["version"], "0.1.0")
+        # the timeline is what the accuracy figure prefers
+        series = common.rf_values_from_bench(bench)
+        self.assertIn("timeline", series)
+        self.assertEqual(series["timeline"][0]["source"], "backbone (live)")
+
+    def test_a_simulator_truth_folder_is_recognised_and_a_real_one_is_not(self) -> None:
+        sim = self.tmp / "sim_truth"
+        sim.mkdir()
+        (sim / "tree_c00.nwk").write_text("(a,b,c,d);", encoding="utf-8")
+        self.assertTrue(common.is_simulator_truth_dir(sim))
+        real = self.tmp / "real_truth"
+        real.mkdir()
+        (real / "cluster.treefile").write_text("(a,b,c,d);", encoding="utf-8")
+        (real / "ska2_cluster_reads_distance.tsv").write_text(
+            "Sample1\tSample2\tDistance\na\tb\t2.0\n", encoding="utf-8"
+        )
+        self.assertFalse(
+            common.is_simulator_truth_dir(real),
+            "an IQ-TREE + SKA2 folder is not what `mtato bench --truth` accepts",
+        )
+        self.assertFalse(common.is_simulator_truth_dir(None))
+        self.assertFalse(common.is_simulator_truth_dir(self.tmp / "absent"))
+        # pairwise_snps.tsv + clusters.tsv also counts, without any tree file
+        pair_only = self.tmp / "pair_only"
+        pair_only.mkdir()
+        (pair_only / "pairwise_snps.tsv").write_text("genome_a\tgenome_b\tsnps\n", encoding="utf-8")
+        (pair_only / "clusters.tsv").write_text("genome\tcluster_id\n", encoding="utf-8")
+        self.assertTrue(common.is_simulator_truth_dir(pair_only))
+
+    def test_the_dist_tsv_name_columns_are_preferred_over_the_id_columns(self) -> None:
+        """The real file has BOTH; joining on the id would match nothing."""
+        outdir = self.tmp / "run"
+        outdir.mkdir()
+        (outdir / "cluster_0.dist.tsv").write_text(
+            "genome_a\tname_a\tgenome_b\tname_b\tsnps\tindels\tcomparable_bp\tsubs_per_site\n"
+            "7\tsim_c01_s002\t5\tsim_c01_s000\t16\t0\t199908\t0.00008\n",
+            encoding="utf-8",
+        )
+        rows, problems = common.load_cluster_distances(outdir)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["a"], "sim_c01_s002")
+        self.assertEqual(rows[0]["b"], "sim_c01_s000")
+        self.assertEqual(rows[0]["a_id"], "7")
+        self.assertEqual(rows[0]["b_id"], "5")
+        self.assertEqual(rows[0]["snps"], 16)
+        self.assertEqual(rows[0]["comparable_bp"], 199908)
+        self.assertAlmostEqual(rows[0]["distance"], 0.00008)
+        index = common.distance_lookup(rows)
+        self.assertEqual(index[common.pair_key("sim_c01_s000", "sim_c01_s002")], 16)
 
     def test_missing_file_is_actionable_when_required(self) -> None:
         with self.assertRaises(common.PrereqError) as ctx:

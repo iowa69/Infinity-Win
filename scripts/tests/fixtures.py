@@ -661,139 +661,196 @@ def cmd_run(argv):
 
 
 def cmd_bench(argv):
+    """Mimics the real interface and the real bench.json schema.
+
+    Real CLI:   mtato bench --output <dir> --truth <truth dir> [-j <json>]
+                            [--collapse-below F] [--quiet]
+    Real JSON:  {{output, truth, run, distance, clusters, trees, timeline, problems}}
+    """
     outdir = None
-    truth_tree = None
     truth_dir = None
-    truth_distances = None
     out_json = None
-    dataset = None
-    config = None
-    collapse_snps = 0.5
-    comparable_bp = None
+    collapse_below = 0.5
     i = 0
-    positional = []
     while i < len(argv):
         token = argv[i]
-        if token == "--truth-tree":
+        if token in ("--output", "-o"):
             i += 1
-            truth_tree = Path(argv[i])
+            outdir = Path(argv[i])
         elif token == "--truth":
             i += 1
             truth_dir = Path(argv[i])
-        elif token == "--truth-distances":
-            i += 1
-            truth_distances = Path(argv[i])
-        elif token == "--json":
+        elif token in ("--json", "-j"):
             i += 1
             out_json = Path(argv[i])
-        elif token == "--dataset":
+        elif token == "--collapse-below":
             i += 1
-            dataset = argv[i]
-        elif token == "--config":
-            i += 1
-            config = argv[i]
-        elif token == "--collapse-snps":
-            i += 1
-            collapse_snps = float(argv[i])
-        elif token == "--comparable-bp":
-            i += 1
-            comparable_bp = int(argv[i])
-        elif token.startswith("--truth-distances-format"):
-            pass
+            collapse_below = float(argv[i])
         elif token.startswith("-"):
             pass
-        else:
-            positional.append(token)
+        elif outdir is None:
+            outdir = Path(token)
         i += 1
-    if positional:
-        outdir = Path(positional[0])
-    if outdir is None or not outdir.is_dir():
-        print(f"fake mtato bench: no such output folder: {{outdir}}", file=sys.stderr)
-        return 2
     if env_flag("FAKE_MTATO_BENCH_FAIL"):
         print("fake mtato bench: simulated failure", file=sys.stderr)
         return 19
-    if truth_tree is None and truth_dir is not None:
-        for candidate in ("truth.nwk", "cluster.treefile", "tree.nwk"):
-            if (truth_dir / candidate).exists():
-                truth_tree = truth_dir / candidate
-                break
-    if truth_tree is None or not truth_tree.exists():
-        print("fake mtato bench: no truth tree", file=sys.stderr)
-        return 4
-    run_tree_path = outdir / "tree.nwk"
-    if not run_tree_path.exists():
-        print("fake mtato bench: output folder has no tree.nwk", file=sys.stderr)
-        return 5
-    run_tree = common.read_newick_file(run_tree_path)
-    truth = common.read_newick_file(truth_tree)
-    if comparable_bp is None:
-        comparable_bp = common.comparable_bp_for(outdir)
-    threshold, _ = common.guess_collapse_threshold(
-        truth, collapse_snps=collapse_snps, comparable_bp=comparable_bp, mode="auto"
-    )
-    result = common.rf_distance(run_tree, truth, collapse=threshold)
-    doc = {{
-        "schema_version": 1,
-        "output_dir": str(outdir),
-        "truth_tree": str(truth_tree),
-        "dataset": dataset,
-        "config": config,
-        "collapse_threshold": threshold,
-        "tree": result.as_dict(),
+    if outdir is None or not outdir.is_dir():
+        print(f"error: --output must be an existing output folder (got {{outdir}})", file=sys.stderr)
+        return 2
+    if truth_dir is None:
+        print("error: the following required arguments were not provided: --truth <TRUTH>", file=sys.stderr)
+        return 2
+    if not common.is_simulator_truth_dir(truth_dir):
+        print(f"error: {{truth_dir}} is not a simulator truth folder", file=sys.stderr)
+        return 6
+    problems = []
+    run_path = outdir / "run.json"
+    run_doc = json.loads(run_path.read_text()) if run_path.exists() else {{}}
+    if not run_doc:
+        problems.append(f"no run.json in {{outdir}}")
+    exact_ms = (run_doc.get("timings") or {{}}).get("exact_tree_ms")
+
+    # --- distances -----------------------------------------------------
+    truth_pairs = {{}}
+    ps = truth_dir / "pairwise_snps.tsv"
+    if ps.exists():
+        for row in common.read_table(ps).rows:
+            a, b, s = row.get("genome_a"), row.get("genome_b"), row.get("snps")
+            if a and b:
+                truth_pairs[common.pair_key(a, b)] = float(s or 0)
+    else:
+        problems.append("truth folder has no pairwise_snps.tsv")
+    rows, row_problems = common.load_cluster_distances(outdir)
+    problems.extend(row_problems)
+    reported = {{common.pair_key(r["a"], r["b"]): r.get("snps") for r in rows}}
+    compared = [k for k in truth_pairs if reported.get(k) is not None]
+    errs = [abs(float(reported[k]) - truth_pairs[k]) for k in compared]
+    worst = None
+    if compared:
+        wk = max(compared, key=lambda k: abs(float(reported[k]) - truth_pairs[k]))
+        worst = [wk[0], wk[1], truth_pairs[wk], reported[wk]]
+    distance = {{
+        "pairs_in_truth": len(truth_pairs),
+        "pairs_compared": len(compared),
+        "pairs_missing_from_output": len(truth_pairs) - len(compared),
+        "pairs_exact": sum(1 for e in errs if e == 0),
+        "max_abs_error": max(errs) if errs else None,
+        "sum_abs_error": sum(errs) if errs else None,
+        "sum_true_snps": sum(truth_pairs[k] for k in compared),
+        "sum_reported_snps": sum(float(reported[k]) for k in compared),
+        "worst_pair": worst,
     }}
-    # distance comparison against a SKA2-shaped reference table
-    if truth_distances and truth_distances.exists():
-        ska = common.parse_ska2_distance_tsv(truth_distances)
-        ska_index = {{common.pair_key(p.sample1, p.sample2): p.distance for p in ska.pairs}}
-        rows, _problems = common.load_cluster_distances(outdir)
-        diffs = []
-        exact = 0
-        for row in rows:
-            key = common.pair_key(row["a"], row["b"])
-            if key in ska_index and ska_index[key] is not None and row.get("snps") is not None:
-                diff = abs(float(row["snps"]) - float(ska_index[key]))
-                diffs.append(diff)
-                exact += int(diff == 0)
-        if diffs:
-            doc["distances"] = {{
-                "reference": str(truth_distances),
-                "pairs_compared": len(diffs),
-                "pairs_exact": exact,
-                "mean_abs_error_snps": sum(diffs) / len(diffs),
-                "max_abs_error_snps": max(diffs),
-                "correlation": common.pearson(
-                    [float(r["snps"]) for r in rows if r.get("snps") is not None][: len(diffs)],
-                    diffs[: len(diffs)],
-                ),
-            }}
-    # per-emitted-tree RF timeline, replayed from events.jsonl
+
+    # --- clusters ------------------------------------------------------
+    truth_cl = {{}}
+    cpath = truth_dir / "clusters.tsv"
+    if cpath.exists():
+        for row in common.read_table(cpath).rows:
+            g, c = row.get("genome"), row.get("cluster_id")
+            if g and c is not None:
+                truth_cl[g] = str(c)
+    reported_cl = {{}}
+    gpath = outdir / "genomes.tsv"
+    if gpath.exists():
+        for row in common.read_table(gpath).rows:
+            g, c = row.get("name"), row.get("cluster")
+            if g and c is not None:
+                reported_cl[g] = str(c)
+    shared = sorted(set(truth_cl) & set(reported_cl))
+
+    def same_cluster_pairs(mapping):
+        out = set()
+        for x_i, a in enumerate(shared):
+            for b in shared[x_i + 1:]:
+                if mapping.get(a) == mapping.get(b):
+                    out.add(common.pair_key(a, b))
+        return out
+
+    tp, rp = same_cluster_pairs(truth_cl), same_cluster_pairs(reported_cl)
+    inter = len(tp & rp)
+    prec = inter / len(rp) if rp else None
+    rec = inter / len(tp) if tp else None
+    if prec is not None and rec is not None and (prec + rec) > 0:
+        f1 = 2 * prec * rec / (prec + rec)
+    else:
+        f1 = 1.0 if not tp and not rp else 0.0
+    true_ids = set(truth_cl.values())
+    recovered = 0
+    for tid in true_ids:
+        members = [g for g in shared if truth_cl.get(g) == tid]
+        if members and len({{reported_cl.get(g) for g in members}}) == 1:
+            recovered += 1
+    clusters_doc = {{
+        "genomes_in_truth": len(truth_cl),
+        "genomes_compared": len(shared),
+        "true_clusters": len(true_ids),
+        "reported_clusters": len(set(reported_cl.values())),
+        "recovered_exactly": recovered,
+        "pairwise_f1": f1,
+    }}
+
+    # --- trees: final RF per cluster -----------------------------------
+    truth_trees = sorted(truth_dir.glob("tree_*.nwk"))
+    trees = []
+    for tpath in truth_trees:
+        tt = common.read_newick_file(tpath)
+        tleaves = set(tt.leaf_names())
+        match = None
+        for cfile in sorted(outdir.glob("cluster_*.nwk")):
+            try:
+                candidate = common.read_newick_file(cfile)
+            except Exception:
+                continue
+            if set(candidate.leaf_names()) == tleaves:
+                match = (cfile.stem, candidate)
+                break
+        if match is None:
+            problems.append(f"no emitted cluster tree has the leaf set of {{tpath.name}}")
+            continue
+        res = common.rf_distance(match[1], tt, collapse=collapse_below)
+        trees.append({{
+            "source": match[0], "truth": tpath.stem, "leaves": len(tleaves),
+            "rf": res.rf, "splits_emitted": res.splits_a, "splits_true": res.splits_b,
+            "rf_normalised": res.rf_normalized, "t_ms": exact_ms,
+            "approximate": False, "focus": 2, "units": "snps",
+        }})
+
+    # --- timeline: replay events.jsonl ---------------------------------
+    timeline = []
     events_path = outdir / "events.jsonl"
-    if events_path.exists():
+    full_truth = None
+    if truth_trees:
+        root = common.NewickNode()
+        for tpath in truth_trees:
+            root.add(common.read_newick_file(tpath))
+        full_truth = root
+    if events_path.exists() and full_truth is not None:
         try:
             log = common.read_event_log(events_path)
-            points, _ = _aot().tree_points(log)
-            timeline = []
+            points, _notes = _aot().tree_points(log)
             for point in points:
-                rf = common.rf_distance(point["tree"], truth, collapse=threshold)
+                res = common.rf_distance(point["tree"], full_truth, collapse=collapse_below)
+                cid = point.get("cluster")
                 timeline.append({{
-                    "t_ms": point["t_ms"],
-                    "seq": point["seq"],
-                    "event": point["event"],
-                    "cluster": point["cluster"],
-                    "focus": point["focus"],
-                    "rf": rf.rf,
-                    "rf_normalized": rf.rf_normalized,
-                    "leaves_shared": rf.leaves_shared,
-                    "splits_run": rf.splits_a,
-                    "splits_truth": rf.splits_b,
+                    "source": (f"cluster {{cid}} (live)" if cid is not None else "backbone (live)"),
+                    "truth": "", "leaves": res.leaves_a, "rf": res.rf,
+                    "splits_emitted": res.splits_a, "splits_true": res.splits_b,
+                    "rf_normalised": res.rf_normalized, "t_ms": point["t_ms"],
+                    "approximate": (point.get("focus") or 0) < 2,
+                    "focus": point.get("focus"), "units": "subs_per_site",
                 }})
-            doc["rf_timeline"] = timeline
         except Exception as exc:
-            doc["rf_timeline_error"] = f"{{type(exc).__name__}}: {{exc}}"
+            problems.append(f"timeline: {{type(exc).__name__}}: {{exc}}")
+
+    doc = {{
+        "output": str(outdir), "truth": str(truth_dir), "run": run_doc,
+        "distance": distance, "clusters": clusters_doc,
+        "trees": trees, "timeline": timeline, "problems": problems,
+    }}
     out_json = out_json or (outdir / "bench.json")
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(doc, indent=2))
+    print(f"fake bench: trees={{len(trees)}} timeline={{len(timeline)}} pairs={{distance['pairs_compared']}}")
     return 0
 
 
