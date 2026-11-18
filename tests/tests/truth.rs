@@ -15,17 +15,17 @@ use mtato_core::tree::parse_newick;
 use mtato_sim::{RefSpec, SimConfig};
 use mtato_tests::{reported_pairs, run_engine, truth_pairs, TempDir};
 
-/// Simulate into `dir/sim`, run the engine into `dir/out`, and return the
-/// results plus the two pairwise maps so a test can compare them directly.
-fn simulate_and_run(
-    label: &str,
-    cfg: SimConfig,
-    threads: usize,
-) -> (
+/// Engine output plus the two pairwise distance maps a truth test compares:
+/// the simulated truth and what the run reported, both keyed by sorted pair.
+type SimulatedRun = (
     RunResults,
     HashMap<(String, String), u64>,
     HashMap<(String, String), u64>,
-) {
+);
+
+/// Simulate into `dir/sim`, run the engine into `dir/out`, and return the
+/// results plus the two pairwise maps so a test can compare them directly.
+fn simulate_and_run(label: &str, cfg: SimConfig, threads: usize) -> SimulatedRun {
     let dir = TempDir::new(label);
     let sim_dir = dir.join("sim");
     let out = mtato_sim::simulate(&cfg, &sim_dir).expect("simulation failed");
@@ -118,7 +118,7 @@ fn t1_differing_positions_equal_truth() {
     // equals the number of truth mutations that separate it from the pivot's
     // lineage, which for a star-free tree is the path length.
     let mut total_snps = 0u64;
-    for (_id, cmp) in &results.comparisons {
+    for cmp in results.comparisons.values() {
         total_snps += cmp.snps();
         // Every reported SNP must be a real substitution on the pivot, with a
         // single base on each side and no N.
@@ -286,7 +286,7 @@ fn t4_segment_events_appear_as_insertions_deletions_or_novel_bp() {
     let mut deletions = 0u64;
     let mut inserted_bp = 0u64;
     let mut deleted_bp = 0u64;
-    for (_id, cmp) in &results.comparisons {
+    for cmp in results.comparisons.values() {
         for v in &cmp.variants {
             match v.kind {
                 mtato_core::variant::VariantKind::Insertion => {

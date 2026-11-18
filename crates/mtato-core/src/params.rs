@@ -99,7 +99,7 @@ impl Parameters {
                 self.k
             ));
         }
-        if self.densities.iter().any(|&d| d == 0) {
+        if self.densities.contains(&0) {
             return Err("densities must all be at least 1".to_string());
         }
         for w in self.densities.windows(2) {
@@ -228,8 +228,10 @@ mod tests {
 
     #[test]
     fn k_must_be_odd_and_small() {
-        let mut p = Parameters::default();
-        p.k = 30;
+        let mut p = Parameters {
+            k: 30,
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         p.k = 33;
         assert!(p.validate().is_err());
@@ -239,8 +241,10 @@ mod tests {
 
     #[test]
     fn densities_must_descend_and_divide() {
-        let mut p = Parameters::default();
-        p.densities = [2048, 16384, 256];
+        let mut p = Parameters {
+            densities: [2048, 16384, 256],
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         p.densities = [16384, 3000, 256];
         assert!(p.validate().is_err(), "3000 does not divide 16384");

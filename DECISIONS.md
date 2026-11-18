@@ -349,3 +349,28 @@ for peak RSS.
 **Verified.** `cargo check --target x86_64-pc-windows-msvc` passes for
 `mtato-core`, `mtato-sim` and `mtato-cli` with no errors and no warnings, which is
 the portability evidence available without a Windows linker (see D4).
+
+---
+
+## D18. M-Tato reports unfiltered whole-assembly differences; baselines are filtered
+
+**What.** No filtering step was added. Every difference found between a member and
+its pivot is written to `cluster_<id>.variants.tsv`, with the contig, the contig
+length and coverage in the contig name, and the `repeat`, `low_identity`, `dup`
+and `end_ext` flags as columns. Comparing M-Tato's raw counts against SKA2 or a
+mapping pipeline therefore requires filtering one side or the other.
+
+**Why.** Section 2 lists no filtering among the goals and section 15 says repeats
+are "flagged, not corrected". Adding a core-genome filter would be a new feature
+(section 0 rule 5) and would also bake in someone's definition of what counts,
+which is precisely the judgement a user investigating an outbreak needs to make
+themselves.
+
+**Affects.** Any comparison against an outside baseline. Measured on the three
+*Salmonella* Heidelberg isolates: unfiltered M-Tato reports 15 differences between
+isolate-A and isolate-B where SKA2 reports 2, but restricting to pivot contigs of at
+least 5 kb gives **exactly 2**, matching SKA2 on reads, SKA2 on assemblies and the
+filtered 1-to-1 alignment. All 13 excluded differences sit on one 1,448 bp contig
+at 139× coverage against about 41× chromosomal — a high-copy element that
+core-genome pipelines discard. Full detail, including the 32-genome comparison and
+its three confounders, is in `docs/REAL_DATA_VALIDATION.md`.

@@ -204,7 +204,7 @@ pub fn diff_output_dirs(a: &Path, b: &Path) -> Vec<String> {
 /// The pairwise SNP counts of a finished run, keyed by sorted genome-name pair.
 pub fn reported_pairs(results: &RunResults) -> HashMap<(String, String), u64> {
     let mut out = HashMap::new();
-    for (_id, m) in results.matrices.iter() {
+    for m in results.matrices.values() {
         let n = m.ids.len();
         for i in 0..n {
             for j in (i + 1)..n {

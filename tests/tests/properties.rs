@@ -103,7 +103,7 @@ fn property_1_reverse_complement_is_invisible() {
 
 fn assert_no_difference(results: &RunResults, label: &str) {
     let mut checked = 0;
-    for (_id, cmp) in &results.comparisons {
+    for cmp in results.comparisons.values() {
         checked += 1;
         assert!(
             cmp.variants.is_empty(),
@@ -202,7 +202,7 @@ fn property_2c_shuffled_and_flipped_contigs_have_no_differences() {
     let (results, _) = run_engine(&paths, &test_params(), None);
     assert_no_difference(&results, "shuffled and flipped contigs");
     // Every contig must still have been placed, so nothing is "novel".
-    for (_id, cmp) in &results.comparisons {
+    for cmp in results.comparisons.values() {
         assert_eq!(
             cmp.novel_bp, 0,
             "a shuffled genome must not invent novel bp"
@@ -432,6 +432,11 @@ fn split_signature(t: &mtato_core::tree::Tree) -> String {
     format!("[{}]<{}>", names.join(","), sp.join("|"))
 }
 
+/// One `--switch` case of property 6: the flag's name plus the parameter
+/// mutation it stands for. The closure is boxed so that the cases can live in
+/// one list despite having distinct closure types.
+type SwitchCase = (&'static str, Box<dyn Fn(&mut Parameters)>);
+
 #[test]
 fn property_6_the_optimisation_switches_do_not_change_the_answer() {
     let dir = TempDir::new("p6");
@@ -457,9 +462,7 @@ fn property_6_the_optimisation_switches_do_not_change_the_answer() {
         "the test must produce some variants, otherwise it proves nothing"
     );
 
-    // Boxed so that the three cases can live in one list despite having
-    // distinct closure types.
-    let cases: Vec<(&str, Box<dyn Fn(&mut Parameters)>)> = vec![
+    let cases: Vec<SwitchCase> = vec![
         (
             "--flat",
             Box::new(|p: &mut Parameters| p.hierarchical = false),
