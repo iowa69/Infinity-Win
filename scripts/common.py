@@ -1309,24 +1309,109 @@ def _leaf_set(node: NewickNode) -> frozenset:
 
 
 def splits(node: NewickNode, leaves: Optional[frozenset] = None) -> set:
-    """Non-trivial bipartitions of ``node`` (unrooted, canonicalised)."""
+    """Non-trivial bipartitions of ``node`` (unrooted, canonicalised).
+
+    Each bipartition is keyed by the side that does *not* hold the
+    alphabetically first leaf. Keying by "the smaller side" instead would give
+    a bipartition with two equal halves two different keys (one per side), so
+    the two children of a root splitting the leaves 50/50 would be counted as
+    two splits.
+    """
     all_leaves = leaves if leaves is not None else _leaf_set(node)
     if len(all_leaves) < 4:
         return set()
+    ref = min(all_leaves)
     out = set()
     for child_node in node.iter_nodes():
         if child_node is node:
             continue
-        side = _leaf_set(child_node)
+        side = _leaf_set(child_node) & all_leaves
         if not side or side >= all_leaves:
             continue
         complement = all_leaves - side
-        if len(side) < 2 and len(complement) < 2:
+        if len(side) < 2 or len(complement) < 2:
+            continue  # trivial split (one leaf on one side)
+        out.add(frozenset(complement if ref in side else side))
+    return out
+
+
+# -- bitmask splits ----------------------------------------------------------
+#
+# Splits as Python ints (one bit per leaf) instead of frozensets of names. The
+# accuracy-over-time curve scores hundreds of trees of up to thousands of
+# leaves per run, and the set-of-names representation is quadratic in the
+# depth of the tree; with masks a whole tree is one post-order pass.
+
+_INT_BIT_COUNT = getattr(int, "bit_count", None)
+
+
+def popcount(value: int) -> int:
+    """Number of set bits (``int.bit_count`` where Python has it)."""
+    if _INT_BIT_COUNT is not None:
+        return _INT_BIT_COUNT(value)
+    return bin(value).count("1")
+
+
+def leaf_index(names: Iterable[str]) -> Dict[str, int]:
+    """``name -> bit`` for a leaf universe, in sorted name order."""
+    return {name: 1 << i for i, name in enumerate(sorted(set(names)))}
+
+
+def clade_masks(
+    root: NewickNode, index: Dict[str, int], threshold: float = 0.0
+) -> Tuple[int, List[int]]:
+    """``(leaf mask of the whole tree, [clade mask of every kept edge])``.
+
+    One entry per non-root internal node whose branch is *not* contracted by
+    ``threshold`` (the same rule as :func:`contract_short_branches`: a branch
+    shorter than the threshold is contracted, a missing length is kept, a leaf
+    is never contracted). Leaves missing from ``index`` contribute no bit, which
+    is how a tree is restricted to a leaf universe. Iterative, so a
+    caterpillar tree with thousands of leaves cannot hit the recursion limit.
+    """
+    masks: List[int] = []
+    value: Dict[int, int] = {}
+    stack: List[Tuple[NewickNode, bool]] = [(root, False)]
+    while stack:
+        node, expanded = stack.pop()
+        if not node.children:
+            value[id(node)] = index.get(node.name, 0) if node.name else 0
             continue
-        key = side if len(side) <= len(complement) else complement
-        if len(key) < 2:
-            continue  # trivial split (one leaf on the small side)
-        out.add(frozenset(key))
+        if not expanded:
+            stack.append((node, True))
+            for child in node.children:
+                stack.append((child, False))
+            continue
+        mask = 0
+        for child in node.children:
+            mask |= value.pop(id(child), 0)
+        value[id(node)] = mask
+        if node is root:
+            continue
+        if threshold and node.length is not None and node.length < threshold:
+            continue
+        masks.append(mask)
+    return value.get(id(root), 0), masks
+
+
+def canonical_splits(masks: Iterable[int], universe: int) -> set:
+    """Non-trivial bipartitions of ``universe`` among ``masks``, canonicalised.
+
+    Each mask is restricted to ``universe``; a bipartition is kept when both
+    sides hold at least two leaves, and keyed by the side without the lowest
+    set bit of ``universe`` - so both sides of one bipartition map to one key.
+    """
+    n = popcount(universe)
+    if n < 4:
+        return set()
+    ref = universe & -universe
+    out = set()
+    for mask in masks:
+        mask &= universe
+        k = popcount(mask)
+        if k < 2 or n - k < 2:
+            continue
+        out.add(universe ^ mask if mask & ref else mask)
     return out
 
 
@@ -1429,17 +1514,29 @@ def rf_distance(
             f"only {len(shared)} shared leaves: RF is undefined for fewer than 4 taxa"
         )
         return result
-    run_cmp = contract_short_branches(run_tree, collapse) if collapse else run_tree
-    truth_cmp = contract_short_branches(truth_tree, collapse) if collapse else truth_tree
-    run_pruned = prune_to(run_cmp, shared) if len(shared) < len(run_leaves) else run_cmp
-    truth_pruned = prune_to(truth_cmp, shared) if len(shared) < len(truth_leaves) else truth_cmp
-    base = frozenset(shared)
-    a = splits(run_pruned, base)
-    b = splits(truth_pruned, base)
+    # Contract short branches, restrict to the shared leaves, take the splits:
+    # restricting every clade to the shared leaves gives exactly the splits of
+    # the pruned tree, so no pruned copy is built.
+    index = leaf_index(shared)
+    universe = (1 << len(index)) - 1
+    _, run_masks = clade_masks(run_tree, index, collapse or 0.0)
+    _, truth_masks = clade_masks(truth_tree, index, collapse or 0.0)
+    a = canonical_splits(run_masks, universe)
+    b = canonical_splits(truth_masks, universe)
+    return rf_from_split_sets(a, b, result)
+
+
+def rf_from_split_sets(a: set, b: set, result: Optional[RfResult] = None) -> RfResult:
+    """Fill an :class:`RfResult` from two canonical split sets.
+
+    ``rf_normalized = rf / (splits_a + splits_b)``: 0 is identical, 1 means no
+    split is shared (a star tree against any resolved truth scores 1).
+    """
+    result = result or RfResult()
     result.splits_a = len(a)
     result.splits_b = len(b)
     result.shared_splits = len(a & b)
-    result.rf = len(a - b) + len(b - a)
+    result.rf = len(a ^ b)
     denom = len(a) + len(b)
     result.rf_normalized = (result.rf / denom) if denom else 0.0
     return result
