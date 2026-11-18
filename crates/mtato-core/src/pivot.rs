@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::blocks::{block_ranges, hash_block, Block};
 use crate::fasta::{Contig, GenomeData};
+use crate::interval::{merge, Iv};
 use crate::params::Parameters;
 use crate::seq::{scan_windows, Anchor, Thresholds, LEVELS};
 
@@ -60,6 +61,14 @@ pub struct PivotIndex {
     /// they occur more than once. Reported as a warning: it measures how much
     /// of the pivot is repetitive.
     pub repeated_anchor_hashes: u64,
+    /// Pivot intervals covered by a leaf (level-3) block whose hash occurs more
+    /// than once in the pivot. Indexed by contig, merged and sorted.
+    ///
+    /// Defined on the pivot alone, so it cannot depend on which block level a
+    /// member happened to match at. That is what makes the `repeat` flag of
+    /// section 15 agree between flat and hierarchical mode, as property 6 of
+    /// section 10.2 requires.
+    pub repeat_regions: Vec<Vec<Iv>>,
 }
 
 impl PivotIndex {
@@ -147,6 +156,24 @@ impl PivotIndex {
         }
         let distinct_repeated = counts.values().filter(|&&c| c > 1).count() as u64;
 
+        // Repeat regions, from the LEAF level. Leaf blocks are the finest
+        // granularity the index has, so "this pivot position lies in a repeated
+        // leaf block" is a fact about the pivot alone and cannot vary with the
+        // level a member matched at.
+        let mut repeat_regions = vec![Vec::new(); n_contigs];
+        for locs in block_dict[LEVELS - 1].values() {
+            if locs.len() > 1 {
+                for l in locs {
+                    if let Some(v) = repeat_regions.get_mut(l.contig as usize) {
+                        v.push((l.start, l.end));
+                    }
+                }
+            }
+        }
+        for v in repeat_regions.iter_mut() {
+            *v = merge(std::mem::take(v));
+        }
+
         let contig_lens: Vec<u64> = data.contigs.iter().map(|c| c.len()).collect();
         let total_len = contig_lens.iter().sum();
 
@@ -163,6 +190,7 @@ impl PivotIndex {
             block_dict,
             anchor_map,
             repeated_anchor_hashes: distinct_repeated,
+            repeat_regions,
         }
     }
 
@@ -173,6 +201,16 @@ impl PivotIndex {
 
     pub fn contig_name(&self, c: u32) -> &str {
         &self.contigs[c as usize].name
+    }
+
+    /// True when the pivot interval `[ps, pe)` on contig `c` overlaps a repeated
+    /// leaf block. This is the granularity-independent test behind the `repeat`
+    /// flag of section 15.
+    pub fn is_repeat(&self, c: u32, ps: u64, pe: u64) -> bool {
+        match self.repeat_regions.get(c as usize) {
+            Some(regions) => regions.iter().any(|&(s, e)| s < pe && ps < e),
+            None => false,
+        }
     }
 
     /// Look a block hash up at one level (1-based).

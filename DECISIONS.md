@@ -724,3 +724,73 @@ emitted once at Focus 2 and `PieceView` carries no level. Both need
 `MapUpdateInfo` to gain a breakpoint list and a per-piece level, emitted at Focus 1
 as well as Focus 2. SVG export is also not implemented; section 8 asks for it only
 "if practical".
+
+---
+
+## D25. Property 6 is still not satisfied; two attempts moved the discrepancy rather than removing it
+
+Property 6 (section 10.2) requires flat mode, hierarchical mode and every cache
+switch to give identical variants, distances and trees. Measured on the three real
+datasets, the cache switches (`--no-piece-cache`, `--no-profile-grouping`) are
+exactly identical, and so is `--single-cluster` where it is comparable. **`--flat`
+is not.** Three changes were made and measured; the honest summary is that they
+improved variant agreement and degraded distance agreement.
+
+| state | s_aureus_cc variants | s_aureus_cc distances | ncbi_pd variants | ncbi_pd distances |
+|---|---|---|---|---|
+| original | differ (3 vs 2 rows) | identical | identical | identical |
+| after all three changes | differ (7 rows) | differ | identical | differ |
+| after reverting change 3 | **differ (1 row of 5346)** | differ (3 files) | **identical** | differ (1 file) |
+
+**Change 1 — map anchors by containment, not by boundary (kept).** Section 6.6 B
+says an anchor "at the start or end of a matched block" takes its position from
+that block. In flat mode a leaf block is delimited by consecutive level-3 anchors,
+so *contained* and *at-a-boundary* are the same set; in hierarchical mode a matched
+coarse block spans many finer anchors, which fell through to the anchor map — and
+that map deliberately omits repeated k-mers (6.5). Flat mode therefore resolved
+repeats that hierarchical mode could not resolve at all. Mapping by containment is
+free (arithmetic on an already-matched block, nothing re-hashed) and recovered nine
+variants on `s_aureus_cc` that hierarchical mode was silently dropping. This was a
+genuine bug and the fix is right on its own terms.
+
+**Change 2 — derive the `repeat` flag from the pivot, not from the matched block
+(kept).** `PivotIndex::repeat_regions` is the set of pivot intervals covered by a
+*leaf* block whose hash occurs more than once, so it is a fact about the pivot
+alone and cannot vary with the level a member matched at. This removed the two
+rows that differed only in whether they carried the `repeat` flag.
+
+**Change 3 — refuse to match an ambiguous block (REVERTED).** Leaving a repeated
+block unmatched when continuation cannot resolve it, so both modes would send the
+region to the piece step, made property 6 *worse*: it shrank the matched set, which
+moved coverage boundaries and changed `comparable` and therefore every pairwise
+distance, on datasets where flat and hierarchical had previously agreed exactly.
+`s_aureus_cc` went from 5 differing variant rows to 7 and `ncbi_pd_cluster` lost
+its exact agreement. Reverted; the reasoning is left in the code comment at the
+call site so it is not re-attempted.
+
+**Where the residual sits.** With changes 1 and 2 and change 3 reverted, variant
+lists are identical on `ncbi_pd_cluster` (929/929) and `salmonella_trio` (22/22)
+and differ by one row in 5346 on `s_aureus_cc`. But the *distance* files differ on
+all three. Since the variants agree, the difference is entirely in `comparable` —
+that is, in which pivot bases count as covered — and coverage is built from matched
+blocks in one mode and from pieces in the other. A coarse block that matches
+uniquely can contain a leaf block whose hash is repeated, and the leaf block's copy
+is then chosen by `pick_continuation` at leaf granularity, which need not be the
+copy the coarse match implies. The two modes therefore cover slightly different
+spans, and `comparable` moves.
+
+**What a real fix requires.** Making property 6 hold exactly means making the
+*matched region set* granularity-independent, not just the flags: flat mode would
+have to reproduce the same coverage spans as hierarchical mode over the same
+sequence. Options, none attempted: derive coverage from anchor-to-anchor spans
+rather than from whichever blocks matched; or have flat mode compute coarse hashes
+purely to disambiguate repeats, which contaminates the section 11 experiment it
+exists to measure; or narrow property 6 to "identical variants" and report
+`comparable` as mode-dependent. This is a design decision for the owner, not a bug
+fix, which is why it is recorded here rather than resolved unilaterally.
+
+**Consequence for section 11.** Until this is settled, the `flat` row of the
+benchmark measures a configuration that does not produce byte-identical distances,
+so its timing advantage cannot be read as a pure optimisation gain. The other four
+switches are unaffected: `no_piece_cache` and `no_profile_grouping` are exactly
+identical, and `single_cluster` differs by construction (a different pivot).

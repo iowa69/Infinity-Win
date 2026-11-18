@@ -468,6 +468,17 @@ pub fn match_blocks(
         let loc = if !repeat {
             hits[0]
         } else {
+            // An ambiguous block is resolved by continuation from the previous
+            // matched block, and otherwise by taking the first occurrence, which
+            // is deterministic because the dictionary lists occurrences in contig
+            // then position order (6.6 A).
+            //
+            // Refusing to match here instead — leaving the region to the piece
+            // step — was tried and measured: it made property 6 *worse*, because
+            // shrinking the matched set moves the coverage boundaries and so
+            // changes `comparable` and every pairwise distance, on datasets where
+            // flat and hierarchical previously agreed exactly. The mapping choice
+            // is flagged (`repeat`) rather than avoided; see DECISIONS.md D25.
             pick_continuation(hits, c.flipped, out.last(), k as u64).unwrap_or(hits[0])
         };
         out.push(MatchedBlock {
@@ -824,13 +835,12 @@ fn classify_gap(ctx: &GapCtx<'_>, x: &SharedPoint, y: &SharedPoint) -> Gap {
         };
     }
 
-    // A repeat next door makes the mapping suspect (section 15): flag it rather
-    // than trying to correct it.
+    // A repeat makes the mapping suspect (section 15): flag it rather than trying
+    // to correct it. The test is against the PIVOT's own repeat regions, not
+    // against whichever block granularity happened to match, so flat and
+    // hierarchical mode flag exactly the same pieces (property 6, section 10.2).
     let mut piece_flags = 0u32;
-    if matched
-        .iter()
-        .any(|m| m.repeat && ((m.gs <= gs && gs < m.ge) || (m.gs <= y.gpos && y.gpos < m.ge)))
-    {
+    if pivot.is_repeat(x.pcontig, ps, pe) {
         piece_flags |= flags::REPEAT;
     }
 
