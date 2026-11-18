@@ -50,6 +50,9 @@ pub mod flags {
     pub const END_EXT: u32 = 1 << 3;
     /// The alignment had to give up (band too narrow); reported as COMPLEX.
     pub const ALIGN_FAILED: u32 = 1 << 4;
+    /// Found by extending outward from the anchors on either side of a
+    /// breakpoint (typically a pivot contig junction).
+    pub const BREAK_EXT: u32 = 1 << 5;
 
     pub fn names(f: u32) -> Vec<&'static str> {
         let mut v = Vec::new();
@@ -67,6 +70,9 @@ pub mod flags {
         }
         if f & ALIGN_FAILED != 0 {
             v.push("align_failed");
+        }
+        if f & BREAK_EXT != 0 {
+            v.push("break_ext");
         }
         v
     }

@@ -25,8 +25,8 @@ use crate::compare::{
 };
 use crate::counters::Counters;
 use crate::events::{
-    event_bus, stage, ClusterFocusInfo, ClusterInfo, Command, Envelope, Event, EventSink,
-    GenomeScannedInfo, MapUpdateInfo, MemberNumbers, PieceView,
+    event_bus, stage, BackboneExactInfo, ClusterDetailInfo, ClusterFocusInfo, ClusterInfo, Command,
+    Envelope, Event, EventSink, GenomeScannedInfo, MapUpdateInfo, MemberNumbers, PieceView,
 };
 use crate::fasta::GenomeData;
 use crate::genome::GenomeRecord;
@@ -83,6 +83,8 @@ pub struct RunResults {
     pub contig_names: HashMap<u32, Vec<String>>,
     /// Cluster id -> the contig names of its pivot.
     pub pivot_contig_names: HashMap<u32, Vec<String>>,
+    /// Cluster id -> the contig lengths of its pivot.
+    pub pivot_contig_lens: HashMap<u32, Vec<u64>>,
     pub counters: Counters,
     pub timings: StageTimings,
     pub notes: Vec<String>,
@@ -90,6 +92,27 @@ pub struct RunResults {
     pub pivot_len: HashMap<u32, u64>,
     pub params: Parameters,
     pub cancelled: bool,
+
+    // --- round 2: SNP rules, resolution, exact backbone ---
+    /// Cluster id -> distances before the SNP rules.
+    pub raw_matrices: HashMap<u32, DistanceMatrix>,
+    /// Genome id -> per variant (in `comparisons[id].variants` order) `PASS`
+    /// or the reasons it does not count.
+    pub filter_reasons: HashMap<u32, Vec<String>>,
+    /// Genome id -> SNPs against its pivot that pass the SNP rules.
+    pub pass_snps: HashMap<u32, u64>,
+    /// Cluster id -> core-genome size after the SNP rules.
+    pub core_bp: HashMap<u32, u64>,
+    /// Cluster id -> bases masked cluster-wide by each rule.
+    pub masked_by_rule: HashMap<u32, Vec<(String, u64)>>,
+    /// Cluster id -> per SNP threshold, a group index per matrix row.
+    pub snp_groups: HashMap<u32, Vec<Vec<u32>>>,
+    /// The backbone from exact pivot-to-pivot comparisons, when computed.
+    pub backbone_exact: Option<crate::backbone::ExactBackbone>,
+    /// The full tree with every branch length in SNPs (`tree.nwk`).
+    pub full_tree_snps: Tree,
+    /// Whether the between-cluster branches of `full_tree_snps` are exact.
+    pub backbone_is_exact: bool,
 }
 
 /// Start the engine on a background thread.
@@ -281,24 +304,69 @@ pub fn run(
     assign_clusters(&mut results, &clustering);
     emit_focus0(&sink, &clustering, &results);
 
-    // ---- refine clusters (6.11.3) ----
+    // ---- refine clusters (6.11.3), as far as the chosen resolution goes ----
     let t = Instant::now();
-    refine_clusters(
-        &pool,
-        &mut results,
-        &mut clustering,
-        &params,
-        &sink,
-        &controls,
-        &cmd_rx,
-    )?;
+    if params.resolution.max_focus() >= 1 {
+        refine_clusters(
+            &pool,
+            &mut results,
+            &mut clustering,
+            &params,
+            &sink,
+            &controls,
+            &cmd_rx,
+        )?;
+    } else {
+        sketch_only_trees(&mut results, &clustering);
+    }
     results.timings.refine_ms = Some(t.elapsed().as_millis() as u64);
 
     results.clusters = clustering.clusters.clone();
     results.dist_to_pivot = clustering.dist_to_pivot.clone();
 
+    // ---- exact distances between clusters ----
+    if params.refine_backbone
+        && params.resolution.max_focus() >= 2
+        && !results.cancelled
+        && results.clusters.len() >= 2
+    {
+        let pivot_ids: Vec<u32> = results.clusters.iter().map(|c| c.pivot).collect();
+        sink.progress(stage::BACKBONE, 0, 1);
+        let ctl = &controls;
+        match crate::backbone::refine(&pool, &results, &pivot_ids, &params, &|| ctl.cancelled()) {
+            Ok(Some(bb)) => {
+                sink.emit(Event::BackboneExact(Box::new(BackboneExactInfo {
+                    newick: to_newick(&bb.tree),
+                    pivots: bb.names.clone(),
+                    snps: bb.snps.clone(),
+                    comparable: bb.comparable.clone(),
+                })));
+                if !bb.estimated.is_empty() {
+                    let msg = format!(
+                        "{} of {} pivot pairs are more than {:.0}% apart and keep a sketch \
+                         estimate between clusters",
+                        bb.estimated.len(),
+                        bb.names.len() * (bb.names.len() - 1) / 2,
+                        crate::backbone::MAX_EXACT_SKETCH_DIST * 100.0
+                    );
+                    sink.warn(msg.clone());
+                    results.notes.push(msg);
+                }
+                results.backbone_exact = Some(bb);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let msg = format!("exact backbone skipped: {e}");
+                sink.warn(msg.clone());
+                results.notes.push(msg);
+            }
+        }
+        sink.progress(stage::BACKBONE, 1, 1);
+    }
+
     // ---- the full tree (6.9) ----
     results.full_tree = build_full_tree(&results);
+    results.full_tree_snps = build_full_tree_snps(&mut results);
     if !results.cancelled && results.cluster_focus.values().all(|&f| f >= 2 || f == 0) {
         results.timings.exact_tree_ms = Some(started.elapsed().as_millis() as u64);
     }
@@ -582,11 +650,22 @@ pub struct ClusterResult {
     pub pivot_len: u64,
     /// Contig names of the cluster's pivot, for the variant files.
     pub pivot_contig_names: Vec<String>,
+    pub pivot_contig_lens: Vec<u64>,
     /// Members dropped at Focus 2 because their FASTA could not be read. Each
     /// is also emitted as a warning; carrying it here lets `apply_cluster_result`
     /// put it in `run.json`'s notes, so a run that silently lost a member is
     /// impossible.
     pub notes: Vec<String>,
+    /// Distances before the SNP rules.
+    pub raw_matrix: DistanceMatrix,
+    /// (genome id, per-variant PASS/reasons), for the members.
+    pub reasons: Vec<(u32, Vec<String>)>,
+    /// (genome id, passing SNPs against the pivot).
+    pub pass_snps: Vec<(u32, u64)>,
+    pub core_bp: u64,
+    pub masked_by_rule: Vec<(String, u64)>,
+    /// Per SNP threshold, a group index per row of `matrix`.
+    pub snp_groups: Vec<Vec<u32>>,
 }
 
 /// Move the clusters the user selected to the front of the work order.
@@ -802,7 +881,41 @@ fn refine_one_cluster(
             })
             .collect(),
     }));
-    if controls.cancelled() {
+    for c in &f1 {
+        sink.emit(Event::Focus1Map(Box::new(MapUpdateInfo {
+            cluster: cluster.id,
+            genome: c.genome_id,
+            genome_name: results.names[c.genome_id as usize].clone(),
+            pivot_name: pivot_rec.name.clone(),
+            pieces: c
+                .focus1
+                .pieces
+                .iter()
+                .map(|p| {
+                    let mut v = piece_view(p, &pivot_names);
+                    v.resolved = false;
+                    v
+                })
+                .collect(),
+            variants: Vec::new(),
+            uncovered: c.uncovered.clone(),
+            pivot_contigs: pivot_names.clone(),
+            pivot_contig_lens: pivot.contig_lens.clone(),
+        })));
+    }
+    sink.emit(Event::ClusterDetail(Box::new(detail_info(
+        cluster.id,
+        1,
+        &m1,
+        None,
+        &names1,
+        pivot.total_len,
+        &[],
+        &[],
+        &[],
+        &[],
+    ))));
+    if controls.cancelled() || params.resolution.max_focus() < 2 {
         return Ok(ClusterResult {
             focus: 1,
             counters,
@@ -811,6 +924,7 @@ fn refine_one_cluster(
             snp_tree: tree1.clone(),
             subs_tree: tree1,
             pivot_contig_names: pivot_names.clone(),
+            pivot_contig_lens: pivot.contig_lens.clone(),
             ..Default::default()
         });
     }
@@ -874,8 +988,19 @@ fn refine_one_cluster(
     for (_, cmp) in &comparisons {
         profiles.push(Profile::from_comparison(cmp, &offsets));
     }
-    let refs: Vec<&Profile> = profiles.iter().collect();
+    let raw_refs: Vec<&Profile> = profiles.iter().collect();
+    let raw_matrix = distance_matrix(&raw_refs, pivot.total_len, &pivot_concat);
+    let fo = crate::filter::apply(
+        &profiles,
+        &pivot_names,
+        &pivot.contig_lens,
+        &offsets,
+        pivot.total_len,
+        &params.snp_filter,
+    );
+    let refs: Vec<&Profile> = fo.profiles.iter().collect();
     let matrix = distance_matrix(&refs, pivot.total_len, &pivot_concat);
+    let snp_groups = crate::filter::snp_groups(&matrix.snps, &params.snp_thresholds);
     let names: Vec<String> = profiles
         .iter()
         .map(|p| results.names[p.genome_id as usize].clone())
@@ -947,9 +1072,45 @@ fn refine_one_cluster(
             pivot_contig_lens: pivot.contig_lens.clone(),
         })));
     }
+    // `fo` is in `profiles` order: the pivot first, then `comparisons`.
+    let reasons: Vec<(u32, Vec<String>)> = comparisons
+        .iter()
+        .enumerate()
+        .map(|(i, (mid, _))| (*mid, fo.reasons[i + 1].clone()))
+        .collect();
+    for (mid, why) in &reasons {
+        sink.emit(Event::MapFilters {
+            cluster: cluster.id,
+            genome: *mid,
+            filters: why.clone(),
+        });
+    }
+    let pass_snps: Vec<(u32, u64)> = profiles
+        .iter()
+        .zip(&fo.pass_snps)
+        .map(|(p, &n)| (p.genome_id, n))
+        .collect();
+    sink.emit(Event::ClusterDetail(Box::new(detail_info(
+        cluster.id,
+        2,
+        &matrix,
+        Some(&raw_matrix),
+        &names,
+        fo.core_bp,
+        &fo.pass_snps,
+        &fo.masked_by_rule,
+        &params.snp_thresholds,
+        &snp_groups,
+    ))));
     sink.emit(Event::Counters(counters.clone()));
 
     Ok(ClusterResult {
+        raw_matrix,
+        reasons,
+        pass_snps,
+        core_bp: fo.core_bp,
+        masked_by_rule: fo.masked_by_rule.clone(),
+        snp_groups,
         focus: if controls.cancelled() { 1 } else { 2 },
         snp_tree,
         subs_tree,
@@ -958,6 +1119,7 @@ fn refine_one_cluster(
         counters,
         pivot_len: pivot.total_len,
         pivot_contig_names: pivot_names,
+        pivot_contig_lens: pivot.contig_lens.clone(),
         notes,
     })
 }
@@ -1163,10 +1325,31 @@ fn apply_cluster_result(results: &mut RunResults, cluster: &Cluster, res: &Clust
         .insert(cluster.id, res.snp_tree.clone());
     results.cluster_focus.insert(cluster.id, res.focus);
     results.matrices.insert(cluster.id, res.matrix.clone());
+    if res.focus >= 2 {
+        results
+            .raw_matrices
+            .insert(cluster.id, res.raw_matrix.clone());
+        results.core_bp.insert(cluster.id, res.core_bp);
+        results
+            .masked_by_rule
+            .insert(cluster.id, res.masked_by_rule.clone());
+        results
+            .snp_groups
+            .insert(cluster.id, res.snp_groups.clone());
+        for (mid, why) in &res.reasons {
+            results.filter_reasons.insert(*mid, why.clone());
+        }
+        for (mid, n) in &res.pass_snps {
+            results.pass_snps.insert(*mid, *n);
+        }
+    }
     results.pivot_len.insert(cluster.id, res.pivot_len);
     results
         .pivot_contig_names
         .insert(cluster.id, res.pivot_contig_names.clone());
+    results
+        .pivot_contig_lens
+        .insert(cluster.id, res.pivot_contig_lens.clone());
     for (mid, cmp) in &res.comparisons {
         if let Some(r) = results.records.get_mut(*mid as usize) {
             r.focus = res.focus;
@@ -1207,6 +1390,108 @@ pub fn build_full_tree(results: &RunResults) -> Tree {
         }
     }
     full
+}
+
+/// The full tree with branch lengths in SNPs: the exact backbone when there is
+/// one (otherwise the sketch backbone scaled by the median pivot length, an
+/// estimate), with every pivot leaf replaced by its cluster's SNP tree.
+pub fn build_full_tree_snps(results: &mut RunResults) -> Tree {
+    let (mut full, exact) = match &results.backbone_exact {
+        Some(bb) => (bb.tree.clone(), bb.estimated.is_empty()),
+        None => {
+            let mut lens: Vec<u64> = results
+                .clusters
+                .iter()
+                .map(|c| results.records[c.pivot as usize].stats.length)
+                .collect();
+            lens.sort_unstable();
+            let median = lens.get(lens.len() / 2).copied().unwrap_or(0) as f64;
+            (
+                crate::backbone::scaled(&results.backbone, median),
+                results.clusters.len() <= 1,
+            )
+        }
+    };
+    results.backbone_is_exact = exact;
+    let mut ids: Vec<u32> = results.clusters.iter().map(|c| c.id).collect();
+    ids.sort_unstable();
+    for id in ids {
+        let Some(cluster) = results.clusters.iter().find(|c| c.id == id) else {
+            continue;
+        };
+        let pivot_name = results.names[cluster.pivot as usize].clone();
+        if let Some(sub) = results.cluster_snp_trees.get(&id) {
+            if sub.leaf_count() > 0 {
+                graft(&mut full, &pivot_name, sub.clone());
+            }
+        }
+    }
+    full
+}
+
+/// Resolution "sketch": no refinement, so each cluster's tree is the Focus 0
+/// star of its members at their sketch distance from the pivot.
+fn sketch_only_trees(results: &mut RunResults, c: &Clustering) {
+    for cl in &c.clusters {
+        let pivot_name = results.names[cl.pivot as usize].clone();
+        let plen = results.records[cl.pivot as usize].stats.length as f64;
+        let members: Vec<(String, f64)> = cl
+            .members
+            .iter()
+            .filter(|&&m| m != cl.pivot)
+            .map(|&m| {
+                (
+                    results.names[m as usize].clone(),
+                    c.dist_to_pivot[m as usize],
+                )
+            })
+            .collect();
+        let snp_members: Vec<(String, f64)> =
+            members.iter().map(|(n, d)| (n.clone(), d * plen)).collect();
+        results
+            .cluster_trees
+            .insert(cl.id, star_tree(&pivot_name, &members));
+        results
+            .cluster_snp_trees
+            .insert(cl.id, star_tree(&pivot_name, &snp_members));
+        results.cluster_focus.insert(cl.id, 0);
+    }
+}
+
+/// The payload of a `ClusterDetail` event.
+#[allow(clippy::too_many_arguments)]
+fn detail_info(
+    cluster: u32,
+    focus: u8,
+    m: &DistanceMatrix,
+    raw: Option<&DistanceMatrix>,
+    names: &[String],
+    core_bp: u64,
+    pass_snps: &[u64],
+    masked_by_rule: &[(String, u64)],
+    thresholds: &[u64],
+    groups: &[Vec<u32>],
+) -> ClusterDetailInfo {
+    let small = m.ids.len() <= crate::events::DETAIL_MATRIX_MAX;
+    let pick = |mm: &DistanceMatrix| -> Vec<Vec<f64>> {
+        let src = if focus >= 2 { &mm.snps } else { &mm.estimates };
+        src.iter()
+            .map(|r| r.iter().map(|&v| v as f64).collect())
+            .collect()
+    };
+    ClusterDetailInfo {
+        cluster,
+        focus,
+        ids: m.ids.clone(),
+        names: names.to_vec(),
+        matrix: small.then(|| pick(m)),
+        raw_matrix: if small { raw.map(pick) } else { None },
+        core_bp,
+        pass_snps: pass_snps.to_vec(),
+        masked_by_rule: masked_by_rule.to_vec(),
+        snp_thresholds: thresholds.to_vec(),
+        snp_groups: groups.to_vec(),
+    }
 }
 
 /// Flattened uncovered intervals of one comparison, for callers that need a

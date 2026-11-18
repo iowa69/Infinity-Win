@@ -678,6 +678,9 @@ pub struct ContigPieces {
     /// Pivot intervals this contig covers, each carrying the member interval
     /// that produced it, which is what makes the `dup` rule of 6.8 work (D12).
     pub covered: Vec<CoverSeg>,
+    /// The two shared points on either side of each breakpoint, for
+    /// [`extend_breakpoints`].
+    pub break_pairs: Vec<(SharedPoint, SharedPoint)>,
 }
 
 /// Walk the shared points of one contig and classify every gap (6.6 C).
@@ -705,6 +708,7 @@ pub fn build_pieces(
     let mut diff_pieces = Vec::new();
     let mut breakpoints = Vec::new();
     let mut unplaced = Vec::new();
+    let mut break_pairs = Vec::new();
     // Matched blocks contribute coverage on their own, whether or not their
     // boundary anchors produced shared points.
     let mut covered: Vec<CoverSeg> = matched
@@ -742,7 +746,12 @@ pub fn build_pieces(
             Gap::Break { bp, unplaced: u } => {
                 counters.breakpoints += 1;
                 breakpoints.push(bp);
-                unplaced.push(u);
+                if params.break_extension {
+                    // `extend_breakpoints` decides what stays unplaced.
+                    break_pairs.push((x, y));
+                } else {
+                    unplaced.push(u);
+                }
             }
         }
     }
@@ -751,6 +760,7 @@ pub fn build_pieces(
         breakpoints,
         unplaced,
         covered,
+        break_pairs,
     }
 }
 
@@ -1048,6 +1058,166 @@ pub fn extend_contig_ends(
     out
 }
 
+/// Extend outward from the two shared points on either side of each
+/// breakpoint, exactly as step D does at contig ends.
+///
+/// A breakpoint is most often a junction between two pivot contigs: the member
+/// runs straight across it, but the shared point on the left lies on one pivot
+/// contig and the one on the right on another, so step C cannot build a piece.
+/// Without this, the member bases from the last anchor to the pivot contig's end
+/// (and from the next contig's start to the first anchor) were left uncompared:
+/// about 800 bases per contig on fragmented assemblies, which is what made the
+/// core genome shrink as fragmented genomes were added.
+///
+/// The left point extends rightwards, but never past the right point; the right
+/// point then extends leftwards, but never into what the left walk explained,
+/// so no member base is placed twice. What neither walk explains is unplaced.
+pub fn extend_breakpoints(
+    pivot: &PivotIndex,
+    contig: u32,
+    seq: &[u8],
+    pairs: &[(SharedPoint, SharedPoint)],
+    matched: &[MatchedBlock],
+    params: &Parameters,
+    counters: &mut Counters,
+) -> EndResult {
+    let mut out = EndResult::default();
+    let k = params.k as u64;
+    let scores = AlignScores::default();
+    let n = seq.len() as u64;
+    for (x, y) in pairs {
+        // ---- rightwards from x, member limited to [.., y.gpos) ----
+        let (m_at, p_at, rel) = right_frontier(x, matched, k, n);
+        let limit = y.gpos.min(n);
+        let mut right_end = m_at.min(limit);
+        if m_at < limit {
+            counters.end_extensions += 1;
+            let pres = pivot.contig_seq(x.pcontig);
+            let p_dir: i64 = if rel { -1 } else { 1 };
+            let p_start: i64 = if rel { p_at as i64 - 1 } else { p_at as i64 };
+            let mseq = &seq[..limit as usize];
+            let res = xdrop_walk(
+                pres,
+                mseq,
+                Walk {
+                    r_start: p_start,
+                    a_start: m_at as i64,
+                    r_dir: p_dir,
+                    a_dir: 1,
+                    complement_alt: rel,
+                },
+                &scores,
+                params.xdrop,
+            );
+            for &i in &res.mismatches {
+                let ppos = p_start + i as i64 * p_dir;
+                let gpos = m_at as i64 + i as i64;
+                if ppos < 0 || ppos >= pres.len() as i64 || gpos >= limit as i64 {
+                    continue;
+                }
+                let (rb, ab) = (pres[ppos as usize], seq[gpos as usize]);
+                if rb == b'N' || ab == b'N' {
+                    out.not_called
+                        .push((x.pcontig, ppos as u64, ppos as u64 + 1));
+                    continue;
+                }
+                out.variants.push(Variant {
+                    kind: VariantKind::Snp,
+                    pivot_contig: x.pcontig,
+                    pivot_start: ppos as u64,
+                    pivot_end: ppos as u64 + 1,
+                    ref_allele: (rb as char).to_string(),
+                    alt_allele: (pivot_strand_allele(ab, rel) as char).to_string(),
+                    genome_contig: contig,
+                    genome_start: gpos as u64,
+                    genome_end: gpos as u64 + 1,
+                    strand: if rel { '-' } else { '+' },
+                    flags: flags::BREAK_EXT,
+                });
+            }
+            let (cs, ce) = walked_range(p_start, p_dir, res.len);
+            if ce > cs && cs >= 0 {
+                out.covered.push(CoverSeg {
+                    pcontig: x.pcontig,
+                    ps: cs as u64,
+                    pe: (ce as u64).min(pres.len() as u64),
+                    gcontig: contig,
+                    gs: m_at,
+                    ge: m_at + res.len as u64,
+                });
+            }
+            right_end = (m_at + res.len as u64).min(limit);
+        }
+
+        // ---- leftwards from y, member limited to [right_end, ..) ----
+        let (m_at, p_at, rel) = left_frontier(y, matched, k);
+        let mut left_start = m_at.max(right_end);
+        if m_at > right_end {
+            counters.end_extensions += 1;
+            let pres = pivot.contig_seq(y.pcontig);
+            let p_dir: i64 = if rel { 1 } else { -1 };
+            let p_start: i64 = if rel { p_at as i64 } else { p_at as i64 - 1 };
+            let lo = right_end as usize;
+            let mseq = &seq[lo..];
+            let res = xdrop_walk(
+                pres,
+                mseq,
+                Walk {
+                    r_start: p_start,
+                    a_start: m_at as i64 - 1 - lo as i64,
+                    r_dir: p_dir,
+                    a_dir: -1,
+                    complement_alt: rel,
+                },
+                &scores,
+                params.xdrop,
+            );
+            for &i in &res.mismatches {
+                let ppos = p_start + i as i64 * p_dir;
+                let gpos = m_at as i64 - 1 - i as i64;
+                if ppos < 0 || ppos >= pres.len() as i64 || gpos < lo as i64 {
+                    continue;
+                }
+                let (rb, ab) = (pres[ppos as usize], seq[gpos as usize]);
+                if rb == b'N' || ab == b'N' {
+                    out.not_called
+                        .push((y.pcontig, ppos as u64, ppos as u64 + 1));
+                    continue;
+                }
+                out.variants.push(Variant {
+                    kind: VariantKind::Snp,
+                    pivot_contig: y.pcontig,
+                    pivot_start: ppos as u64,
+                    pivot_end: ppos as u64 + 1,
+                    ref_allele: (rb as char).to_string(),
+                    alt_allele: (pivot_strand_allele(ab, rel) as char).to_string(),
+                    genome_contig: contig,
+                    genome_start: gpos as u64,
+                    genome_end: gpos as u64 + 1,
+                    strand: if rel { '-' } else { '+' },
+                    flags: flags::BREAK_EXT,
+                });
+            }
+            let (cs, ce) = walked_range(p_start, p_dir, res.len);
+            if ce > cs {
+                out.covered.push(CoverSeg {
+                    pcontig: y.pcontig,
+                    ps: cs.max(0) as u64,
+                    pe: (ce as u64).min(pres.len() as u64),
+                    gcontig: contig,
+                    gs: m_at.saturating_sub(res.len as u64),
+                    ge: m_at,
+                });
+            }
+            left_start = m_at.saturating_sub(res.len as u64).max(right_end);
+        }
+        if left_start > right_end {
+            out.unplaced.push((contig, right_end, left_start));
+        }
+    }
+    out
+}
+
 /// Where the explained part of a contig begins, as `(member position, pivot
 /// position, rel)`.
 ///
@@ -1060,7 +1230,14 @@ fn left_frontier(first: &SharedPoint, matched: &[MatchedBlock], k: u64) -> (u64,
         .filter(|m| m.gs <= first.gpos && first.gpos < m.ge)
         .min_by_key(|m| m.gs);
     match covering {
-        Some(m) => (m.gs, m.pe, m.rel),
+        // The member base just left of the block, `gs - 1`, sits next to the
+        // pivot base the block's first member base maps to: `ps` on the same
+        // strand (walk backwards from `ps - 1`), `pe - 1` on opposite strands
+        // (walk forwards from `pe`). Returning `pe` in both cases made a
+        // forward-strand extension compare the member with the wrong stretch of
+        // the pivot: it stopped almost at once (leaving ~half a block uncovered
+        // at every contig end) and could keep a spurious SNP or two.
+        Some(m) => (m.gs, if m.rel { m.pe } else { m.ps }, m.rel),
         None => (
             first.gpos,
             if first.rel {
@@ -1087,7 +1264,10 @@ fn right_frontier(
         .filter(|m| m.gs < anchor_end && anchor_end <= m.ge)
         .max_by_key(|m| m.ge);
     match covering {
-        Some(m) => (m.ge, m.pe, m.rel),
+        // The mirror of `left_frontier`: past the block's last member base, the
+        // pivot continues at `pe` on the same strand and at `ps - 1` (walking
+        // backwards) on opposite strands.
+        Some(m) => (m.ge, if m.rel { m.ps } else { m.pe }, m.rel),
         None => (
             anchor_end,
             if last.rel { last.ppos } else { last.ppos + k },
@@ -1135,6 +1315,7 @@ pub fn compare_member(
             breakpoints,
             unplaced,
             covered,
+            break_pairs,
         } = build_pieces(
             pivot,
             cid,
@@ -1158,8 +1339,22 @@ pub fn compare_member(
         // picture (see [`Focus1::variants`]) and must survive into the staged
         // Focus 2 pass, which resumes from `focus1` rather than from this
         // function's local list.
+        let brk = extend_breakpoints(
+            pivot,
+            cid,
+            &contig.seq,
+            &break_pairs,
+            &matched,
+            params,
+            &mut counters,
+        );
         focus1.variants.extend(ends.variants.iter().cloned());
         variants.extend(ends.variants);
+        focus1.variants.extend(brk.variants.iter().cloned());
+        variants.extend(brk.variants);
+        focus1.covered.extend(brk.covered);
+        focus1.not_called.extend(brk.not_called);
+        focus1.unplaced.extend(brk.unplaced);
         focus1.covered.extend(covered);
         focus1.covered.extend(ends.covered);
         focus1.not_called.extend(ends.not_called);

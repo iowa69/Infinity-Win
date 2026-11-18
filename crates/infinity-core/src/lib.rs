@@ -45,13 +45,16 @@
 #![warn(missing_debug_implementations)]
 
 pub mod align;
+pub mod backbone;
 pub mod blocks;
 pub mod cluster;
 pub mod compare;
 pub mod counters;
 pub mod engine;
 pub mod events;
+pub mod export;
 pub mod fasta;
+pub mod filter;
 pub mod genome;
 pub mod interval;
 pub mod output;

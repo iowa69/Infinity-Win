@@ -185,7 +185,8 @@ mod tests {
     use infinity_core::events::{event_bus, Event, GenomeScannedInfo};
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("infinity-gui-open-{}-{tag}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("infinity-gui-open-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

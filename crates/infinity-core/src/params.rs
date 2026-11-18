@@ -2,7 +2,59 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::filter::SnpFilter;
 use crate::seq::LEVELS;
+
+/// How far iterative refinement goes: the genomic resolution the user asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// Clusters and the sketch tree only (Focus 0). Seconds.
+    Sketch,
+    /// Also find where cluster members differ, block by block (Focus 1).
+    Blocks,
+    /// Resolve every difference to bases and count SNPs (Focus 2).
+    #[default]
+    Exact,
+}
+
+impl Resolution {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Resolution::Sketch => "sketch",
+            Resolution::Blocks => "blocks",
+            Resolution::Exact => "exact",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "sketch" | "0" => Ok(Resolution::Sketch),
+            "blocks" | "1" => Ok(Resolution::Blocks),
+            "exact" | "snps" | "2" => Ok(Resolution::Exact),
+            other => Err(format!(
+                "resolution must be sketch, blocks or exact, got {other:?}"
+            )),
+        }
+    }
+
+    /// The highest focus level this resolution allows.
+    pub fn max_focus(&self) -> u8 {
+        match self {
+            Resolution::Sketch => 0,
+            Resolution::Blocks => 1,
+            Resolution::Exact => 2,
+        }
+    }
+}
+
+pub fn default_snp_thresholds() -> Vec<u64> {
+    vec![5, 10, 20]
+}
+
+fn default_true() -> bool {
+    true
+}
 
 /// Everything that changes the result of a run.
 ///
@@ -55,6 +107,25 @@ pub struct Parameters {
     /// the piece cache — a member whose difference pieces are all cached is not
     /// re-read for Focus 2 (`engine::resolve_focus1`). See DECISIONS.md.
     pub memory_budget_bytes: u64,
+
+    // --- resolution and accuracy ---
+    /// How far iterative refinement goes.
+    #[serde(default)]
+    pub resolution: Resolution,
+    /// Which differences count towards distances (see [`crate::filter`]).
+    #[serde(default)]
+    pub snp_filter: SnpFilter,
+    /// SNP cut-offs for single-linkage SNP clusters ("outbreak clusters").
+    #[serde(default = "default_snp_thresholds")]
+    pub snp_thresholds: Vec<u64>,
+    /// After the clusters, also compare the pivots exactly so that the
+    /// distances between clusters are SNP counts rather than sketch estimates.
+    #[serde(default = "default_true")]
+    pub refine_backbone: bool,
+    /// Extend from the anchors on both sides of a breakpoint (pivot contig
+    /// junctions), so fragmented assemblies lose less coverage.
+    #[serde(default = "default_true")]
+    pub break_extension: bool,
 }
 
 impl Default for Parameters {
@@ -76,6 +147,11 @@ impl Default for Parameters {
             profile_grouping: true,
             single_cluster: false,
             memory_budget_bytes: 0,
+            resolution: Resolution::Exact,
+            snp_filter: SnpFilter::default(),
+            snp_thresholds: default_snp_thresholds(),
+            refine_backbone: true,
+            break_extension: true,
         }
     }
 }
@@ -149,6 +225,7 @@ impl Parameters {
         if self.xdrop < 1 {
             return Err(format!("xdrop must be at least 1, got {}", self.xdrop));
         }
+        self.snp_filter.validate()?;
         Ok(())
     }
 

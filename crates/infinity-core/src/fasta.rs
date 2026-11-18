@@ -222,7 +222,11 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("infinity-fasta-test-{}-{}", std::process::id(), name));
+        p.push(format!(
+            "infinity-fasta-test-{}-{}",
+            std::process::id(),
+            name
+        ));
         p
     }
 

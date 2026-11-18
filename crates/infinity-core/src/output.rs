@@ -36,6 +36,7 @@ pub fn write_tables(dir: &Path, results: &RunResults) -> std::io::Result<()> {
         write_cluster_distances(dir, results, c.id)?;
         write_cluster_variants(dir, results, c.id)?;
     }
+    crate::export::write_exports(dir, results)?;
     Ok(())
 }
 
@@ -62,7 +63,7 @@ pub fn write_genomes(dir: &Path, r: &RunResults) -> std::io::Result<()> {
     writeln!(
         w,
         "id\tname\tpath\tlength\tcontigs\tn50\tgc\tcluster\tis_pivot\tfocus\t\
-         snps_vs_pivot\tindels_vs_pivot\tuncovered_bp\tnovel_bp"
+         snps_vs_pivot\tindels_vs_pivot\tuncovered_bp\tnovel_bp\tpass_snps_vs_pivot"
     )?;
     for g in &r.records {
         let cluster = if g.cluster == u32::MAX {
@@ -72,7 +73,7 @@ pub fn write_genomes(dir: &Path, r: &RunResults) -> std::io::Result<()> {
         };
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             g.id,
             g.name,
             g.path.display(),
@@ -86,7 +87,11 @@ pub fn write_genomes(dir: &Path, r: &RunResults) -> std::io::Result<()> {
             g.snps_vs_pivot,
             g.indels_vs_pivot,
             g.uncovered_bp,
-            g.novel_bp
+            g.novel_bp,
+            r.pass_snps
+                .get(&g.id)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "NA".to_string())
         )?;
     }
     w.flush()
@@ -95,7 +100,7 @@ pub fn write_genomes(dir: &Path, r: &RunResults) -> std::io::Result<()> {
 /// `clusters.tsv`: one row per cluster.
 pub fn write_clusters(dir: &Path, r: &RunResults) -> std::io::Result<()> {
     let mut w = writer(dir, "clusters.tsv")?;
-    writeln!(w, "cluster_id\tpivot\tpivot_name\tsize\tfocus")?;
+    writeln!(w, "cluster_id\tpivot\tpivot_name\tsize\tfocus\tcore_bp")?;
     let mut ids: Vec<u32> = r.clusters.iter().map(|c| c.id).collect();
     ids.sort_unstable();
     for id in ids {
@@ -106,12 +111,16 @@ pub fn write_clusters(dir: &Path, r: &RunResults) -> std::io::Result<()> {
         let focus = r.cluster_focus.get(&id).copied().unwrap_or(0);
         writeln!(
             w,
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             c.id,
             c.pivot,
             r.names[c.pivot as usize],
             c.size(),
-            focus
+            focus,
+            r.core_bp
+                .get(&id)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "NA".to_string())
         )?;
     }
     w.flush()
@@ -119,7 +128,12 @@ pub fn write_clusters(dir: &Path, r: &RunResults) -> std::io::Result<()> {
 
 /// `tree.nwk`: the full tree.
 pub fn write_tree(dir: &Path, r: &RunResults) -> std::io::Result<()> {
+    // `tree.nwk` has branch lengths in SNPs, like a standard SNP phylogeny.
+    // The same tree in substitutions per site is kept for tools that expect it.
     let mut w = writer(dir, "tree.nwk")?;
+    writeln!(w, "{}", to_newick(&r.full_tree_snps))?;
+    w.flush()?;
+    let mut w = writer(dir, "tree.subs_per_site.nwk")?;
     writeln!(w, "{}", to_newick(&r.full_tree))?;
     w.flush()
 }
@@ -142,8 +156,12 @@ pub fn write_cluster_distances(dir: &Path, r: &RunResults, cluster: u32) -> std:
     let mut w = writer(dir, &format!("cluster_{cluster}.dist.tsv"))?;
     writeln!(
         w,
-        "genome_a\tname_a\tgenome_b\tname_b\tsnps\tindels\tcomparable_bp\tsubs_per_site"
+        "genome_a\tname_a\tgenome_b\tname_b\tsnps\tindels\tcomparable_bp\tsubs_per_site\t\
+         raw_snps\traw_indels\traw_comparable_bp"
     )?;
+    // `snps` and `comparable_bp` are after the SNP rules (core genome); the
+    // `raw_` columns are every reported difference, before any rule.
+    let raw = r.raw_matrices.get(&cluster);
     let n = m.ids.len();
     for i in 0..n {
         for j in (i + 1)..n {
@@ -154,10 +172,28 @@ pub fn write_cluster_distances(dir: &Path, r: &RunResults, cluster: u32) -> std:
             } else {
                 format!("{:.12}", m.dist[i][j])
             };
+            let (rs, ri, rc) = match raw {
+                Some(x) if x.ids == m.ids => (
+                    x.snps[i][j].to_string(),
+                    x.indels[i][j].to_string(),
+                    x.comparable[i][j].to_string(),
+                ),
+                _ => ("NA".into(), "NA".into(), "NA".into()),
+            };
             writeln!(
                 w,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                m.ids[i], na, m.ids[j], nb, m.snps[i][j], m.indels[i][j], m.comparable[i][j], d
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                m.ids[i],
+                na,
+                m.ids[j],
+                nb,
+                m.snps[i][j],
+                m.indels[i][j],
+                m.comparable[i][j],
+                d,
+                rs,
+                ri,
+                rc
             )?;
         }
     }
@@ -174,7 +210,7 @@ pub fn write_cluster_variants(dir: &Path, r: &RunResults, cluster: u32) -> std::
     writeln!(
         w,
         "genome\tgenome_name\tpivot_contig\tpivot_pos\tref\talt\ttype\t\
-         genome_contig\tgenome_pos\tstrand\tflags"
+         genome_contig\tgenome_pos\tstrand\tflags\tfilter"
     )?;
     // Contig names come from the run results, so writing this file never has to
     // open a FASTA file again.
@@ -196,10 +232,11 @@ pub fn write_cluster_variants(dir: &Path, r: &RunResults, cluster: u32) -> std::
         };
         let gname = r.names.get(mid as usize).cloned().unwrap_or_default();
         let genome_contigs = r.contig_names.get(&mid).unwrap_or(&empty);
-        for v in &cmp.variants {
+        let reasons = r.filter_reasons.get(&mid);
+        for (vi, v) in cmp.variants.iter().enumerate() {
             writeln!(
                 w,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 mid,
                 gname,
                 name_or_index(pivot_contig_names, v.pivot_contig),
@@ -215,7 +252,11 @@ pub fn write_cluster_variants(dir: &Path, r: &RunResults, cluster: u32) -> std::
                 // number: both name the base the insertion sits after.
                 one_based(v.genome_start, v.kind),
                 v.strand,
-                v.flags_string()
+                v.flags_string(),
+                reasons
+                    .and_then(|x| x.get(vi))
+                    .map(String::as_str)
+                    .unwrap_or(crate::filter::PASS)
             )?;
         }
     }

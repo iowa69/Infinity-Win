@@ -268,6 +268,11 @@ impl UiModel {
                 local: false,
             }),
             Event::Finished(s) => self.on_finished(*s),
+            // Round-2 engine events; the desktop program wires them separately.
+            Event::ClusterDetail(_)
+            | Event::Focus1Map(_)
+            | Event::MapFilters { .. }
+            | Event::BackboneExact(_) => {}
         }
     }
 

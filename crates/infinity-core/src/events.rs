@@ -153,6 +153,62 @@ pub enum Event {
     /// serde, so `events.jsonl` is unchanged — the same reasoning that already
     /// boxes `MapUpdate`.
     Finished(Box<RunSummary>),
+    /// The distances of one cluster as a matrix, at Focus 1 (estimates) or
+    /// Focus 2 (SNPs after the SNP rules), with the core-genome size and the
+    /// SNP-threshold groups. Clusters above [`DETAIL_MATRIX_MAX`] members carry
+    /// no matrix, only the summary numbers.
+    ClusterDetail(Box<ClusterDetailInfo>),
+    /// A member's map at Focus 1: where it differs from the pivot, before the
+    /// differences are resolved into variants. Same shape as `MapUpdate`, with
+    /// no variants and every piece unresolved.
+    Focus1Map(Box<MapUpdateInfo>),
+    /// For each variant of the member's `MapUpdate`, in the same order: `PASS`
+    /// or the `;`-separated reasons it does not count (see `filter`).
+    MapFilters {
+        cluster: u32,
+        genome: u32,
+        filters: Vec<String>,
+    },
+    /// The backbone recomputed from exact pivot-to-pivot comparisons, with
+    /// branch lengths in SNPs. Replaces the sketch backbone of `BackboneTree`.
+    BackboneExact(Box<BackboneExactInfo>),
+}
+
+/// Largest cluster whose full matrix travels in a `ClusterDetail` event.
+pub const DETAIL_MATRIX_MAX: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClusterDetailInfo {
+    pub cluster: u32,
+    pub focus: u8,
+    /// Genome ids, in matrix order (the pivot first).
+    pub ids: Vec<u32>,
+    pub names: Vec<String>,
+    /// Pairwise values in `ids` order: SNPs at Focus 2 (after the SNP rules),
+    /// piece-difference estimates at Focus 1. `None` for large clusters.
+    pub matrix: Option<Vec<Vec<f64>>>,
+    /// Pairwise SNPs before the SNP rules, Focus 2 only.
+    pub raw_matrix: Option<Vec<Vec<f64>>>,
+    /// Pivot bases every member covers and no rule masked.
+    pub core_bp: u64,
+    /// Passing SNPs of each genome against the pivot, in `ids` order.
+    pub pass_snps: Vec<u64>,
+    /// Bases masked cluster-wide by each rule.
+    pub masked_by_rule: Vec<(String, u64)>,
+    /// SNP thresholds and, per threshold, a group index per genome.
+    pub snp_thresholds: Vec<u64>,
+    pub snp_groups: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackboneExactInfo {
+    /// Neighbour joining on pivot-to-pivot SNPs; leaves are pivot names.
+    pub newick: String,
+    pub pivots: Vec<String>,
+    /// Core SNPs between pivots, in `pivots` order.
+    pub snps: Vec<Vec<u64>>,
+    /// Bases compared for each pair.
+    pub comparable: Vec<Vec<u64>>,
 }
 
 /// Consumer to engine (section 7).
@@ -194,6 +250,10 @@ impl Envelope {
             Event::Progress { .. } => "progress",
             Event::Warning { .. } => "warning",
             Event::Finished(_) => "finished",
+            Event::ClusterDetail(_) => "cluster_detail",
+            Event::Focus1Map(_) => "focus1_map",
+            Event::MapFilters { .. } => "map_filters",
+            Event::BackboneExact(_) => "backbone_exact",
         }
     }
 }

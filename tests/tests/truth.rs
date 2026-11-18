@@ -483,3 +483,59 @@ fn every_emitted_tree_parses_and_has_the_right_leaves() {
     }
     check(&parsed);
 }
+
+// ---------------------------------------------------------------------------
+// Fragmented assemblies: contig ends inside matched blocks (round 2)
+// ---------------------------------------------------------------------------
+
+/// Regression test for the contig-end frontier bug: when the anchor nearest a
+/// contig end lay inside a matched block, the extension started from the wrong
+/// end of that block on the pivot, stopped almost at once and left about half a
+/// block uncovered at every contig end (~800 bp per contig on real *S. aureus*
+/// assemblies cut into 60 contigs), with an occasional spurious SNP.
+///
+/// With the fix, fragmented members cover almost the whole pivot, and the raw
+/// (unfiltered) SNP counts recover at least 99% of the truth.
+#[test]
+fn fragmented_members_cover_the_pivot_and_recover_the_snps() {
+    let cfg = SimConfig {
+        contigs: 60,
+        random_orientation: true,
+        ..base_cfg(77, 1, 12)
+    };
+    let dir = TempDir::new("frag_cover");
+    let sim_dir = dir.join("sim");
+    let out = infinity_sim::simulate(&cfg, &sim_dir).expect("simulation failed");
+    let params = Parameters {
+        threads: 4,
+        snp_filter: infinity_core::filter::SnpFilter::off(),
+        ..Default::default()
+    };
+    let (results, _events) = run_engine(&out.genomes, &params, None);
+    let mut uncovered = 0u64;
+    let mut contigs = 0u64;
+    for r in &results.records {
+        if !r.is_pivot {
+            uncovered += r.uncovered_bp;
+            contigs += r.stats.contigs as u64;
+        }
+    }
+    let per_contig = uncovered as f64 / contigs.max(1) as f64;
+    assert!(
+        per_contig <= 100.0,
+        "fragmented members must cover the pivot: {per_contig:.0} bp uncovered per contig"
+    );
+    let truth = truth_pairs(&sim_dir.join("truth"));
+    let reported = reported_pairs(&results);
+    let (_exact, compared, max_over, _max_under, sum_true, sum_rep) = errors(&truth, &reported);
+    assert_eq!(compared, truth.len());
+    assert!(
+        max_over <= 1,
+        "no invented SNPs: worst over-report {max_over}"
+    );
+    let ratio = sum_rep as f64 / sum_true as f64;
+    assert!(
+        ratio >= 0.99,
+        "raw recovery must be at least 99%: {ratio:.4}"
+    );
+}

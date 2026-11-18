@@ -8,6 +8,8 @@ authors.workspace = true
 description = "Infinity-Win engine: scan, sketch, cluster, compare, tree, events"
 
 [dependencies]
+# Pure-Rust .xlsx writer for results.xlsx. Pinned exactly (released 2026-10-29).
+rust_xlsxwriter = "=0.102.0"
 crossbeam-channel = { workspace = true }
 flate2 = { workspace = true }
 rayon = { workspace = true }

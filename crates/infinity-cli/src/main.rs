@@ -13,7 +13,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use infinity_core::engine::{run, RunConfig};
 use infinity_core::events::{event_bus, Command, Envelope, Event};
-use infinity_core::params::Parameters;
+use infinity_core::filter::SnpFilter;
+use infinity_core::params::{Parameters, Resolution};
 use infinity_core::seq::LEVELS;
 
 #[derive(Parser, Debug)]
@@ -130,8 +131,72 @@ struct RunArgs {
     verbosity: Verbosity,
 
     /// Stop after the blurry tree, without refining any cluster.
+    /// (Older spelling of `--resolution sketch`, kept for scripts.)
     #[arg(long)]
     focus0_only: bool,
+
+    // --- resolution and accuracy ---
+    /// How far iterative refinement goes: `sketch` (clusters and the sketch
+    /// tree, seconds), `blocks` (where genomes differ), or `exact` (SNPs).
+    #[arg(long, default_value = "exact", value_parser = parse_resolution)]
+    resolution: Resolution,
+
+    /// SNP cut-offs for SNP clusters (single linkage), comma-separated.
+    #[arg(long, value_delimiter = ',', default_values_t = [5u64, 10, 20])]
+    snp_thresholds: Vec<u64>,
+
+    /// Keep the sketch estimate for distances between clusters instead of
+    /// comparing the cluster pivots exactly.
+    #[arg(long)]
+    no_backbone_refine: bool,
+
+    /// Count every reported difference: no core genome, no masking of short
+    /// or high-copy contigs, contig ends, flagged calls or SNP clusters.
+    #[arg(long)]
+    no_snp_filter: bool,
+
+    /// Count differences outside the core genome too.
+    #[arg(long)]
+    no_core: bool,
+
+    /// Do not extend across breakpoints (pivot contig junctions).
+    #[arg(long)]
+    no_break_extension: bool,
+
+    /// Also count SNPs found by extending across a breakpoint (off by
+    /// default: they sit next to contig junctions and are less reliable).
+    #[arg(long)]
+    keep_break_ext: bool,
+
+    /// Fraction of a cluster's genomes that must cover a base for it to be
+    /// core (1.0 = every genome).
+    #[arg(long, default_value_t = 1.0)]
+    core_fraction: f64,
+
+    /// Pivot contigs shorter than this (bp) are not compared.
+    #[arg(long, default_value_t = 5000)]
+    min_contig: u64,
+
+    /// Bases ignored at each end of every pivot contig.
+    #[arg(long, default_value_t = 150)]
+    end_margin: u64,
+
+    /// Ignore pivot contigs whose coverage (from the contig name) exceeds this
+    /// multiple of the typical coverage. 0 turns the rule off.
+    #[arg(long, default_value_t = 1.8)]
+    high_copy: f64,
+
+    /// Window (bp) of the SNP-cluster test. 0 turns the test off.
+    #[arg(long, default_value_t = 1000)]
+    scan_window: u64,
+
+    /// Family-wise error rate of the SNP-cluster test.
+    #[arg(long, default_value_t = 0.01)]
+    scan_alpha: f64,
+}
+
+fn parse_resolution(s: &str) -> Result<Resolution, String> {
+    Resolution::parse(s)
 }
 
 #[derive(Parser, Debug)]
@@ -227,7 +292,7 @@ fn main() {
 }
 
 fn cmd_run(args: RunArgs) -> i32 {
-    let mut params = Parameters {
+    let params = Parameters {
         k: args.k,
         densities: args.densities,
         sketch_level: args.sketch_level,
@@ -244,17 +309,30 @@ fn cmd_run(args: RunArgs) -> i32 {
         profile_grouping: !args.no_profile_grouping,
         single_cluster: args.single_cluster,
         memory_budget_bytes: args.memory_budget,
+        resolution: if args.focus0_only {
+            Resolution::Sketch
+        } else {
+            args.resolution
+        },
+        snp_thresholds: args.snp_thresholds.clone(),
+        refine_backbone: !args.no_backbone_refine,
+        break_extension: !args.no_break_extension,
+        snp_filter: SnpFilter {
+            enabled: !args.no_snp_filter,
+            core: !args.no_core,
+            core_min_fraction: args.core_fraction,
+            min_contig_len: args.min_contig,
+            end_margin: args.end_margin,
+            high_copy_ratio: args.high_copy,
+            drop_flagged: true,
+            keep_break_ext: args.keep_break_ext,
+            scan_window: args.scan_window,
+            scan_alpha: args.scan_alpha,
+        },
     };
     if let Err(e) = params.validate() {
         eprintln!("infinity: invalid parameters: {e}");
         return 2;
-    }
-    if args.focus0_only {
-        // Stopping at the blurry tree means never refining, which is expressed
-        // as a cluster threshold of nothing: every genome is its own cluster.
-        // The engine still reports that honestly rather than pretending to be
-        // exact.
-        params.cluster_dist = f64::MIN_POSITIVE;
     }
 
     let cfg = RunConfig {
@@ -416,6 +494,36 @@ fn render(env: &Envelope, verbosity: Verbosity, last_stage: &mut String) -> Opti
             ))
         }
         Event::Finished(_) => None,
+        Event::ClusterDetail(d) => {
+            if verbosity == Verbosity::Quiet || d.focus < 2 {
+                return None;
+            }
+            let groups: Vec<String> = d
+                .snp_thresholds
+                .iter()
+                .zip(&d.snp_groups)
+                .map(|(t, g)| {
+                    let n = g.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+                    format!("{n} at <={t}")
+                })
+                .collect();
+            Some(format!(
+                "[{t:8.2}s] cluster {}: core genome {} bp; SNP clusters {}",
+                d.cluster,
+                d.core_bp,
+                groups.join(", ")
+            ))
+        }
+        Event::BackboneExact(b) => {
+            if verbosity == Verbosity::Quiet {
+                return None;
+            }
+            Some(format!(
+                "[{t:8.2}s] distances between {} clusters refined to SNPs",
+                b.pivots.len()
+            ))
+        }
+        Event::Focus1Map(_) | Event::MapFilters { .. } => None,
     }
 }
 
