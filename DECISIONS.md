@@ -388,3 +388,98 @@ filtered 1-to-1 alignment. All 13 excluded differences sit on one 1,448 bp conti
 at 139× coverage against about 41× chromosomal — a high-copy element that
 core-genome pipelines discard. Full detail, including the 32-genome comparison and
 its three confounders, is in `docs/REAL_DATA_VALIDATION.md`.
+
+---
+
+## D19. `run.json` and `events.jsonl` are exempt from section 0 rule 3, and were not
+
+**What.** Rule 3 says same inputs and parameters give byte-identical output files
+whatever the thread count. The determinism test in `tests/src/lib.rs` exempts
+`events.jsonl`, `run.json` and `bench.json` from the byte comparison, and that
+exemption was never recorded here as rule 4 requires. It is now.
+
+`events.jsonl` is legitimately exempt: events are stamped with the wall-clock time
+they were emitted, and section 11 depends on that timeline. `bench.json` inherits
+it. `run.json` is exempt only in part, and the split matters:
+
+| block | reproducible? |
+|---|---|
+| `version`, `params`, `notes`, `genomes`, `clusters`, `total_length`, `focus_counts`, `cancelled` | yes |
+| `counters` | **must be** yes — see below |
+| `timings` | no, wall clock |
+| `peak_memory_bytes` | no, and worse than that |
+
+`peak_memory_bytes` reads `/proc/self/status:VmHWM`, the **process-wide** high-water
+mark. The desktop program runs many analyses in one process, so run *N*'s
+`run.json` reports the peak of runs 1 through *N*. It is not a function of that
+run's inputs at all, and presenting it as one would be exactly the kind of
+approximate-number-as-exact that rule 8 forbids.
+
+**Why it matters.** The counters *are* supposed to be reproducible, and the
+exemption hid two that were not: `cache_hits` was double-counted and
+`bases_aligned` / `alignments_run` were charged on every cache *miss*, so their
+values depended on which worker thread reached a piece first. All three are fixed
+(charge the work to the thread that populates the cache slot, not to every thread
+that misses), but the exemption is what kept a passing test suite from seeing it.
+
+**Affects.** The intended end state is to split the volatile block into a sibling
+`run.timings.json` and drop `run.json` from the exemption list, so that rule 3
+becomes testable for the counters instead of assumed. Until that split lands,
+treat `run.json`'s `timings` and `peak_memory_bytes` as run-context metadata and
+everything else in it as a result. Peak memory should be read per-process, which
+for the GUI means one analysis per process, or from the `Finished` event of the run
+you care about.
+
+---
+
+## D20. The piece-cache key is a 64-bit hash, so a collision would be scheduling-dependent
+
+**What.** Section 6.10 fixes the piece-cache key as `(hash of alt, p_contig,
+p_start, p_end)`, and the hash is `xxh3_64`. Two pieces that share a pivot interval
+and whose member sequences collide under that hash would share a cache slot, and
+`insert` is first-wins — so *which* variants survive would be decided by which
+worker thread arrived first. That is the one path found from thread scheduling into
+the six reproducible output files (`variants.tsv`, `dist.tsv`, the trees,
+`genomes.tsv`).
+
+**Why it was accepted rather than fixed.** The probability is on the order of
+10⁻⁸ for a cluster with half a million pieces, and it additionally requires the
+same `(p_contig, p_start, p_end)`. The obvious fix — storing `alt` in the cache
+entry and comparing it on a hit — cannot be used, because it would require the
+member sequence at lookup time, which destroys the whole point of the cache:
+section 6.10 says a member whose pieces are all cached must not be re-read from
+disk at all.
+
+**Affects.** Nothing measurable. The clean fix, if this ever needs closing, is to
+widen the alt hash to 128 bits (`xxh3_128`) rather than to verify content: that
+keeps the no-re-read property and takes the collision probability to roughly
+2⁻¹²⁸. It changes `PieceKey` and `DiffPiece::alt_hash`, both of which appear in
+`events.jsonl`, so it is a format change and should not be done casually. Note the
+codebase already refuses to trust a hash without verifying content in one place —
+`profile::group_identical` checks real equality before merging two genomes — and
+that is the right instinct; it is only unavailable here because the thing being
+hashed is deliberately not in memory.
+
+---
+
+## D21. The section 6.10 memory budget is parsed but not enforced
+
+**What.** `Parameters::memory_budget_bytes` is defaulted to a quarter of physical
+RAM, accepted on the command line as `--memory-budget`, and written into
+`run.json`. Nothing in `mtato-core` reads it. The eviction rule of 6.10 —
+"sequences of non-pivot genomes are not kept after use unless they fit a memory
+budget; otherwise the file is read again when needed" — is not implemented.
+
+**Why.** The engine already achieves the *effect* by a simpler route: it never
+holds a non-pivot genome across stages at all. Each member's sequence is read for
+the Focus 1 pass and dropped, then re-read for Focus 2 only if at least one of its
+difference pieces missed the cache. So the budget has nothing left to evict. That
+is also why the measured peak for 1,000 × 5 Mb genomes is 0.33 GB against a 4 GB
+target.
+
+**Affects.** The flag is inert, which is a defect of honesty rather than of
+behaviour: a user who sets `--memory-budget` gets no effect and no complaint. It
+should either be enforced or removed. Note the trap it leaves behind — the
+"if every piece is cached, do not read the file" optimisation in `resolve_focus1`
+is correct only because the cache never evicts; implementing eviction without
+revisiting that code would turn a cache miss into a silent dropped piece.
