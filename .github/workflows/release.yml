@@ -39,9 +39,14 @@ jobs:
           - os: ubuntu-latest
             triple: x86_64-unknown-linux-gnu
             exe: ''
+            rustflags: ''
           - os: windows-latest
             triple: x86_64-pc-windows-msvc
             exe: '.exe'
+            # Link the C runtime statically so the .exe files run on any
+            # Windows 10/11 PC without the Visual C++ Redistributable:
+            # unzip and double-click, nothing to install.
+            rustflags: '-C target-feature=+crt-static'
     defaults:
       run:
         shell: bash
@@ -69,6 +74,8 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.triple }}-
 
       - name: Build the release binaries
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked --target "${{ matrix.triple }}" --package infinity-cli --package infinity-gui
 
       - name: Record the version
