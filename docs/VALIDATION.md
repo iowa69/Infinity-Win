@@ -29,7 +29,7 @@ distances 0–46 SNPs.
 |---|---|---|---|
 | pairs exact | 12 | **109** | 63 vs reads |
 | within 2 SNPs | 35 | **381** | 145 |
-| within 5 SNPs | ~120 | **494** | – |
+| within 5 SNPs | not measured | **494** | – |
 | worst error | 130 | **6** | 521 |
 | mean bias | +13.7 | **−0.2** | +68.9 |
 | correlation | 0.41 | **0.977** | 0.07 |
@@ -37,9 +37,11 @@ distances 0–46 SNPs.
 
 SKA2 itself, run on these assemblies instead of the reads, is far noisier than
 Infinity-Win: the assemblies carry errors that a whole-assembly comparison sees.
-MUMmer `dnadiff` against the pivot agrees with Infinity-Win's raw counts to within
-2 SNPs for 17 of 31 genomes and is never lower, so the engine reports the real
-differences between the assemblies; the rules decide which of them count.
+MUMmer `dnadiff` against the pivot (measured with 0.1.0) agrees with Infinity-Win's
+raw counts to within 2 SNPs for 17 of 31 genomes; where they differ, dnadiff is
+mostly higher because it also counts SNPs between repeat copies. The engine
+reports the real differences between the assemblies; the rules decide which of
+them count.
 
 ## 3. *S. aureus* bloodstream cohort (137 genomes, MORI)
 
