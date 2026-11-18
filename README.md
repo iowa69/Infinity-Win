@@ -22,6 +22,59 @@ and it is not a read mapper.
 Infinity-Win was developed under the working name **M-Tato**; older commits and
 `DECISIONS.md` entries use that name.
 
+## What's new in 0.2
+
+- **SNP rules that make the counts match read-based pipelines.** Every
+  difference is still reported, but only differences in the **core genome**
+  that pass the rules count towards distances and trees. Rejected calls are
+  *masked*, so they leave the denominator too:
+
+  | rule | what it removes |
+  |---|---|
+  | core genome | bases that any genome of the cluster does not cover |
+  | short contigs | pivot contigs under 5 kb (collapsed repeats, plasmid fragments) |
+  | contig ends | 150 bp at each end of every pivot contig |
+  | high-copy contigs | pivot contigs with more than 1.8x the typical coverage (when the assembler wrote coverage into the contig names) |
+  | engine flags | calls the engine itself marked uncertain (`repeat`, `end_ext`, ...) |
+  | SNP clusters | more SNPs in a 1 kb or 100 bp window than a Poisson process allows (recombination, misassembly) |
+  | four-gamete test | sites whose alleles form all four combinations with two or more neighbours: they cannot be single clonal mutations (recombination, collapsed repeats) |
+
+  Every file keeps both: `snps` (after the rules) and `raw_snps` (everything).
+  Each variant row says `PASS` or why it does not count.
+- **A contig-end bug fixed.** Extension at contig ends started from the wrong
+  end of a matched block, leaving about 800 bp per contig uncompared on
+  fragmented assemblies and occasionally inventing SNPs. Now about 70 bp.
+- **Resolution setting.** `--resolution sketch | blocks | exact` decides how far
+  iterative refinement goes, and `--snp-thresholds 5,10,20` groups genomes into
+  SNP clusters (single linkage) at each cut-off.
+- **Trees in SNPs.** `tree.nwk` now has branch lengths in SNPs. Clusters whose
+  pivots are within 1% of each other are compared exactly, so the branches
+  between them are SNP counts too.
+- **New result files:** `results.xlsx` (Excel workbook), square SNP matrices,
+  `snp_clusters.tsv`, a VCF and a core-SNP alignment per cluster, `tree.svg`.
+- **Desktop program:** panels no longer overlap on laptop screens, the tree is
+  drawn in SNPs with a scale bar, a Settings window groups the parameters, and
+  the look was reworked.
+- **Portable Windows build:** a zip with `Infinity-Win.exe` and `infinity.exe`
+  that needs nothing installed.
+
+## Validation on real data
+
+Details and commands are in `docs/VALIDATION.md`. In short, against SKA2 run on
+the **reads** (the closest available truth):
+
+| dataset | genomes | result |
+|---|---|---|
+| *Salmonella* Heidelberg outbreak trio | 3 | exactly 2 / 0 / 2 SNPs, as published (0.1: 17 / 4 / 2) |
+| *Salmonella* NCBI Pathogen Detection cluster | 32 | 494 of 496 pairs within 5 SNPs, worst 6, correlation 0.977 (0.1: 0.41) in 1.8 s |
+| *S. aureus* bloodstream cohort, the 4 transmission pairs | 137 | Infinity-Win 8, 8, 14, 15 SNPs; SKA2 on reads 6, 8, 8, 15; checked base by base in the raw reads: 8, (not checked), 8 + 2 unclear, 14. All 137 genomes in 28 s |
+| real *S. aureus* genomes, simulated descendants cut into 60 contigs, known truth | 150 | no pair over-reported; 93% of true SNPs inside the core |
+
+Where Infinity-Win still over-counts, the reads show collapsed repeats: both
+alleles present in each isolate, which an assembly cannot reveal. For pairs
+hundreds of SNPs apart, the rules remove recombination-dense windows, so counts
+are lower than SKA2's; use `raw_snps` there.
+
 ## Screenshots
 
 **During a run.** 180 simulated genomes in 6 clusters. Two clusters are already
@@ -173,12 +226,19 @@ does not: see `DECISIONS.md` D16.
 
 | File | Content |
 |---|---|
-| `genomes.tsv` | One row per genome: length, contigs, N50, GC, cluster, is_pivot, focus, SNPs vs pivot, indels vs pivot, uncovered bp, novel bp. |
-| `clusters.tsv` | Cluster id, pivot, pivot name, size, focus. |
-| `tree.nwk` | The full tree. Branch lengths inside clusters are substitutions per site, so they are on the same scale as the backbone. |
+| `genomes.tsv` | One row per genome: length, contigs, N50, GC, cluster, is_pivot, focus, SNPs vs pivot (all), indels vs pivot, uncovered bp, novel bp, passing SNPs vs pivot. |
+| `clusters.tsv` | Cluster id, pivot, pivot name, size, focus, core genome bp. |
+| `tree.nwk` | The full tree, branch lengths in **SNPs**. Between clusters these are exact for pivots within 1% of each other and sketch estimates beyond. |
+| `tree.subs_per_site.nwk` | The same tree in substitutions per site. |
+| `tree.svg` | A picture of the full tree with an SNP scale bar, tips coloured by cluster. |
+| `results.xlsx` | Excel workbook: Summary (settings), Genomes, Clusters, one SNP matrix per cluster, Between clusters, Variants. |
+| `snp_clusters.tsv` | SNP-cluster label of every genome at each `--snp-thresholds` cut-off. |
+| `cluster_<id>.snp_matrix.tsv` | Square SNP matrix after the SNP rules; `.raw_snp_matrix.tsv` before them. |
+| `cluster_<id>.vcf` | SNPs against the pivot, one sample column per genome, `FILTER` and per-call `FT` reasons. |
+| `cluster_<id>.core_snps.fasta` | Core SNP alignment (passing sites only), ready for IQ-TREE or Gubbins-style tools. |
 | `cluster_<id>.nwk` | One cluster's tree, branch lengths in SNP counts. |
-| `cluster_<id>.dist.tsv` | Pairwise SNP counts, indel counts and comparable bp. |
-| `cluster_<id>.variants.tsv` | Every difference from the pivot: genome, pivot contig, pivot position (1-based), ref, alt, type, genome contig, genome position, strand, flags. |
+| `cluster_<id>.dist.tsv` | Pairwise SNP counts, indel counts and comparable bp after the SNP rules, then the same before them (`raw_*`). |
+| `cluster_<id>.variants.tsv` | Every difference from the pivot: genome, pivot contig, pivot position (1-based), ref, alt, type, genome contig, genome position, strand, flags, and `filter` (`PASS` or why it does not count). |
 | `run.json` | Parameters, version, per-stage timings, counters, peak memory. |
 | `events.jsonl` | The timestamped event stream, one JSON object per line. |
 
@@ -197,7 +257,8 @@ excluded from coverage rather than being guessed at.
 **Flags** on a variant: `repeat` (the block matched a pivot repeat, so the copy
 chosen may be wrong), `low_identity`, `align_failed`, `end_ext` (found by
 end-of-contig extension rather than between two anchors), `dup` (the interval is
-covered by two or more places of the member).
+covered by two or more places of the member), `break_ext` (found by extending
+across a breakpoint such as a pivot contig junction; not counted by default).
 
 **`run.json` timings can be `null`.** A `null` means the stage did not complete —
 for example `exact_tree_ms` on a cancelled run. It is never written as `0`,

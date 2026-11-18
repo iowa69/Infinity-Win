@@ -794,3 +794,33 @@ benchmark measures a configuration that does not produce byte-identical distance
 so its timing advantage cannot be read as a pure optimisation gain. The other four
 switches are unaffected: `no_piece_cache` and `no_profile_grouping` are exactly
 identical, and `single_cluster` differs by construction (a different pivot).
+
+---
+
+## D26. Round 2 (version 0.2): SNP rules, the contig-end fix, and their defaults
+
+Recorded by the owner's second build round (Claude Code), after validation on
+real data (`docs/VALIDATION.md`).
+
+- **Distances count only differences that pass the SNP rules** (`filter.rs`):
+  core genome, pivot contigs under 5 kb, 150 bp contig-end margins, high-copy
+  contigs (coverage from contig names), engine flags, a two-scale Poisson
+  SNP-cluster scan and a four-gamete compatibility test. This departs from D18
+  ("M-Tato reports unfiltered whole-assembly differences"): unfiltered counts
+  failed the owner's acceptance trio (17/4/2 against 2/2/0) and correlated 0.41
+  with reads on the 32-genome cluster. Raw counts remain in every file.
+- **Strict core by default** (`--core-fraction 1.0`). A 90% soft core recovers
+  more SNPs on simulated fragmented genomes (94% against 82% before the
+  contig-end fix) but tripled the bias against reads on real data (+3.4 against
+  +0.5): bases that most but not all assemblies cover carry assembly noise.
+- **SNPs found by breakpoint extension are not counted** (`--keep-break-ext` to
+  count them). The extension's coverage is kept; its SNPs put a false SNP into
+  the trio.
+- **Exact between-cluster distances only for pivots within 1%.** At 3% the
+  backbone took 105 of 116 s on 137 *S. aureus*; between lineages an exact SNP
+  count is neither cheap nor useful here.
+- **The contig-end frontier bug** (`left_frontier`/`right_frontier` returned the
+  pivot end of a matched block for both orientations) is fixed. It explained the
+  ~700–800 uncovered bases per contig attributed in D13 to pivot junctions, and
+  some of the `end_ext` artefacts. D13's numbers predate the fix.
+- **Property 6 (D25)** is unchanged by this round and still open.
