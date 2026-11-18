@@ -78,19 +78,26 @@ are lower than SKA2's; use `raw_snps` there.
 ## Screenshots
 
 **During a run.** 180 simulated genomes in 6 clusters. Two clusters are already
-exact (solid triangles, "sharp"); the other four still show their sketch-only
-estimate (dotted branches, "blurry ≈").
+exact ("sharp"); the other four still show their sketch estimate (dotted,
+"blurry ≈"). Distances are drawn in SNPs, with an approximate scale between
+clusters.
 
 ![Infinity-Win during a run](docs/screenshots/live-run.png)
 
-**Finished.** Two clusters opened into their exact trees, two genomes selected
-(17 SNPs and 7 indels apart, shown above the tree), and the map of one cluster:
-each row is a genome against the cluster's pivot, red ticks are SNPs and blue
-ticks are insertions and deletions.
+**Finished.** Two clusters opened into their exact SNP trees with a scale bar in
+SNPs, two genomes selected (17 SNPs and 7 indels apart, shown above the tree),
+and the map of one cluster: each row is a genome against the cluster's pivot,
+red ticks are SNPs and blue ticks are insertions and deletions. The Run panel on
+the right exports trees (Newick, NEXUS for FigTree, iTOL), tables, the Excel
+workbook, SNP matrices, the VCF, the SNP alignment and pictures (SVG, PNG).
 
 ![Infinity-Win after a run](docs/screenshots/finished-run.png)
 
----
+**Settings.** How far to refine (Sketch, Blocks or Exact SNPs), the cluster
+distance as % identity, whether to sharpen the distances between clusters, the
+SNP thresholds for SNP clusters, and the SNP rules.
+
+![Infinity-Win settings](docs/screenshots/settings.png)
 
 ## Install
 
