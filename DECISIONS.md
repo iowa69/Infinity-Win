@@ -223,6 +223,17 @@ halves of the distinction.
 
 ## D13. Test T3's thresholds are not met, and the cause is pivot contig junctions
 
+> **PROVISIONAL — the causal attribution below is under revision.** A
+> specification review subsequently found that SNPs discovered by the
+> end-of-contig x-drop extension of 6.6 step D are computed correctly and then
+> **discarded**: `Focus1` carries no variant list, so the staged Focus 1 → Focus 2
+> path (the only production path, required by 6.11.3) drops them. Those SNPs live
+> in exactly the region this entry blames on pivot contig junctions — between a
+> contig end and the first or last shared point, when the head or tail block did
+> not match. The measured numbers below are still correct as measurements, but the
+> 0.934 figure and the "entirely the junction effect" claim must be re-measured
+> once the discarded variants are restored. See D22.
+
 **What.** Section 10.3 T3 asks, for genomes cut into 100 contigs and shuffled and
 flipped, that no pair's distance exceeds the truth by more than 2 and that
 reported distances sum to at least 99% of the true sum. Measured on the reference
@@ -483,3 +494,86 @@ should either be enforced or removed. Note the trap it leaves behind — the
 "if every piece is cached, do not read the file" optimisation in `resolve_focus1`
 is correct only because the cache never evicts; implementing eviction without
 revisiting that code would turn a cache miss into a silent dropped piece.
+
+---
+
+## D22. Findings of the clause-by-clause specification review
+
+A review of sections 6.1–6.11 and 9 against the implementation, clause by clause,
+found the deviations below. Sections 6.1, 6.2, 6.3, 6.5, 6.6 A–D, 6.7, 6.8, 6.9,
+6.10 and 6.11 were otherwise verified as conforming, including every formula, every
+constant and every tie-breaking rule.
+
+### Fixed
+
+| # | Section | Defect | Direction of error |
+|---|---|---|---|
+| F1 | 6.6 D, 6.11.3 | End-of-contig extension SNPs were computed and discarded: `Focus1` carried no variant list, so the staged path dropped every `end_ext` SNP. | under-reports SNPs |
+| F2 | 6.8 | `novel_bp` never included inserted bases in the staged path (computed at Focus 1, copied forward unchanged). | under-counts |
+| F3 | 6.9 | A singleton cluster produced `Tree::default()`, the empty tree, which was grafted over the backbone leaf — deleting that genome from `tree.nwk`. Under `--focus0-only` every cluster is a singleton, so `tree.nwk` had **zero leaves**. | loses data |
+| F4 | 6.11.3, 7 | `Prioritize` inserted the *position* into the work order instead of the cluster index, so the wrong cluster jumped to the front. Silent; no panic. | feature never worked |
+| F5 | 6.7 | An `end_ext` variant's `alt` allele was stored on the member's strand while `ref` was on the pivot's, so the two columns disagreed whenever `rel` was true. Masked by F1; would have corrupted `snps(A,B)` once F1 was fixed, so the two had to land together. | would over-count |
+| F7 | 6.9, rule 8 | `PairDistance.dist` is `Option<f64>` and documented as never inventing a zero, but `distance_matrix` did `unwrap_or(0.0)`, so a pair with nothing comparable was fed to neighbour joining as *identical*. | wrong topology |
+| F12 | 9, 5 | For an insertion, `pivot_pos` was written as the raw offset while `genome_pos` was written as offset+1, so the same event disagreed by one between two columns of the same row. | inconsistent |
+| F14 | 6.1 | `median_length` took the upper middle element, not the median, so an even-sized input straddling 500 kb could skip the small-genome density rule. | wrong densities |
+
+F1 means **D13's causal attribution is provisional** and its numbers must be
+re-measured; the marker is on that entry.
+
+### Accepted, not fixed
+
+- **F6 (6.8).** `flags::DUP` is declared and named but never set on a variant. The
+  coverage consequence of a duplicated interval *is* applied, so `comparable`,
+  `snps` and `dist` are correct; only the `flags` column of
+  `cluster_<id>.variants.tsv` can never read `dup`. Section 15's promise that
+  variants in suspect places are "flagged, not corrected" is therefore delivered for
+  `repeat`, `low_identity`, `align_failed` and `end_ext` but not for `dup`.
+- **F16 (6.9).** "Each cluster subtree is labelled with its focus level" is not
+  implemented. `Tree` has no field for an internal-node label and `write_newick`
+  never emits one, so `tree.nwk` carries no focus information. Focus is available in
+  `clusters.tsv`, in the `ClusterFocus` event and as GUI styling, so the information
+  is not lost — but the Newick requirement is unmet.
+- **F18 (7).** `SetClusterDist` re-clusters and re-issues cluster ids from zero but
+  does not invalidate `cluster_trees`, `cluster_snp_trees`, `matrices`,
+  `comparisons`, `cluster_focus`, `pivot_len` or `pivot_contig_names`. `build_full_tree`
+  can therefore graft an *old* cluster's subtree onto a *new* cluster's backbone
+  leaf, and `write_cluster_variants` can filter new membership against old pivot
+  coordinates. The reuse half of section 7 ("clusters whose pivot and members are
+  unchanged keep their results") *is* implemented correctly, keyed on the member
+  list. Reachable only from the GUI, since the CLI passes a command channel nothing
+  ever sends to. Interactive-only, and it needs a real fix before the GUI ships the
+  cluster-distance slider as usable.
+- **F8 (6.9).** `focus1_estimate` is a merge-walk requiring sorted input.
+  `Profile::from_focus1` sorts and dedups; `Profile::from_comparison` does not, so
+  the `estimates` block of a Focus-2 distance matrix is wrong. Harmless today
+  because Focus-2 trees use `Snps`/`SubsPerSite` and `estimates` is written to no
+  file, but it is a live trap. Observable symptom: `diff_pieces` can disagree
+  between the Focus-1 and Focus-2 `ClusterFocus` events for the same genome.
+- **F9 (6.4).** The backbone tree clamps negative branch lengths; the spec asks for
+  that only on the cluster tree (6.9). Because the clamp runs *before* midpoint
+  rooting it can move the root as well as shorten edges.
+- **F11 (9, rule 5).** Three of the four TSVs carry columns the spec does not list:
+  `pivot_name` in `clusters.tsv`, `genome_name` in `cluster_<id>.variants.tsv`
+  (which shifts the nine later columns relative to the spec's layout), and
+  `name_a`/`name_b`/`indels`/`subs_per_site` in `cluster_<id>.dist.tsv`.
+  `genomes.tsv` matches its fourteen specified columns exactly. Any positional
+  reader written against section 9 will mis-parse three files.
+- **F13 (6.7).** The "too long for `dp_max_len`" COMPLEX exit is flagged
+  `low_identity`, which the flag's own doc defines as "identity was too low". The
+  `flags` column therefore cannot distinguish a divergent piece from one that was
+  merely too long to align.
+- **A7 (6.9).** Profile identity includes member-side coordinates
+  (`genome_contig`, `genome_start`, `genome_end`, `strand`), so a genome and its
+  reverse complement — or the same SNPs in a differently fragmented assembly — are
+  *not* grouped. That is a defensible literal reading of 6.7, but it makes
+  "identical profiles are handled once" much narrower than 6.10's stated rationale
+  ("a mutation shared by 500 members of a clade"). Note the coarse filter
+  `Profile::identity()` hashes only pivot-side fields, so filter and verification
+  deliberately disagree.
+- **A8 (6.9).** Profile grouping does not save the distance computation: the full
+  O(n²) matrix is built over all profiles and only then subsampled to the
+  representatives. Results are identical; the saving 6.10 exists to provide is not
+  realised.
+- **A9 (6.9).** `focus1_snp_lower_bound` implements "at least half, rounded up"
+  exactly, and is called nowhere outside its own unit test. The estimate it bounds
+  is correct; the bound is never surfaced to a user.
