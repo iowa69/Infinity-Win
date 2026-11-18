@@ -1,0 +1,10 @@
+/target
+/.cargo/
+/dist/
+**/*.rs.bk
+Cargo.lock.bak
+*.swp
+.DS_Store
+# benchmark scratch space (regenerable, large)
+/bench-work/
+/out/

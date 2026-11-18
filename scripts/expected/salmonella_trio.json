@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "dataset": "salmonella_trio",
+  "title": "Published pairwise SNP distances for the three-isolate Salmonella Heidelberg outbreak set",
+  "unit": "SNPs",
+  "description": "Ground truth for the acceptance check in REPORT.md. These three numbers were produced by analyses that predate M-Tato and are independent of it: a SKA2 split-k-mer distance on trimmed reads, and a reference-mapping SNP call after filtering. They are an acceptance check, not a target to tune against.",
+  "abs_tolerance_snps": 1,
+  "tolerance_rationale": "M-Tato compares ASSEMBLIES while the reference numbers come from READS (SKA2) and from a mapping-plus-filtering pipeline. Assembly errors, repeat collapsing, and differences in filtering move a 0-2 SNP distance by one or two counts without any of the methods being wrong. A discrepancy of exactly +/-1 SNP is therefore accepted and still printed; anything larger fails. make_report.py prints expected, observed and the difference for every pair, so a near-miss is never hidden.",
+  "pairs": [
+    {
+      "name": "isolate-A-isolate-B",
+      "genome_a": "isolate-A",
+      "genome_b": "isolate-B",
+      "snps": 2,
+      "unit": "SNPs",
+      "abs_tolerance_snps": 1,
+      "source": "SKA2 (split k-mer, alignment-free) distance on fastp-trimmed reads",
+      "provenance": {
+        "analysis": "ska build/ska distance on the read sets listed in analysis/ncbi_pd/ska/reads.tsv",
+        "file": "<salmonella-data>/ncbi_pd/ska/cluster_reads_distance.tsv",
+        "row": "isolate-A\tisolate-B\t2.00\t0.00004\t4671223\t190",
+        "field": "Distance",
+        "value": 2.0,
+        "match_count": 4671223,
+        "mismatch_count": 190,
+        "cross_check": "The same pair is recorded as 2.0 in analysis/results.json under ska_reads['isolate-A|isolate-B'], and as filtered_snps=2 (from raw_all_snps=37, unique_snps=32) in the assembly pairwise section of the same file.",
+        "retrieved_utc": "2026-11-18"
+      }
+    },
+    {
+      "name": "isolate-A-isolate-C",
+      "genome_a": "isolate-A",
+      "genome_b": "isolate-C",
+      "snps": 2,
+      "unit": "SNPs",
+      "abs_tolerance_snps": 1,
+      "source": "SKA2 (split k-mer, alignment-free) distance on fastp-trimmed reads",
+      "provenance": {
+        "analysis": "ska build/ska distance on the read sets listed in analysis/ncbi_pd/ska/reads.tsv",
+        "file": "<salmonella-data>/ncbi_pd/ska/cluster_reads_distance.tsv",
+        "row": "isolate-A\tisolate-C\t2.00\t0.00004\t4671208\t208",
+        "field": "Distance",
+        "value": 2.0,
+        "match_count": 4671208,
+        "mismatch_count": 208,
+        "cross_check": "The same pair is recorded as 2.0 in analysis/results.json under ska_reads['isolate-A|isolate-C'], and as filtered_snps=2 (from raw_all_snps=17, unique_snps=16) in the assembly pairwise section of the same file.",
+        "retrieved_utc": "2026-11-18"
+      }
+    },
+    {
+      "name": "isolate-B-isolate-C",
+      "genome_a": "isolate-B",
+      "genome_b": "isolate-C",
+      "snps": 0,
+      "unit": "SNPs",
+      "abs_tolerance_snps": 1,
+      "source": "Reference mapping followed by SNP filtering",
+      "provenance": {
+        "analysis": "Reads mapped to a reference, variants called and then filtered; the filtered count is what is recorded. The unfiltered call for this pair was 21 raw / 17 unique SNPs, all of which the filter removed.",
+        "file": "<salmonella-data>/results.json",
+        "field": "pairwise['isolate-B|isolate-C'].filtered_snps",
+        "value": 0,
+        "raw_all_snps": 21,
+        "unique_snps": 17,
+        "snps_1to1": 17,
+        "ani": 99.994,
+        "cross_check": "SKA2 independently reports Distance 0.00 for this pair (mismatch count 22 over 4671404 matched split k-mers) in analysis/ncbi_pd/ska/cluster_reads_distance.tsv, and analysis/results.json ska_reads['isolate-B|isolate-C'] is 0.0.",
+        "retrieved_utc": "2026-11-18"
+      }
+    }
+  ],
+  "how_to_use": {
+    "reader": "scripts/make_report.py (acceptance-check section) and scripts/common.check_expected_pairs()",
+    "observed_from": "M-Tato's cluster_<id>.dist.tsv SNP counts in the run output folder, joined by genome name; if a bench JSON carries pairwise errors it is used as a cross-check",
+    "verdict_rule": "PASS when |observed - expected| <= abs_tolerance_snps for all three pairs; 'not measured' (never PASS) when M-Tato reports no distance for a pair, because the three isolates were not placed in one cluster"
+  },
+  "caveats": [
+    "The expected values are READ- and MAPPING-based; M-Tato works on the ASSEMBLIES in bench-work/salmonella_trio/asm/. A disagreement of one SNP is evidence about the assemblies, not automatically a bug.",
+    "With three taxa no tree accuracy can be measured (Robinson-Foulds needs at least four), so this dataset contributes distance accuracy only.",
+    "If isolate-B and isolate-C are 0 SNPs apart they may be collapsed into one profile group; M-Tato must still report a distance of 0 for that pair rather than omitting it."
+  ]
+}

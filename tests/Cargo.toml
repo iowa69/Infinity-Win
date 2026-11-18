@@ -1,0 +1,19 @@
+[package]
+name = "mtato-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M-Tato integration tests: the properties of 10.2 and the truth tests of 10.3"
+publish = false
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+mtato-core = { workspace = true }
+mtato-sim = { workspace = true }
+serde_json = { workspace = true }
+
+[lib]
+name = "mtato_tests"
+path = "src/lib.rs"

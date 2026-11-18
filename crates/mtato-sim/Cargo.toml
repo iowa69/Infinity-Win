@@ -1,0 +1,17 @@
+[package]
+name = "mtato-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M-Tato simulator: deterministic genomes with known truth"
+
+[dependencies]
+mtato-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lib]
+name = "mtato_sim"
+path = "src/lib.rs"

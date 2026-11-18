@@ -1,0 +1,30 @@
+[package]
+name = "mtato-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M-Tato desktop program: a live view of the tree and the parameters"
+
+[[bin]]
+name = "mtato-gui"
+path = "src/main.rs"
+
+[dependencies]
+mtato-core = { workspace = true }
+crossbeam-channel = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# `eframe`/`egui` is the native Rust GUI of section 4.2: one language, one
+# build, one executable per platform, no runtime to install.
+#
+# Default features only. The GTK-based file-dialog crates (`rfd` with its
+# `gtk3` backend) are deliberately NOT used: they need system `-dev` packages
+# at build time, which breaks the "no extra toolchain" rule of section 12.
+# Genome folders are chosen by drag-and-drop or by typing a path instead, which
+# also suits an input of a thousand files better than a file picker does.
+eframe = { version = "0.37", default-features = true }
+egui = "0.37"

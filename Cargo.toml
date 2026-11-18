@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mtato-core",
+    "crates/mtato-sim",
+    "crates/mtato-cli",
+    "crates/mtato-gui",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+authors = ["M-Tato contributors"]
+description = "Progressive, cluster-first, position-aware comparison of nearly identical genomes"
+
+[workspace.dependencies]
+mtato-core = { path = "crates/mtato-core" }
+mtato-sim = { path = "crates/mtato-sim" }
+clap = { version = "4.5", features = ["derive"] }
+crossbeam-channel = "0.5"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+# Already in the graph: `eframe` depends on exactly this feature set, so the
+# desktop program's PNG export costs no extra compilation. Pure Rust.
+image = { version = "0.25", default-features = false, features = ["png"] }
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Disk on the build machine is nearly full, so debuginfo is kept to line tables
+# in dev and dropped entirely in release. Results are unaffected.
+[profile.dev]
+debug = "line-tables-only"
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 0
+panic = "unwind"
+
+[profile.bench]
+debug = 0
