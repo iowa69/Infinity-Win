@@ -444,8 +444,17 @@ def write_output_folder(
     write_events: bool = True,
     comparable_bp: int = 2048,
     only_listed_pairs: bool = False,
+    new_columns: bool = False,
 ) -> Path:
-    """A complete-looking ``infinity run`` output folder."""
+    """A complete-looking ``infinity run`` output folder.
+
+    ``new_columns=True`` writes the layout the engine is moving to: the real
+    ``cluster_<id>.dist.tsv`` header (ids *and* names) followed by ``raw_snps``
+    and ``raw_comparable_bp`` (``snps`` then being the filtered core-genome
+    count, here one less than raw), a final ``filter`` column in
+    ``cluster_<id>.variants.tsv`` (``PASS`` or ``;``-separated reasons, with one
+    filtered extra row per cluster), and two extra ``genomes.tsv`` columns.
+    """
     outdir.mkdir(parents=True, exist_ok=True)
     items = list(names)
     tree = tree or balanced_tree(items)
@@ -458,12 +467,14 @@ def write_output_folder(
     (outdir / "tree.nwk").write_text(tree + "\n", encoding="utf-8")
     with open(outdir / "genomes.tsv", "w", encoding="utf-8") as fh:
         fh.write("id\tname\tpath\tlength\tcontigs\tn50\tgc\tcluster\tis_pivot\tfocus\t"
-                 "snps_vs_pivot\tindels_vs_pivot\tuncovered_bp\tnovel_bp\n")
+                 "snps_vs_pivot\tindels_vs_pivot\tuncovered_bp\tnovel_bp"
+                 + ("\tcore_bp\tfiltered_snps_vs_pivot" if new_columns else "") + "\n")
         for i, gname in enumerate(items):
             cid = min(i // per, len(groups) - 1)
             fh.write(
                 f"{i}\t{gname}\t/tmp/{gname}.fasta\t2048\t1\t2048\t0.5\t{cid}\t"
-                f"{'true' if i % per == 0 else 'false'}\t2\t0\t0\t0\t0\n"
+                f"{'true' if i % per == 0 else 'false'}\t2\t0\t0\t0\t0"
+                + ("\t1900\t0" if new_columns else "") + "\n"
             )
     with open(outdir / "clusters.tsv", "w", encoding="utf-8") as fh:
         fh.write("cluster\tpivot\tsize\tfocus\n")
@@ -474,7 +485,11 @@ def write_output_folder(
     for ci, group in enumerate(groups):
         (outdir / f"cluster_{ci}.nwk").write_text(cluster_trees[ci] + "\n", encoding="utf-8")
         with open(outdir / f"cluster_{ci}.dist.tsv", "w", encoding="utf-8") as fh:
-            fh.write("genome_a\tgenome_b\tsnps\tcomparable_bp\tdistance\tfocus\n")
+            if new_columns:
+                fh.write("genome_a\tname_a\tgenome_b\tname_b\tsnps\tindels\tcomparable_bp\t"
+                         "subs_per_site\traw_snps\traw_comparable_bp\n")
+            else:
+                fh.write("genome_a\tgenome_b\tsnps\tcomparable_bp\tdistance\tfocus\n")
             for i, a in enumerate(group):
                 for b in group[i + 1 :]:
                     key = (a, b) if a <= b else (b, a)
@@ -486,14 +501,36 @@ def write_output_folder(
                         continue
                     else:
                         snps = float(abs(items.index(a) - items.index(b)))
-                    fh.write(f"{a}\t{b}\t{int(snps)}\t{comparable_bp}\t{snps / comparable_bp:.9f}\t2\n")
+                    if new_columns:
+                        # `snps` is the filtered core count; raw has one more SNP
+                        # that the core filter removed, over more comparable bp.
+                        core_bp = comparable_bp - 148
+                        fh.write(
+                            f"{items.index(a)}\t{a}\t{items.index(b)}\t{b}\t{int(snps)}\t0\t"
+                            f"{core_bp}\t{snps / core_bp:.9f}\t{int(snps) + 1}\t{comparable_bp}\n"
+                        )
+                    else:
+                        fh.write(f"{a}\t{b}\t{int(snps)}\t{comparable_bp}\t{snps / comparable_bp:.9f}\t2\n")
         with open(outdir / f"cluster_{ci}.variants.tsv", "w", encoding="utf-8") as fh:
-            fh.write("genome\tpivot_contig\tpivot_position\tref\talt\ttype\t"
-                     "genome_contig\tgenome_position\tstrand\tflags\n")
+            if new_columns:
+                fh.write("genome\tgenome_name\tpivot_contig\tpivot_pos\tref\talt\ttype\t"
+                         "genome_contig\tgenome_pos\tstrand\tflags\tfilter\n")
+            else:
+                fh.write("genome\tpivot_contig\tpivot_position\tref\talt\ttype\t"
+                         "genome_contig\tgenome_position\tstrand\tflags\n")
             for j, gname in enumerate(group):
                 if j == 0:
                     continue
-                fh.write(f"{gname}\tcontig1\t{100 + j}\tA\tG\tSNP\tcontig1\t{100 + j}\t+\t\n")
+                if new_columns:
+                    gid = items.index(gname)
+                    fh.write(f"{gid}\t{gname}\tcontig1\t{100 + j}\tA\tG\tsnp\tcontig1\t"
+                             f"{100 + j}\t+\t\tPASS\n")
+                else:
+                    fh.write(f"{gname}\tcontig1\t{100 + j}\tA\tG\tSNP\tcontig1\t{100 + j}\t+\t\n")
+            if new_columns and len(group) > 1:
+                gname = group[1]
+                fh.write(f"{items.index(gname)}\t{gname}\tcontig1\t900\tC\tT\tsnp\tcontig1\t"
+                         f"900\t+\trepeat\trepeat;low_core_cover\n")
 
     if write_run_json:
         doc = run_json if run_json is not None else make_run_json(names=items, clusters=len(groups))
@@ -545,6 +582,9 @@ paths of the benchmark scripts can be exercised:
   FAKE_INFINITY_DIST_JSON=<p>   take the pairwise SNP counts from a JSON list of
                              [genome_a, genome_b, snps] triples
   FAKE_INFINITY_SLEEP=<float>   sleep this many seconds (to make wall time visible)
+  FAKE_INFINITY_NEW_COLUMNS=1   write the upcoming output layout: raw_snps and
+                             raw_comparable_bp in dist.tsv, a filter column in
+                             variants.tsv, extra genomes.tsv columns
 """
 import json
 import os
@@ -646,6 +686,7 @@ def cmd_run(argv):
         distances=distances,
         only_listed_pairs=bool(dist_json),
         write_run_json=not env_flag("FAKE_INFINITY_NO_RUN_JSON"),
+        new_columns=env_flag("FAKE_INFINITY_NEW_COLUMNS"),
     )
     run_json_path = outdir / "run.json"
     if run_json_path.exists():

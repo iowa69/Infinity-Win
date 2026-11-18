@@ -1051,8 +1051,8 @@ class TestAcceptanceCheck(ScriptCase):
         self.assertTrue(basis.get("caveat"), "the filtered basis must carry its caveat")
         run_matrix.main(self.matrix_argv("--datasets", "salmonella_trio", "--configs", "baseline"))
         text = self.report(expected_dir=self.expected_file.parent)
-        self.assertIn("Two bases are reported", text)
-        self.assertIn("as reported", text)
+        self.assertIn("**Script-filtered**", text)
+        self.assertIn("as reported (`snps`)", text)
         self.assertIn("filtered", text)
         # the recomputation's own limits must be stated, not hidden
         self.assertIn("does NOT apply the comparable-coverage restriction", basis["caveat"])

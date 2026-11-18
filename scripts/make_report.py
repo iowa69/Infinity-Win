@@ -263,14 +263,24 @@ def run_expected_checks(
         for config, meas in sorted(cells.items()):
             out_dir = meas.get("out_dir")
             observed: Dict[Tuple[str, str], Optional[float]] = {}
+            observed_raw: Dict[Tuple[str, str], Optional[float]] = {}
             observed_filtered: Dict[Tuple[str, str], Optional[float]] = {}
             cell_problems: List[str] = []
             filter_info: Dict[str, Any] = {}
+            dist_basis = common.distance_basis([])
             if out_dir and Path(out_dir).is_dir():
                 rows, row_problems = common.load_cluster_distances(Path(out_dir))
                 cell_problems.extend(row_problems)
+                dist_basis = common.distance_basis(rows)
                 observed = {
                     common.pair_key(r["a"], r["b"]): r.get("snps") for r in rows
+                }
+                # Once the engine writes raw_snps, `snps` is its filtered
+                # core-genome count; both are checked against the same values.
+                observed_raw = {
+                    common.pair_key(r["a"], r["b"]): r.get("raw_snps")
+                    for r in rows
+                    if r.get("raw_snps") is not None
                 }
                 if not observed:
                     cell_problems.append(
@@ -300,6 +310,9 @@ def run_expected_checks(
             else:
                 cell_problems.append(f"output folder missing: {out_dir}")
             checks = common.check_expected_pairs(expected, observed)
+            checks_raw = (
+                common.check_expected_pairs(expected, observed_raw) if observed_raw else []
+            )
             checks_filtered = (
                 common.check_expected_pairs(expected, observed_filtered)
                 if observed_filtered
@@ -318,6 +331,9 @@ def run_expected_checks(
                     else ("PASS" if n_fail == 0 and n_na == 0 else
                           ("FAIL" if n_fail else "PARTIAL (some pairs not measured)"))
                 ),
+                "snps_label": dist_basis["snps_label"],
+                "checks_raw": [c.as_dict() for c in checks_raw],
+                "status_raw": _overall_status(checks_raw),
                 "checks_filtered": [c.as_dict() for c in checks_filtered],
                 "status_filtered": _overall_status(checks_filtered),
                 "filter": filter_info,
@@ -690,6 +706,11 @@ def check_switch_invariance(
         base_index = {
             common.pair_key(r["a"], r["b"]): r.get("snps") for r in base_rows
         }
+        base_raw = {
+            common.pair_key(r["a"], r["b"]): r.get("raw_snps")
+            for r in base_rows
+            if r.get("raw_snps") is not None
+        }
         base_variants = variants_fingerprint(Path(baseline_dir))
         for config, meas in sorted(cells.items()):
             if config == "baseline":
@@ -703,6 +724,11 @@ def check_switch_invariance(
             rows, problems = common.load_cluster_distances(Path(other_dir))
             record["problems"] = list(problems)
             index = {common.pair_key(r["a"], r["b"]): r.get("snps") for r in rows}
+            raw_index = {
+                common.pair_key(r["a"], r["b"]): r.get("raw_snps")
+                for r in rows
+                if r.get("raw_snps") is not None
+            }
             shared = sorted(set(base_index) & set(index))
             differing = []
             max_diff = 0
@@ -713,6 +739,13 @@ def check_switch_invariance(
                 if a != b:
                     differing.append((key, a, b))
                     max_diff = max(max_diff, abs(int(a) - int(b)))
+            # Property 6 covers every distance the engine writes, so once it
+            # reports raw counts next to the filtered ones, both must match.
+            raw_differing = [
+                (key, base_raw[key], raw_index[key])
+                for key in sorted(set(base_raw) & set(raw_index))
+                if base_raw[key] != raw_index[key]
+            ]
             other_variants = variants_fingerprint(Path(other_dir))
             vdiff = diff_variants(base_variants, other_variants)
             variants_identical = bool(vdiff["identical"])
@@ -724,6 +757,7 @@ def check_switch_invariance(
                     "pairs_only_in_config": len(set(index) - set(base_index)),
                     "pairs_differing": len(differing),
                     "max_abs_diff_snps": max_diff if differing else None,
+                    "raw_pairs_differing": len(raw_differing) if (base_raw or raw_index) else None,
                     "variants_identical": variants_identical,
                     "variant_rows_baseline": vdiff["rows_baseline"],
                     "variant_rows_config": vdiff["rows_config"],
@@ -735,6 +769,12 @@ def check_switch_invariance(
                     ],
                 }
             )
+            if raw_differing:
+                record["examples"].extend(
+                    {"pair": list(k), "baseline": a, "config": b, "basis": "raw"}
+                    for k, a, b in raw_differing[: max(0, 5 - len(record["examples"]))]
+                )
+                differing = differing + raw_differing
             if not shared:
                 record["status"] = "no comparable pairs"
             elif not differing and variants_identical:
@@ -797,6 +837,7 @@ def render_invariance(doc: Dict[str, Any]) -> str:
                     common.fmt(rec.get("pairs_compared")),
                     common.fmt(rec.get("pairs_differing")),
                     common.fmt(rec.get("max_abs_diff_snps"), ".4g"),
+                    common.fmt(rec.get("raw_pairs_differing")),
                     variant_note,
                     common.fmt(rec.get("pairs_only_in_baseline")),
                     common.fmt(rec.get("pairs_only_in_config")),
@@ -805,8 +846,8 @@ def render_invariance(doc: Dict[str, Any]) -> str:
         out.append(
             common.markdown_table(
                 ["config", "distances vs baseline", "pairs compared",
-                 "pairs differing", "max |diff| SNPs", "variant lists identical",
-                 "pairs only in baseline", "pairs only in config"],
+                 "pairs differing", "max |diff| SNPs", "raw pairs differing",
+                 "variant lists identical", "pairs only in baseline", "pairs only in config"],
                 rows,
             )
         )
@@ -816,8 +857,9 @@ def render_invariance(doc: Dict[str, Any]) -> str:
                 out.append(f"Examples of differing pairs under `{config}`:")
                 out.append("")
                 for ex in rec["examples"]:
+                    basis = " (raw_snps)" if ex.get("basis") == "raw" else ""
                     out.append(
-                        f"- {ex['pair'][0]} vs {ex['pair'][1]}: baseline {ex['baseline']} "
+                        f"- {ex['pair'][0]} vs {ex['pair'][1]}{basis}: baseline {ex['baseline']} "
                         f"SNPs, `{config}` {ex['config']} SNPs"
                     )
                 out.append("")
@@ -1044,9 +1086,21 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
             out.append("_No configuration produced a check._")
             out.append("")
             continue
-        # The two bases: what the engine reported, and the same comparison after
-        # the filter every published reference number was produced with.
+        # The bases: what the engine reported (its filtered core-genome count and,
+        # once it writes one, its raw count) and the scripts' own recomputation
+        # after the filter every published reference number was produced with.
+        any_raw = any((info.get("checks_raw") or []) for info in by_config.values())
         any_filtered = any((info.get("checks_filtered") or []) for info in by_config.values())
+        if any_raw:
+            out.append("")
+            out.append(
+                "The engine reports two bases in `cluster_<id>.dist.tsv`: **raw** "
+                "(`raw_snps`, every SNP between the two assemblies) and **core** "
+                "(`snps`, its filtered core-genome count). Both are checked against "
+                "the same published values; the published numbers are themselves "
+                "filtered, so the core count is the like-for-like comparison and the "
+                "raw count shows what the filter removed."
+            )
         if any_filtered:
             filt = next(
                 (info.get("filter") or {} for info in by_config.values() if info.get("filter")),
@@ -1054,8 +1108,7 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
             )
             out.append("")
             out.append(
-                f"Two bases are reported. **As reported** is the engine's own "
-                f"`cluster_<id>.dist.tsv`, which is authoritative. **Filtered** is "
+                f"**Script-filtered** is "
                 f"{filt.get('label') or 'a filtered recomputation'}"
                 + (
                     f" (pivot contigs >= {filt.get('min_pivot_contig_bp')} bp)"
@@ -1063,11 +1116,15 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
                     else ""
                 )
                 + ", recomputed from `cluster_<id>.variants.tsv` by the benchmark "
-                "scripts. It exists because Infinity-Win deliberately does not filter "
-                "(section 2 lists no filtering among its goals; section 15 says "
-                "repeats are flagged, not corrected) while every published "
-                "reference number here *is* filtered - so the unfiltered comparison "
-                "is not apples to apples."
+                "scripts, independently of the engine. "
+                + (
+                    "It is kept as a cross-check of the engine's own filter."
+                    if any_raw
+                    else "It exists because this engine build reports only an "
+                    "unfiltered count, while every published reference number here "
+                    "*is* filtered - so the unfiltered comparison is not apples to "
+                    "apples."
+                )
             )
             if filt.get("caveat"):
                 out.append("")
@@ -1075,56 +1132,62 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
         rows = []
         for config, info in sorted(by_config.items()):
             checks = info.get("checks") or []
-            filtered = {
-                (tuple(c.get("pair") or []) and "-".join(c["pair"])) or c.get("name"): c
-                for c in (info.get("checks_filtered") or [])
-            }
+
+            def index(entries: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+                return {
+                    (tuple(c.get("pair") or []) and "-".join(c["pair"])) or c.get("name"): c
+                    for c in entries
+                }
+
+            filtered = index(info.get("checks_filtered") or [])
+            raw = index(info.get("checks_raw") or [])
             for check in checks:
                 pair = "-".join(check.get("pair") or []) or check.get("name")
-                fcheck = filtered.get(pair) or {}
-                f_obs = fcheck.get("observed")
-                f_pass = fcheck.get("passed")
-                rows.append(
-                    [
-                        config,
-                        pair,
-                        common.fmt(check.get("expected"), ".4g"),
-                        common.fmt(check.get("observed"), ".4g"),
-                        (
-                            common.fmt(
-                                None
-                                if check.get("observed") is None
-                                or check.get("expected") is None
-                                else float(check["observed"]) - float(check["expected"]),
-                                "+.4g",
-                            )
-                        ),
-                        verdict_mark(check.get("passed")),
-                        common.fmt(f_obs, ".4g") if any_filtered else "",
-                        verdict_mark(f_pass) if any_filtered else "",
-                        f"+/- {common.fmt(check.get('tolerance'), '.4g')}",
-                        check.get("source") or "",
-                    ]
-                )
+                row = [
+                    config,
+                    pair,
+                    common.fmt(check.get("expected"), ".4g"),
+                    common.fmt(check.get("observed"), ".4g"),
+                    common.fmt(
+                        None
+                        if check.get("observed") is None or check.get("expected") is None
+                        else float(check["observed"]) - float(check["expected"]),
+                        "+.4g",
+                    ),
+                    verdict_mark(check.get("passed")),
+                ]
+                if any_raw:
+                    rcheck = raw.get(pair) or {}
+                    row += [common.fmt(rcheck.get("observed"), ".4g"), verdict_mark(rcheck.get("passed"))]
+                if any_filtered:
+                    fcheck = filtered.get(pair) or {}
+                    row += [common.fmt(fcheck.get("observed"), ".4g"), verdict_mark(fcheck.get("passed"))]
+                row += [f"+/- {common.fmt(check.get('tolerance'), '.4g')}", check.get("source") or ""]
+                rows.append(row)
             filt_info = info.get("filter") or {}
             note = "; ".join(info.get("problems") or [])[:160]
             if any_filtered and filt_info:
                 note = (
                     f"variants {common.fmt(filt_info.get('variants_used'))} used / "
                     f"{common.fmt(filt_info.get('variants_excluded'))} excluded by the "
-                    f"filter. {note}"
+                    f"script filter. {note}"
                 ).strip()
-            header = [f"`{config}` overall", "", "", "", "",
-                      f"**{info.get('status')}**"]
+            overall = [f"`{config}` overall", "", "", "", "", f"**{info.get('status')}**"]
+            if any_raw:
+                overall += ["", f"**{info.get('status_raw')}**"]
             if any_filtered:
-                header.append("")
-                header.append(f"**{info.get('status_filtered')}**")
-            header += ["", note]
-            rows.append(header)
+                overall += ["", f"**{info.get('status_filtered')}**"]
+            overall += ["", note]
+            rows.append(overall)
         out.append("")
-        head = ["config", "pair", "expected", "as reported", "diff", "verdict"]
+        snps_header = (
+            "engine core (`snps`)" if any_raw else "as reported (`snps`)"
+        )
+        head = ["config", "pair", "expected", snps_header, "diff", "verdict"]
+        if any_raw:
+            head += ["engine raw (`raw_snps`)", "verdict"]
         if any_filtered:
-            head += ["filtered", "verdict"]
+            head += ["script-filtered", "verdict"]
         head += ["tolerance", "provenance / note"]
         out.append(common.markdown_table(head, rows))
         out.append("")
@@ -1236,7 +1299,8 @@ def performance_targets_text(
             continue
         mb = _mean_genome_mb(by_dataset.get(name, {}), summary_cells, name)
         count = d.get("genome_count")
-        desc = f"`{name}` ({common.fmt(count)} genomes" + (f", ~{mb:.1f} Mb each" if mb else "") + ")"
+        size = (f", ~{mb:.1f} Mb each" if mb >= 0.1 else f", ~{mb * 1000:.0f} kb each") if mb else ""
+        desc = f"`{name}` ({common.fmt(count)} genomes{size})"
         if d.get("kind") == "simulated":
             simulated.append(desc)
             if mb:

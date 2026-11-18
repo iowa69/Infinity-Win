@@ -1860,6 +1860,13 @@ GENOME_NAME_ALIASES = ("name", "genome", "genome_name", "sample", "id", "genome_
 #: The real file writes **both** a numeric id and a name per side::
 #:
 #:     genome_a  name_a  genome_b  name_b  snps  indels  comparable_bp  subs_per_site
+#:     [raw_snps  raw_comparable_bp]
+#:
+#: The engine is gaining the two ``raw_*`` columns after the existing ones. Once
+#: they are there, ``snps`` / ``comparable_bp`` are the **core-genome, filtered**
+#: values and ``raw_*`` the unfiltered ones; without them, ``snps`` is the
+#: engine's only (unfiltered) count. Every column is found by its header name,
+#: so appended or reordered columns change nothing.
 #:
 #: Joins against SKA2, a truth tree and the published expected values are all by
 #: genome *name*, so the name columns are matched first and the id columns are
@@ -1895,16 +1902,34 @@ DIST_COLUMN_ALIASES = {
     ),
     "focus": ("focus", "focus_level", "level"),
     "indels": ("indels", "indel", "indel_count"),
+    "raw_snps": ("raw_snps", "snps_raw", "unfiltered_snps"),
+    "raw_comparable_bp": ("raw_comparable_bp", "comparable_bp_raw", "unfiltered_comparable_bp"),
 }
+
+#: How to call the ``snps`` column in reports, depending on whether the file
+#: also carries ``raw_snps`` (then ``snps`` is the filtered core-genome count).
+SNPS_LABEL_FILTERED = "filtered (core genome)"
+SNPS_LABEL_ONLY = "as reported"
+
+
+def distance_basis(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Which distance columns a run reported: ``{"has_raw", "snps_label"}``."""
+    has_raw = any(r.get("raw_snps") is not None for r in rows)
+    return {
+        "has_raw": has_raw,
+        "snps_label": SNPS_LABEL_FILTERED if has_raw else SNPS_LABEL_ONLY,
+    }
 
 
 def load_cluster_distances(outdir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Read every ``cluster_<id>.dist.tsv`` in an output folder.
 
     Returns ``(rows, problems)`` where each row is a dict with keys ``cluster``,
-    ``a``, ``b``, ``snps``, ``comparable_bp``, ``distance``, ``focus``. Column
-    names are matched by alias; when the two genome columns cannot be identified
-    the file is reported and skipped instead of guessed at.
+    ``a``, ``b``, ``snps``, ``comparable_bp``, ``distance``, ``focus``,
+    ``indels``, ``raw_snps`` and ``raw_comparable_bp`` (the last two ``None``
+    until the engine writes them). Column names are matched by alias, never by
+    position; when the two genome columns cannot be identified the file is
+    reported and skipped instead of guessed at.
     """
     outdir = Path(outdir)
     problems: List[str] = []
@@ -1962,6 +1987,10 @@ def load_cluster_distances(outdir: Path) -> Tuple[List[Dict[str, Any]], List[str
                     "distance": _to_float(row.get(cols["distance"])) if cols["distance"] else None,
                     "focus": row.get(cols["focus"]) if cols["focus"] else None,
                     "indels": _to_int(row.get(cols["indels"])) if cols["indels"] else None,
+                    "raw_snps": _to_int(row.get(cols["raw_snps"])) if cols["raw_snps"] else None,
+                    "raw_comparable_bp": _to_int(row.get(cols["raw_comparable_bp"]))
+                    if cols["raw_comparable_bp"]
+                    else None,
                     "_source": path.name,
                 }
             )

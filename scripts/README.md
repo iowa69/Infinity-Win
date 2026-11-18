@@ -525,10 +525,12 @@ against; `--rf-mode bench` / `infinity` still force it.
 |---|---|---|
 | `run.json` | `run_matrix`, `make_report` | every key optional; null timings stay `null`; unknown keys ignored |
 | `events.jsonl` | `accuracy_over_time` | bad lines counted and skipped with their line numbers; envelope shape `{"seq","t_ms","wall_ms","event":{"event","data"}}` |
-| `cluster_<id>.dist.tsv` | `baselines`, `make_report`, `common` | the real header is `genome_a name_a genome_b name_b snps indels comparable_bp subs_per_site`; **names are matched before ids**, because joining on the numeric id would match nothing and look like a clean zero. Alternatives (`sample1/sample2`, `snp_count`, `sites`, `distance`) are also accepted; a file whose two genome columns cannot be identified is reported and skipped, never guessed at |
+| `cluster_<id>.dist.tsv` | `baselines`, `make_report`, `common` | the real header is `genome_a name_a genome_b name_b snps indels comparable_bp subs_per_site`, and the engine is appending `raw_snps raw_comparable_bp`. Once those exist, `snps`/`comparable_bp` are the **filtered core-genome** values and `raw_*` the unfiltered ones; the reports then show both (acceptance check: "engine core" and "engine raw" columns; `baselines.py compare`: a core and a raw join against SKA2; switch invariance: `raw pairs differing`). Without them `snps` is labelled "as reported". **Names are matched before ids**, because joining on the numeric id would match nothing and look like a clean zero. Alternatives (`sample1/sample2`, `snp_count`, `sites`, `distance`) are also accepted; a file whose two genome columns cannot be identified is reported and skipped, never guessed at |
 | `tree.nwk`, `cluster_<id>.nwk` | `accuracy_over_time`, `baselines` | internal node labels, `[&...]` comments, quoted names, multiple trees |
-| `genomes.tsv` | `run_matrix`, `baselines` | `id name path length contigs n50 gc cluster is_pivot focus snps_vs_pivot indels_vs_pivot uncovered_bp novel_bp` |
-| `clusters.tsv`, `cluster_<id>.variants.tsv` | available via `common.load_*` | same alias matching; ragged rows blank-filled and reported |
+| `genomes.tsv` | `common`, `baselines` | `id name path length contigs n50 gc cluster is_pivot focus snps_vs_pivot indels_vs_pivot uncovered_bp novel_bp`, plus whatever the engine appends; only named columns are looked up |
+| `clusters.tsv`, `cluster_<id>.variants.tsv` | `common`, `make_report` | same alias matching; ragged rows blank-filled and reported. `variants.tsv` is gaining a final `filter` column (`PASS` or `;`-separated reasons); readers look columns up by name, so it changes nothing, and the variant fingerprint of the invariance check includes it |
+
+**No reader parses by position.** Every engine TSV is read with `common.read_table` and its columns are found by header name (`Table.find_column`), so appended or reordered columns change nothing; `tests/test_columns.py` shuffles the columns of every file and checks the results do not move, and `FAKE_INFINITY_NEW_COLUMNS=1` makes the fake engine write the upcoming layout. The one positional reader is the Mash table, because `mash dist` writes no header.
 
 A column may be missing while the tool is still being built. Readers report that
 as a problem string that ends up in `REPORT.md` section 8 — they do not crash and
@@ -557,6 +559,7 @@ tested end to end without the real binary. Environment variables steer it:
 | `FAKE_INFINITY_BENCH_FAIL=1` | `bench` exits non-zero, writes nothing |
 | `FAKE_INFINITY_DIST_JSON=<path>` | take pairwise SNP counts from a JSON list |
 | `FAKE_INFINITY_SLEEP=<float>` | make wall time visible |
+| `FAKE_INFINITY_NEW_COLUMNS=1` | write the upcoming layout: `raw_snps`/`raw_comparable_bp` in `dist.tsv`, a `filter` column in `variants.tsv`, extra `genomes.tsv` columns |
 
 Covered: the SKA2 parser (including the real 496-row table when present), the
 `events.jsonl` parser, the `run.json` reader, defensive table reading, Newick /
