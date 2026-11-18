@@ -133,18 +133,32 @@ pub fn focus_label(focus: u8, approximate: bool) -> String {
     format!("Focus {focus}{mark} ({})", focus_word(focus))
 }
 
-/// The unit of the branch lengths a tree has at a given focus level. The three
-/// levels do not share a unit: Focus 0 trees are built from sketch distances
-/// (substitutions per site), Focus 1 from counts of differing difference
-/// pieces, Focus 2 from SNP counts (6.4, 6.9). A scale bar that does not say
-/// which of the three it is showing would be a lie. The "≈" marker is added by
-/// the caller through [`approx_mark`], so this stays a plain unit name.
-pub fn unit_label(focus: u8) -> &'static str {
+/// The unit every tree is *drawn* in. Inside a cluster the engine's Focus 2
+/// tree is neighbour joining on SNP counts, so a phylogram in SNPs is exact
+/// there. Everything else is converted into the same unit and carries the "≈"
+/// marker (see [`source_unit`] for where each estimate comes from), so one
+/// scale-bar vocabulary serves the whole picture.
+pub const TREE_UNIT: &str = "SNPs";
+
+/// The unit of the branch lengths a tree is drawn in. A function of the focus
+/// level so that a future split stays a one-line change; today every level is
+/// drawn in SNPs and only the "≈" marker differs. The marker is added by the
+/// caller through [`approx_mark`], so this stays a plain unit name.
+pub fn unit_label(_focus: u8) -> &'static str {
+    TREE_UNIT
+}
+
+/// Where the SNP numbers of a tree at this focus level come from, for the
+/// legend and the tooltips. Focus 0 trees are sketch distances (substitutions
+/// per site) times the median genome length, Focus 1 trees count differing
+/// difference pieces (each is at least one difference), Focus 2 trees are SNP
+/// counts (6.4, 6.9).
+pub fn source_unit(focus: u8) -> &'static str {
     match focus {
-        FOCUS_SKETCH => "subs/site",
-        FOCUS_BLOCKS => "diff pieces",
-        FOCUS_EXACT => "SNPs",
-        _ => "units",
+        FOCUS_SKETCH => "sketch distance × median genome length",
+        FOCUS_BLOCKS => "difference pieces",
+        FOCUS_EXACT => "SNP counts",
+        _ => "unknown",
     }
 }
 
@@ -154,13 +168,30 @@ pub fn is_approximate_focus(focus: u8) -> bool {
     focus < FOCUS_EXACT
 }
 
-/// A unit name with its marker: "≈ diff pieces" at Focus 1, "SNPs" at Focus 2.
+/// A unit name with its marker: "≈ SNPs" below Focus 2, "SNPs" at Focus 2.
 pub fn marked_unit(focus: u8) -> String {
     format!(
         "{}{}",
         approx_mark(is_approximate_focus(focus)),
         unit_label(focus)
     )
+}
+
+/// A branch length in SNPs the way a reader wants it: whole numbers with
+/// thousands separators, one decimal under ten when neighbour joining split a
+/// difference in half, and plain "0" for anything under a hundredth.
+pub fn snps(v: f64) -> String {
+    if !v.is_finite() || v < 0.0 {
+        return "n/a".to_string();
+    }
+    if v < 0.005 {
+        return "0".to_string();
+    }
+    let r = v.round();
+    if (v - r).abs() < 0.05 || v >= 10.0 {
+        return count(r as u64);
+    }
+    format!("{v:.1}")
 }
 
 /// An empty allele is written as a dash, as the output files do.
@@ -266,9 +297,25 @@ mod tests {
         assert_eq!(focus_word(2), "sharp");
         assert_eq!(focus_label(1, true), "Focus 1≈ (medium)");
         assert_eq!(focus_label(2, false), "Focus 2 (sharp)");
-        assert_eq!(unit_label(0), "subs/site");
-        assert_eq!(unit_label(1), "diff pieces");
+        // Every tree is drawn in SNPs; only the marker and the source differ.
+        assert_eq!(unit_label(0), "SNPs");
+        assert_eq!(unit_label(1), "SNPs");
         assert_eq!(unit_label(2), "SNPs");
+        assert!(source_unit(0).contains("sketch"));
+        assert!(source_unit(1).contains("pieces"));
+        assert_eq!(source_unit(2), "SNP counts");
+    }
+
+    #[test]
+    fn snp_lengths_read_as_counts() {
+        assert_eq!(snps(0.0), "0");
+        assert_eq!(snps(0.001), "0");
+        assert_eq!(snps(3.0), "3");
+        assert_eq!(snps(2.5), "2.5");
+        assert_eq!(snps(12.4), "12");
+        assert_eq!(snps(12_345.0), "12\u{2009}345");
+        assert_eq!(snps(f64::NAN), "n/a");
+        assert_eq!(snps(-1.0), "n/a");
     }
 
     #[test]
@@ -276,8 +323,8 @@ mod tests {
         assert!(!is_approximate_focus(2));
         assert!(is_approximate_focus(0) && is_approximate_focus(1));
         assert_eq!(marked_unit(2), "SNPs");
-        assert_eq!(marked_unit(1), "≈ diff pieces");
-        assert_eq!(marked_unit(0), "≈ subs/site");
+        assert_eq!(marked_unit(1), "≈ SNPs");
+        assert_eq!(marked_unit(0), "≈ SNPs");
     }
 
     #[test]

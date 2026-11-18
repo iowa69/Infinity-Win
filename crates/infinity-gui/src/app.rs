@@ -114,6 +114,23 @@ pub struct TreeView {
     pub zoom_request: Option<f32>,
     /// A layout point the next frame must put in the middle of the panel.
     pub centre: Option<(f64, f64)>,
+    /// The whole picture, or the selected cluster on its own.
+    pub mode: TreeMode,
+    /// SNP counts written on the branches.
+    pub branch_labels: bool,
+    /// Tip labels lined up in one column, with dotted leaders to the tips.
+    pub aligned_tips: bool,
+    /// A strip of cluster colour next to every tip label.
+    pub color_strip: bool,
+}
+
+/// What the tree panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeMode {
+    /// The backbone with clusters collapsed or opened.
+    All,
+    /// The selected cluster alone, as a standard phylogram in SNPs.
+    Cluster,
 }
 
 impl Default for TreeView {
@@ -129,6 +146,10 @@ impl Default for TreeView {
             search_hit: None,
             zoom_request: None,
             centre: None,
+            mode: TreeMode::All,
+            branch_labels: false,
+            aligned_tips: false,
+            color_strip: true,
         }
     }
 }
@@ -524,7 +545,8 @@ impl InfinityApp {
 
     // --- layout and animation ----------------------------------------------
 
-    /// A cheap signature of the set of opened clusters.
+    /// A cheap signature of what the tree panel shows: the set of opened
+    /// clusters, or, in single-cluster mode, which cluster.
     fn expanded_signature(&self) -> u64 {
         let mut ids: Vec<u32> = self.expanded.iter().copied().collect();
         ids.sort_unstable();
@@ -532,7 +554,26 @@ impl InfinityApp {
         for id in ids {
             h = h.rotate_left(5) ^ u64::from(id).wrapping_mul(0x100_0000_01b3);
         }
+        if let Some(c) = self.single_cluster() {
+            h = h.rotate_left(17) ^ (u64::from(c) + 1).wrapping_mul(0xff51_afd7_ed55_8ccd);
+        }
         h
+    }
+
+    /// The cluster drawn on its own, when the tree panel is in that mode.
+    pub(crate) fn single_cluster(&self) -> Option<u32> {
+        match self.tree.mode {
+            TreeMode::Cluster => self.selected_cluster,
+            TreeMode::All => None,
+        }
+    }
+
+    /// The display tree for the current mode.
+    pub(crate) fn current_display_tree(&self) -> Option<layout::DisplayNode> {
+        match self.single_cluster() {
+            Some(c) => self.model.cluster_display_tree(c),
+            None => self.model.display_tree(&self.expanded),
+        }
     }
 
     /// Rebuild the tree layout only when the model or the opened set changed,
@@ -545,7 +586,7 @@ impl InfinityApp {
         {
             return;
         }
-        let Some(display) = self.model.display_tree(&self.expanded) else {
+        let Some(display) = self.current_display_tree() else {
             self.tree_layout = None;
             self.positions.clear();
             self.laid_out_version = self.model.version;

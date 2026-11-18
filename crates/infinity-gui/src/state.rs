@@ -127,6 +127,24 @@ pub enum Source {
     Folder(PathBuf),
 }
 
+/// The unit of the backbone tree's branch lengths.
+///
+/// Today's `BackboneTree` event carries sketch distances in substitutions per
+/// site, which the tree panel turns into "≈ SNPs" by multiplying with the median
+/// genome length. The engine is about to emit a backbone in SNP units of its own
+/// (a separate event); when it does, the fold sets [`BackboneUnit::Snps`] and
+/// the conversion disappears.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BackboneUnit {
+    /// Substitutions per site, from the sketches (Focus 0).
+    #[default]
+    SubsPerSite,
+    /// SNPs already. `exact` is false while they are still estimates.
+    // WIRE: set by the engine's `BackboneExact` event once it exists.
+    #[allow(dead_code)]
+    Snps { exact: bool },
+}
+
 /// Everything the panels draw, folded out of the event stream.
 #[derive(Debug, Clone, Default)]
 pub struct UiModel {
@@ -152,6 +170,9 @@ pub struct UiModel {
     pub summary: Option<RunSummary>,
     /// Cluster id to genome id to map data.
     pub maps: HashMap<u32, HashMap<u32, MapUpdateInfo>>,
+
+    /// What the backbone's branch lengths are measured in.
+    pub backbone_unit: BackboneUnit,
 
     /// Cluster distance threshold in force, as last reported by the engine.
     pub threshold: f64,
@@ -197,6 +218,28 @@ impl UiModel {
 
     pub fn total_length(&self) -> u64 {
         self.genomes.iter().map(|g| g.length).sum()
+    }
+
+    /// Median genome length, the factor that turns a sketch distance
+    /// (substitutions per site) into an estimated SNP count. 0 before any
+    /// genome is scanned.
+    pub fn median_length(&self) -> u64 {
+        let mut v: Vec<u64> = self.genomes.iter().map(|g| g.length).collect();
+        if v.is_empty() {
+            return 0;
+        }
+        let mid = v.len() / 2;
+        let (_, m, _) = v.select_nth_unstable(mid);
+        *m
+    }
+
+    /// The factor from the backbone's own unit to SNPs, and whether the result
+    /// is an estimate.
+    pub fn backbone_to_snps(&self) -> (f64, bool) {
+        match self.backbone_unit {
+            BackboneUnit::SubsPerSite => (self.median_length() as f64, true),
+            BackboneUnit::Snps { exact } => (1.0, !exact),
+        }
     }
 
     /// Clusters that have been refined at least to Focus 1.
@@ -588,10 +631,17 @@ impl UiModel {
 
     /// The tree to draw: the backbone with every cluster the user opened grafted
     /// in at its pivot leaf, and every other cluster collapsed to a triangle.
+    ///
+    /// Every branch length comes out in SNPs: the backbone (sketch distances)
+    /// and Focus 0 cluster trees are multiplied by the median genome length and
+    /// stay marked approximate, Focus 1 trees are piece counts (≈), Focus 2
+    /// trees are the engine's SNP counts.
     pub fn display_tree(&self, expanded: &HashSet<u32>) -> Option<DisplayNode> {
         let bb = self.backbone.as_ref()?;
         let ids = self.tree_name_index();
-        let mut top = layout::from_core(bb, fmt::FOCUS_SKETCH, true, &ids);
+        let (factor, approx) = self.backbone_to_snps();
+        let mut top = layout::from_core(bb, fmt::FOCUS_SKETCH, approx, &ids);
+        top.scale_lengths(factor);
         self.graft_clusters(&mut top, expanded, &ids);
         Some(if matches!(top.kind, NodeKind::Internal) {
             top.kind = NodeKind::Root;
@@ -624,7 +674,7 @@ impl UiModel {
                     let pivot_name = c.pivot_name.clone();
                     let single = members <= 1;
                     let mut sub = match c.tree.as_ref().filter(|_| opened) {
-                        Some(t) => Some(layout::from_core(t, focus, approximate, ids)),
+                        Some(t) => Some(self.cluster_subtree(t, focus, approximate, ids)),
                         // A cluster of one genome is trivially exact and the
                         // engine emits no tree for it, so draw the pivot itself.
                         None if opened && single => {
@@ -668,6 +718,70 @@ impl UiModel {
         for c in &mut node.children {
             self.graft_clusters(c, expanded, ids);
         }
+    }
+
+    /// A cluster's own tree as display nodes, in SNPs: a Focus 0 star is a
+    /// sketch distance and is scaled by the median genome length; Focus 1 and 2
+    /// trees are already counts.
+    fn cluster_subtree(
+        &self,
+        t: &Tree,
+        focus: u8,
+        approximate: bool,
+        ids: &HashMap<String, u32>,
+    ) -> DisplayNode {
+        let mut d = layout::from_core(t, focus, approximate, ids);
+        if focus == fmt::FOCUS_SKETCH {
+            d.scale_lengths(self.median_length() as f64);
+        }
+        d
+    }
+
+    /// One cluster on its own, as a standard phylogram in SNPs: the "this
+    /// cluster only" view of the tree panel. A cluster without a tree yet is a
+    /// collapsed triangle; a one-genome cluster is its pivot.
+    pub fn cluster_display_tree(&self, cid: u32) -> Option<DisplayNode> {
+        let c = self.cluster(cid)?;
+        let ids = self.tree_name_index();
+        let kind = NodeKind::ClusterRoot {
+            id: cid,
+            members: c.size(),
+            focus: c.focus,
+        };
+        let sub = match &c.tree {
+            Some(t) => {
+                let mut s = self.cluster_subtree(t, c.focus, c.approximate, &ids);
+                s.kind = kind;
+                s.len = 0.0;
+                s
+            }
+            None if c.size() <= 1 => {
+                let mut s = DisplayNode::new(kind, 0.0, c.focus, c.approximate);
+                s.children = vec![DisplayNode::new(
+                    NodeKind::Genome {
+                        id: c.pivot,
+                        name: c.pivot_name.clone(),
+                    },
+                    0.0,
+                    c.focus,
+                    false,
+                )];
+                s
+            }
+            None => DisplayNode::new(
+                NodeKind::ClusterCollapsed {
+                    id: cid,
+                    members: c.size(),
+                    focus: c.focus,
+                },
+                0.0,
+                c.focus,
+                c.approximate,
+            ),
+        };
+        let mut root = DisplayNode::new(NodeKind::Root, 0.0, c.focus, c.approximate);
+        root.children = vec![sub];
+        Some(root)
     }
 
     /// The cluster a genome belongs to, or `None` before clustering.
@@ -1261,6 +1375,102 @@ mod tests {
         // The cluster's own focus, not the backbone's, travels with the subtree.
         assert_eq!(c.children[0].focus, fmt::FOCUS_EXACT);
         assert_eq!(collapsed.children[0].focus, fmt::FOCUS_SKETCH);
+    }
+
+    #[test]
+    fn every_tree_is_drawn_in_snps() {
+        let mut m = three_genomes();
+        // Median genome length is 2000 (lengths 1000, 2000, 3000).
+        assert_eq!(m.median_length(), 2000);
+        let (factor, approx) = m.backbone_to_snps();
+        assert_eq!(factor, 2000.0);
+        assert!(approx);
+        // The backbone edge of 0.001 subs/site becomes ≈ 2 SNPs.
+        let t = m.display_tree(&HashSet::new()).unwrap();
+        assert!(
+            (t.children[0].len - 2.0).abs() < 1e-9,
+            "{}",
+            t.children[0].len
+        );
+        assert!(t.children[0].approximate);
+        // A Focus 2 cluster tree keeps its SNP counts as they are.
+        m.apply(
+            3.0,
+            Event::ClusterFocus(ClusterFocusInfo {
+                cluster: 0,
+                focus: 2,
+                approximate: false,
+                newick: "(aaa:1,bbb:4);".to_string(),
+                members: vec![],
+            }),
+        );
+        let mut open = HashSet::new();
+        open.insert(0u32);
+        let t = m.display_tree(&open).unwrap();
+        let c = &t.children[0];
+        assert!(matches!(c.kind, NodeKind::ClusterRoot { id: 0, .. }));
+        assert!((c.len - 2.0).abs() < 1e-9, "the backbone edge stays ≈ SNPs");
+        assert_eq!(c.children[1].len, 4.0);
+        assert!(!c.children[1].approximate);
+        // A Focus 0 star is a sketch distance, so it is scaled like the backbone.
+        m.apply(
+            4.0,
+            Event::Clustered {
+                threshold: 0.005,
+                clusters: vec![cluster(0, 0, &[0, 1, 2], &["aaa", "bbb", "ccc"])],
+            },
+        );
+        m.apply(
+            5.0,
+            Event::ClusterFocus(ClusterFocusInfo {
+                cluster: 0,
+                focus: 0,
+                approximate: true,
+                newick: "(aaa:0,bbb:0.002,ccc:0.001);".to_string(),
+                members: vec![],
+            }),
+        );
+        let t = m.cluster_display_tree(0).unwrap();
+        let c = &t.children[0];
+        assert!((c.children[1].len - 4.0).abs() < 1e-9, "0.002 × 2000");
+        assert!(c.children[1].approximate);
+    }
+
+    #[test]
+    fn a_cluster_on_its_own_is_a_phylogram_that_fills_the_width() {
+        let mut m = three_genomes();
+        m.apply(
+            3.0,
+            Event::ClusterFocus(ClusterFocusInfo {
+                cluster: 0,
+                focus: 2,
+                approximate: false,
+                newick: "(aaa:1,bbb:3);".to_string(),
+                members: vec![],
+            }),
+        );
+        let t = m.cluster_display_tree(0).unwrap();
+        let l = layout::layout(&t);
+        assert_eq!(l.rows, 2.0);
+        assert_eq!(l.regions.len(), 2);
+        // No empty backbone width is reserved in front of the cluster.
+        assert!((l.x_max - layout::CLUSTER_W).abs() < 1e-9, "{}", l.x_max);
+        // A cluster with no tree yet is its triangle; a singleton its pivot.
+        let mut m2 = three_genomes();
+        m2.clusters[0].tree = None;
+        let t = m2.cluster_display_tree(0).unwrap();
+        assert!(matches!(
+            t.children[0].kind,
+            NodeKind::ClusterCollapsed { id: 0, .. }
+        ));
+        let t = m2.cluster_display_tree(1).unwrap();
+        assert_eq!(t.children[0].children[0].kind.name(), Some("ccc"));
+        assert!(m2.cluster_display_tree(99).is_none());
+    }
+
+    #[test]
+    fn the_median_of_nothing_is_zero() {
+        assert_eq!(UiModel::default().median_length(), 0);
     }
 
     #[test]

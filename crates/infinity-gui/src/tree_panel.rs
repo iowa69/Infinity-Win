@@ -13,7 +13,7 @@
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
-use crate::app::InfinityApp;
+use crate::app::{InfinityApp, TreeMode, TreeView};
 use crate::layout::{self, NodeKind, TreeLayout};
 use crate::pairwise::PairSource;
 use crate::state::UiModel;
@@ -153,6 +153,22 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         }
 
         ui.separator();
+        // All clusters, or the selected one alone as a standard phylogram.
+        let can_single = app.selected_cluster.is_some();
+        let before = app.tree.mode;
+        ui.selectable_value(&mut app.tree.mode, TreeMode::All, "All")
+            .on_hover_text("the backbone with every cluster, collapsed or opened");
+        ui.add_enabled_ui(can_single, |ui| {
+            ui.selectable_value(&mut app.tree.mode, TreeMode::Cluster, "Cluster")
+                .on_hover_text("the selected cluster on its own, branch lengths in SNPs")
+                .on_disabled_hover_text("select a cluster first");
+        });
+        if app.tree.mode != before {
+            app.tree.needs_fit = true;
+            app.tree.user_moved = false;
+        }
+
+        ui.separator();
         if ui.button("−").on_hover_text("zoom out").clicked() {
             zoom_by = Some(1.0 / 1.25);
         }
@@ -166,12 +182,12 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         {
             fit_now = true;
         }
-        ui.checkbox(&mut app.tree.show_legend, "legend");
-        // Branch-length units differ per focus level (6.4, 6.9), so the panel
-        // says which one it is drawing rather than leaving it to be guessed.
-        if let Some(c) = app.selected_cluster.and_then(|c| app.model.cluster(c)) {
-            ui.weak(format!("branch lengths in {}", fmt::marked_unit(c.focus)));
-        }
+        ui.menu_button("View ▾", |ui| {
+            ui.checkbox(&mut app.tree.show_legend, "Legend");
+            ui.checkbox(&mut app.tree.branch_labels, "SNP counts on branches");
+            ui.checkbox(&mut app.tree.aligned_tips, "Aligned tip labels");
+            ui.checkbox(&mut app.tree.color_strip, "Cluster colour strip");
+        });
     });
     // The pairwise readout gets a line of its own: it is the longest thing in
     // the header and the one that changes most.
@@ -276,6 +292,16 @@ struct Draw<'a> {
     /// Node positions in layout coordinates, parallel to `TreeLayout::nodes`,
     /// mid-animation when the tree is moving.
     positions: &'a [(f64, f64)],
+    /// Branch labels, aligned tips, colour strip.
+    opts: &'a TreeView,
+    selected_cluster: Option<u32>,
+}
+
+impl Draw<'_> {
+    /// Screen x of the aligned tip-label column: just right of the deepest tip.
+    fn tip_column(&self, l: &TreeLayout) -> f32 {
+        self.view.screen((l.x_max, 0.0)).x + 10.0
+    }
 }
 
 fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
@@ -376,8 +402,13 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
             selection: &app.selection,
             search_hit: app.tree.search_hit,
             positions: &app.positions,
+            opts: &app.tree,
+            selected_cluster: app.selected_cluster,
         };
         draw_edges(&d, l);
+        if d.opts.branch_labels {
+            draw_branch_labels(&d, l);
+        }
         hits = draw_nodes(&d, l);
         if let Some(p) = pointer {
             hover = hits
@@ -386,7 +417,7 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 .find(|(_, r)| r.contains(p))
                 .map(|(h, _)| h.clone());
         }
-        draw_scale_bar(&d, l, pointer);
+        draw_scale_bars(&d, l, pointer);
         if let Some(h) = &hover {
             tooltip = match h {
                 Hover::Genome(id) => genome_tooltip(d.model, *id),
@@ -617,8 +648,25 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                 } else {
                     name.clone()
                 };
+                // Aligned tips start in one column, joined to the tip by a
+                // dotted leader; otherwise the label sits at the tip.
+                let mut lx = if d.opts.aligned_tips {
+                    let col = d.tip_column(l);
+                    if col - s.x > 8.0 {
+                        dotted(&d.painter, s.x + 4.0, col - 3.0, y, colors::wash(weak, 110));
+                    }
+                    col
+                } else {
+                    s.x + 5.0
+                };
+                if d.opts.color_strip {
+                    let h = (d.view.px_per_row * 0.86).max(2.0);
+                    let strip = Rect::from_min_size(Pos2::new(lx, y - h / 2.0), Vec2::new(7.0, h));
+                    d.painter.rect_filled(strip, 1, colour);
+                    lx += 11.0;
+                }
                 let tr = d.painter.text(
-                    Pos2::new(s.x + 5.0, y),
+                    Pos2::new(lx, y),
                     Align2::LEFT_CENTER,
                     text,
                     label_font.clone(),
@@ -711,38 +759,113 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
     hits
 }
 
-/// The scale bar of section 8 ("|-----| 5 SNPs"). It always names its unit,
-/// because the three focus levels do not share one.
-fn draw_scale_bar(d: &Draw<'_>, l: &TreeLayout, pointer: Option<Pos2>) {
-    let lx = pointer.map(|p| d.view.layout(p).0).unwrap_or(l.x_max * 0.5);
-    let Some(region) = l.region_at(lx) else {
-        return;
-    };
-    let Some(bar) = layout::scale_bar(region, 0.18) else {
-        return;
-    };
-    let px = bar.layout_width as f32 * d.view.px_per_unit;
-    if !px.is_finite() || px <= 4.0 {
+/// The scale bars of section 8 ("|-----| 5 SNPs"), in SNPs. One for the
+/// opened cluster the pointer is over (or the selected one, or the first one),
+/// and one for the backbone between clusters, whose SNPs are estimates and say
+/// so. Each bar is drawn in its region's focus colour.
+fn draw_scale_bars(d: &Draw<'_>, l: &TreeLayout, pointer: Option<Pos2>) {
+    let mut bars: Vec<(&layout::Region, &str)> = Vec::new();
+    let under_pointer = pointer
+        .map(|p| d.view.layout(p).0)
+        .and_then(|lx| l.region_at(lx))
+        .filter(|r| r.cluster.is_some());
+    let cluster_region = under_pointer
+        .or_else(|| {
+            l.regions
+                .iter()
+                .find(|r| r.cluster.is_some() && r.cluster == d.selected_cluster)
+        })
+        .or_else(|| l.regions.iter().find(|r| r.cluster.is_some()));
+    if let Some(r) = cluster_region {
+        bars.push((r, "in cluster"));
+    }
+    if let Some(bb) = l.regions.first().filter(|r| r.raw_max > 0.0) {
+        bars.push((bb, "between clusters"));
+    }
+    let mut y = d.rect.bottom() - MARGIN - 10.0;
+    for (region, what) in bars {
+        let Some(bar) = layout::scale_bar(region, 0.18) else {
+            continue;
+        };
+        let px = bar.layout_width as f32 * d.view.px_per_unit;
+        if !px.is_finite() || px <= 4.0 {
+            continue;
+        }
+        let x0 = d.rect.left() + MARGIN;
+        let style = colors::focus_style(region.focus, d.dark);
+        let stroke = Stroke::new(1.6, style.color);
+        segment(&d.painter, Pos2::new(x0, y), Pos2::new(x0 + px, y), &style);
+        d.painter
+            .line_segment([Pos2::new(x0, y - 4.0), Pos2::new(x0, y + 4.0)], stroke);
+        d.painter.line_segment(
+            [Pos2::new(x0 + px, y - 4.0), Pos2::new(x0 + px, y + 4.0)],
+            stroke,
+        );
+        let label = match region.cluster {
+            Some(c) => format!("{}  ({what} c{c})", bar.label),
+            None => format!("{}  ({what})", bar.label),
+        };
+        d.painter.text(
+            Pos2::new(x0 + px + 6.0, y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(11.0),
+            stroke.color,
+        );
+        y -= 18.0;
+    }
+}
+
+/// SNP counts written above the branches, where there is room for them. The
+/// "≈" marker travels with every estimated count.
+fn draw_branch_labels(d: &Draw<'_>, l: &TreeLayout) {
+    if d.view.px_per_row < 11.0 {
         return;
     }
-    let x0 = d.rect.left() + MARGIN;
-    let y = d.rect.bottom() - MARGIN - 12.0;
-    let stroke = Stroke::new(1.4, colors::focus_color(region.focus, d.dark));
-    d.painter
-        .line_segment([Pos2::new(x0, y), Pos2::new(x0 + px, y)], stroke);
-    d.painter
-        .line_segment([Pos2::new(x0, y - 4.0), Pos2::new(x0, y + 4.0)], stroke);
-    d.painter.line_segment(
-        [Pos2::new(x0 + px, y - 4.0), Pos2::new(x0 + px, y + 4.0)],
-        stroke,
-    );
-    d.painter.text(
-        Pos2::new(x0 + px + 6.0, y),
-        Align2::LEFT_CENTER,
-        &bar.label,
-        FontId::proportional(11.0),
-        stroke.color,
-    );
+    let font = FontId::proportional((d.view.px_per_row * 0.55).clamp(8.5, 11.0));
+    let char_w = font.size * 0.56;
+    for n in &l.nodes {
+        if n.len <= 0.0 || matches!(n.kind, NodeKind::Root) {
+            continue;
+        }
+        let (Some(&c), Some(&p)) = (
+            d.positions.get(n.idx),
+            n.parent.and_then(|p| d.positions.get(p)),
+        ) else {
+            continue;
+        };
+        let child = d.view.screen(c);
+        let parent = d.view.screen(p);
+        if child.y < d.rect.top() || child.y > d.rect.bottom() {
+            continue;
+        }
+        let text = format!(
+            "{}{}",
+            if n.approximate { "≈" } else { "" },
+            fmt::snps(n.len)
+        );
+        let w = text.chars().count() as f32 * char_w;
+        if child.x - parent.x < w + 6.0 {
+            continue;
+        }
+        d.painter.text(
+            Pos2::new((parent.x + child.x) / 2.0, child.y - 1.5),
+            Align2::CENTER_BOTTOM,
+            text,
+            font.clone(),
+            colors::wash(colors::focus_color(n.focus, d.dark), 210),
+        );
+    }
+}
+
+/// A dotted horizontal leader from a tip to its aligned label.
+fn dotted(painter: &egui::Painter, x0: f32, x1: f32, y: f32, colour: Color32) {
+    painter.extend(egui::Shape::dashed_line(
+        &[Pos2::new(x0, y), Pos2::new(x1, y)],
+        Stroke::new(0.8, colour),
+        1.2,
+        2.8,
+    ));
 }
 
 fn draw_legend(painter: &egui::Painter, rect: Rect, dark: bool, bg: Color32, border: Stroke) {
@@ -755,9 +878,9 @@ fn draw_legend(painter: &egui::Painter, rect: Rect, dark: bool, bg: Color32, bor
     painter.rect_stroke(box_rect, 4, border, egui::StrokeKind::Middle);
     let font = FontId::proportional(11.0);
     for (i, text) in [
-        "Focus 0 — sketch only, blurry (≈)",
-        "Focus 1 — blocks compared, ≈ pieces",
-        "Focus 2 — exact, base level, SNPs",
+        "Focus 0 — sketch only, ≈ SNPs",
+        "Focus 1 — blocks compared, ≈ SNPs",
+        "Focus 2 — exact SNPs",
     ]
     .iter()
     .enumerate()
