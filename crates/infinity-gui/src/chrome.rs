@@ -1,114 +1,153 @@
 //! The window's chrome: the toolbar along the top and the status bar along the
 //! bottom (section 8).
 //!
-//! The toolbar carries the three things that must be reachable at any moment —
-//! adding genomes, running and stopping — plus the cluster distance slider,
-//! which is the one parameter section 8 requires to take effect immediately.
-//! Everything else lives behind the File / Export / View menus so that the bar
-//! stays one line high.
+//! The toolbar is one line: the menus, the three things that must be reachable
+//! at any moment (genomes, run, stop), the cluster distance (the one parameter
+//! section 8 requires to act immediately, shown with its % identity), and on
+//! the right the Settings window and the side-panel toggle. Every other
+//! parameter lives in Settings. Below it, the "Genomes" drawer holds the input
+//! paths and the output folder: everything a run needs, in one place.
 
 use eframe::egui;
 use egui::RichText;
 
 use crate::app::InfinityApp;
 use crate::export::Item;
-use crate::fmt;
 use crate::prefs::MAX_RECENT;
+use crate::{fmt, settings, theme};
 
-/// The top bar: menus, transport controls, cluster distance and threads.
+/// The top bar: menus, transport controls, cluster distance, settings.
 pub fn toolbar(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    let mut show_inputs = app.show_inputs;
     let mut run_now = false;
     let mut stop_now = false;
     let mut open_now: Option<String> = None;
-    let mut export_now: Option<Option<Item>> = None;
+    let mut export_now: Option<ExportAction> = None;
     let mut dist_changed = false;
     let mut params_changed = false;
+    let p = theme::palette(ui);
 
-    egui::Panel::top("toolbar").show(ui, |ui| {
-        menu_bar(ui, app, &mut open_now, &mut export_now);
+    egui::Panel::top("toolbar")
+        .frame(
+            egui::Frame::side_top_panel(ui.style())
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .fill(p.panel),
+        )
+        .show(ui, |ui| {
+            egui::menu::MenuBar::default().ui(ui, |ui| {
+                ui.label(
+                    RichText::new("∞ Infinity-Win")
+                        .strong()
+                        .size(14.0)
+                        .color(p.accent),
+                );
+                ui.add_space(6.0);
+                menus(ui, app, &mut open_now, &mut export_now);
+                ui.separator();
 
-        // Wrapped, so a narrow window moves the tail of the bar onto a second
-        // line instead of pushing it off the edge.
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .selectable_label(show_inputs, "Add genomes")
-                .on_hover_text(
-                    "Type or drop a path. No native file dialog is used, because the crates \
-                     that provide one need system libraries this project must not require.",
-                )
-                .clicked()
-            {
-                show_inputs = !show_inputs;
-            }
-            let can_run = !app.running() && app.params_error.is_none() && !app.inputs.is_empty();
-            ui.add_enabled_ui(can_run, |ui| {
+                let n = app.inputs.len();
+                let label = if n == 0 {
+                    "＋ Genomes".to_string()
+                } else {
+                    format!("＋ Genomes ({n})")
+                };
                 if ui
-                    .button(RichText::new("Run ▶").strong())
-                    .on_hover_text("Compare the listed genomes")
+                    .selectable_label(app.show_inputs, label)
+                    .on_hover_text(
+                        "Add genome files or folders: type a path or drop them on the window, \
+                         and choose where results go.",
+                    )
                     .clicked()
                 {
+                    app.show_inputs = !app.show_inputs;
+                }
+                let can_run =
+                    !app.running() && app.params_error.is_none() && !app.inputs.is_empty();
+                let run = ui
+                    .add_enabled(can_run, theme::primary_button("▶ Run", &p))
+                    .on_hover_text("Compare the listed genomes")
+                    .on_disabled_hover_text(if app.inputs.is_empty() {
+                        "add genomes first"
+                    } else if app.running() {
+                        "a run is going"
+                    } else {
+                        "fix the settings first"
+                    });
+                if run.clicked() {
                     run_now = true;
                 }
-            });
-            ui.add_enabled_ui(app.running(), |ui| {
                 if ui
-                    .button("Stop ■")
-                    .on_hover_text("Ask the engine to stop after the current genome")
+                    .add_enabled(app.running(), egui::Button::new("■ Stop"))
+                    .on_hover_text("Stop after the current genome")
                     .clicked()
                 {
                     stop_now = true;
                 }
+                if app.running() {
+                    ui.spinner();
+                }
+                ui.separator();
+
+                // The one parameter that acts while a run is going.
+                let before = app.prefs.params.cluster_dist;
+                ui.label(RichText::new("Cluster distance").color(p.text_weak))
+                    .on_hover_text(
+                        "How different genomes may be and still share a cluster. Acts \
+                         immediately while a run is going: clusters are recomputed from \
+                         the sketches.",
+                    );
+                ui.add(
+                    egui::Slider::new(&mut app.prefs.params.cluster_dist, 0.000_1..=0.05)
+                        .logarithmic(true)
+                        .show_value(true)
+                        .fixed_decimals(4),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{:.2} % id",
+                        settings::identity_pct(app.prefs.params.cluster_dist)
+                    ))
+                    .small()
+                    .color(p.text_weak),
+                );
+                if (app.prefs.params.cluster_dist - before).abs() > f64::EPSILON {
+                    dist_changed = true;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .selectable_label(app.show_side, "◨")
+                        .on_hover_text("show or hide the run panel on the right")
+                        .clicked()
+                    {
+                        app.show_side = !app.show_side;
+                    }
+                    let warn =
+                        app.params_error.is_some() || app.prefs.resolution.validate().is_err();
+                    let gear = if warn {
+                        "⚙ Settings ⚠"
+                    } else {
+                        "⚙ Settings"
+                    };
+                    if ui
+                        .selectable_label(app.show_settings, gear)
+                        .on_hover_text("resolution, SNP rules, threads and the algorithm")
+                        .clicked()
+                    {
+                        app.show_settings = !app.show_settings;
+                    }
+                });
             });
-            if app.running() {
-                ui.spinner();
-            }
-            ui.separator();
 
-            // The one parameter that acts while a run is going.
-            let before = app.prefs.params.cluster_dist;
-            ui.label("cluster distance");
-            ui.add(
-                egui::Slider::new(&mut app.prefs.params.cluster_dist, 0.000_1..=0.05)
-                    .logarithmic(true)
-                    .show_value(true)
-                    .fixed_decimals(4),
-            );
-            if (app.prefs.params.cluster_dist - before).abs() > f64::EPSILON {
-                dist_changed = true;
-            }
-
-            ui.separator();
-            ui.label("threads");
-            if ui
-                .add(egui::DragValue::new(&mut app.prefs.params.threads).range(0..=512))
-                .changed()
-            {
-                params_changed = true;
-            }
-            if app.prefs.params.threads == 0 {
-                ui.weak("(all cores)");
-            }
-            ui.separator();
-            ui.label("output");
-            let out = ui
-                .add(egui::TextEdit::singleline(&mut app.outdir_text).desired_width(160.0))
-                .on_hover_text("Where the run writes its files, including events.jsonl");
-            if out.changed() {
-                params_changed = true;
+            if app.show_inputs {
+                input_area(ui, app, &mut params_changed);
             }
         });
 
-        if show_inputs {
-            input_area(ui, app, &mut params_changed);
-        }
-    });
-
     let ctx = ui.ctx().clone();
-    app.show_inputs = show_inputs;
     if dist_changed {
         app.validate_params();
         app.push_cluster_dist();
+        app.save_prefs();
     }
     if params_changed {
         app.validate_params();
@@ -123,109 +162,134 @@ pub fn toolbar(ui: &mut egui::Ui, app: &mut InfinityApp) {
     if let Some(dir) = open_now {
         app.open_folder(&dir, &ctx);
     }
-    if let Some(item) = export_now {
-        match item {
-            Some(Item::Png) => app.export_png(&ctx),
-            other => app.export_files(other),
-        }
+    if let Some(a) = export_now {
+        app.run_export(a, &ctx);
     }
 }
 
-fn menu_bar(
+/// What an export menu entry asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportAction {
+    /// One export item.
+    Item(Item),
+    /// Everything the window can export.
+    All,
+}
+
+fn menus(
     ui: &mut egui::Ui,
     app: &mut InfinityApp,
     open_now: &mut Option<String>,
-    export_now: &mut Option<Option<Item>>,
+    export_now: &mut Option<ExportAction>,
 ) {
-    egui::menu::MenuBar::default().ui(ui, |ui| {
-        ui.menu_button("File", |ui| {
-            ui.label("Open a finished output folder:");
-            ui.horizontal(|ui| {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut app.open_text)
-                        .desired_width(240.0)
-                        .hint_text("/path/to/infinity-out"),
-                );
-                let go = ui.button("Open").clicked()
-                    || (resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)));
-                if go {
-                    *open_now = Some(app.open_text.clone());
-                    ui.close();
-                }
-            });
-            if !app.prefs.recent_inputs.is_empty() {
-                ui.separator();
-                ui.label("Recent:");
-                let recent = app.prefs.recent_inputs.clone();
-                for p in recent.iter().take(MAX_RECENT) {
-                    let clicked = ui.button(p.as_str()).clicked();
-                    if clicked {
-                        app.open_text = p.clone();
-                        *open_now = Some(p.clone());
-                        ui.close();
-                        break;
-                    }
-                }
-            }
-            ui.separator();
-            if ui.button("Quit").clicked() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        });
-
-        ui.menu_button("Export", |ui| {
-            let has_data = app.model.genome_count() > 0;
-            ui.add_enabled_ui(has_data, |ui| {
-                for item in Item::files() {
-                    if ui.button(item.label()).clicked() {
-                        *export_now = Some(Some(item));
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if ui.button("Tree picture (PNG)").clicked() {
-                    *export_now = Some(Some(Item::Png));
-                    ui.close();
-                }
-                if ui.button("Everything").clicked() {
-                    *export_now = Some(None);
-                    ui.close();
-                }
-            });
-            if !has_data {
-                ui.weak("nothing to export yet");
-            }
-            ui.separator();
-            ui.label("Export folder:");
-            ui.add(
-                egui::TextEdit::singleline(&mut app.export_text)
+    ui.menu_button("File", |ui| {
+        ui.label("Open a finished output folder:");
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut app.open_text)
                     .desired_width(240.0)
-                    .hint_text("/path/to/export"),
+                    .hint_text("/path/to/infinity-out"),
             );
+            let go = ui.button("Open").clicked()
+                || (resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)));
+            if go {
+                *open_now = Some(app.open_text.clone());
+                ui.close();
+            }
         });
+        if !app.prefs.recent_inputs.is_empty() {
+            ui.separator();
+            ui.label(RichText::new("Recent").small());
+            let recent = app.prefs.recent_inputs.clone();
+            for p in recent.iter().take(MAX_RECENT) {
+                if ui.button(p.as_str()).clicked() {
+                    app.open_text = p.clone();
+                    *open_now = Some(p.clone());
+                    ui.close();
+                    break;
+                }
+            }
+        }
+        ui.separator();
+        if ui.button("Settings…").clicked() {
+            app.show_settings = true;
+            ui.close();
+        }
+        if ui.button("Quit").clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    });
 
-        ui.menu_button("View", |ui| {
-            ui.checkbox(&mut app.tree.show_legend, "Tree legend");
-            ui.checkbox(&mut app.show_side, "Side panel");
-            ui.checkbox(&mut app.show_notes, "Warnings and notes");
-            if ui.button("Fit tree").clicked() {
-                app.tree.needs_fit = true;
-                app.tree.user_moved = false;
+    ui.menu_button("Export", |ui| {
+        let has_data = app.model.genome_count() > 0;
+        ui.add_enabled_ui(has_data, |ui| {
+            for item in Item::menu() {
+                if ui.button(item.label()).clicked() {
+                    *export_now = Some(ExportAction::Item(item));
+                    ui.close();
+                }
             }
-            if ui.button("Fit map").clicked() {
-                app.map_view.needs_fit = true;
+            ui.separator();
+            if ui.button("Everything").clicked() {
+                *export_now = Some(ExportAction::All);
+                ui.close();
             }
         });
+        if !has_data {
+            ui.weak("nothing to export yet");
+        }
+        ui.separator();
+        ui.label("Export folder:");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.export_text)
+                .desired_width(240.0)
+                .hint_text("/path/to/export"),
+        );
+    });
+
+    ui.menu_button("View", |ui| {
+        ui.checkbox(&mut app.show_side, "Run panel");
+        ui.checkbox(&mut app.show_notes, "Warnings and notes");
+        ui.checkbox(&mut app.tree.show_legend, "Tree legend");
+        ui.separator();
+        ui.label(RichText::new("Theme").small());
+        let mut theme_name = if app.prefs.theme.is_empty() {
+            "dark".to_string()
+        } else {
+            app.prefs.theme.clone()
+        };
+        let before = theme_name.clone();
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut theme_name, "dark".to_string(), "Dark");
+            ui.selectable_value(&mut theme_name, "light".to_string(), "Light");
+            ui.selectable_value(&mut theme_name, "system".to_string(), "System");
+        });
+        if theme_name != before {
+            app.prefs.theme = theme_name.clone();
+            ui.ctx().set_theme(theme::preference(&theme_name));
+            app.save_prefs();
+        }
+        ui.separator();
+        if ui.button("Fit tree").clicked() {
+            app.tree.needs_fit = true;
+            app.tree.user_moved = false;
+        }
+        if ui.button("Fit map").clicked() {
+            app.map_view.needs_fit = true;
+        }
     });
 }
 
-/// The input area: a path field, the remembered folders, and the current list.
+/// The genomes drawer: a path field, the remembered folders, the current list,
+/// and the output folder.
 fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut bool) {
-    ui.separator();
-    ui.horizontal(|ui| {
+    let p = theme::palette(ui);
+    ui.add_space(2.0);
+    theme::hairline(ui);
+    ui.horizontal_wrapped(|ui| {
         let resp = ui.add(
             egui::TextEdit::singleline(&mut app.input_text)
-                .desired_width(320.0)
+                .desired_width(300.0)
                 .hint_text("a .fa / .fasta / .fna file, or a folder of them"),
         );
         let mut add = ui.button("Add").clicked();
@@ -247,21 +311,36 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
                 }
             }
         }
-        if ui.button("Clear list").clicked() {
+        if !app.inputs.is_empty() && ui.button("Clear").clicked() {
             app.inputs.clear();
             *params_changed = true;
         }
-        ui.weak("or drop files and folders anywhere on this window");
+        ui.label(
+            RichText::new("or drop files and folders on the window")
+                .small()
+                .color(p.text_weak),
+        );
+        ui.separator();
+        ui.label(RichText::new("Results to").color(p.text_weak))
+            .on_hover_text("Where the run writes its files, including events.jsonl");
+        if ui
+            .add(egui::TextEdit::singleline(&mut app.outdir_text).desired_width(200.0))
+            .changed()
+        {
+            *params_changed = true;
+        }
     });
 
     if !app.prefs.recent_inputs.is_empty() {
         let recent = app.prefs.recent_inputs.clone();
         ui.horizontal_wrapped(|ui| {
-            ui.weak("recent:");
-            for p in recent {
-                let clicked = ui.selectable_label(false, p.as_str()).clicked();
+            ui.label(RichText::new("recent").small().color(p.text_weak));
+            for r in recent {
+                let clicked = ui
+                    .add(egui::Button::new(RichText::new(r.as_str()).small()).small())
+                    .clicked();
                 if clicked {
-                    let path = std::path::PathBuf::from(&p);
+                    let path = std::path::PathBuf::from(&r);
                     if app.add_input_path(&path) {
                         app.status = format!("added {}", path.display());
                         *params_changed = true;
@@ -277,15 +356,19 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
         // Shrinks to its rows: a fixed height left a band of empty space
         // between the input area and the panels when only one path was listed.
         egui::ScrollArea::vertical()
-            .max_height(72.0)
+            .max_height(66.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                for (i, p) in app.inputs.iter().enumerate() {
+                for (i, path) in app.inputs.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.small_button("✕").clicked() {
+                        if ui
+                            .small_button("✕")
+                            .on_hover_text("remove from the list")
+                            .clicked()
+                        {
                             remove = Some(i);
                         }
-                        ui.label(p.display().to_string());
+                        ui.label(RichText::new(path.display().to_string()).color(p.text));
                     });
                 }
             });
@@ -296,74 +379,101 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
     }
 }
 
-/// The bottom bar: one segment per stage, with its progress and elapsed time.
+/// The bottom bar: one chip per stage, with its progress and elapsed time, then
+/// the status line and the totals.
 pub fn status_bar(ui: &mut egui::Ui, app: &InfinityApp) {
-    egui::Panel::bottom("statusbar").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            for stage in &app.model.stages {
-                let text = match stage.fraction() {
-                    Some(_) => format!(
-                        "{} {}/{} {}",
-                        stage.name,
-                        fmt::count(stage.done),
-                        fmt::count(stage.total),
-                        fmt::secs(stage.elapsed_ms())
-                    ),
-                    // A stage with no total has no fraction to show; only its
-                    // clock is honest.
-                    None => format!("{} {}", stage.name, fmt::secs(stage.elapsed_ms())),
+    let p = theme::palette(ui);
+    egui::Panel::bottom("statusbar")
+        .frame(
+            egui::Frame::side_top_panel(ui.style())
+                .inner_margin(egui::Margin::symmetric(10, 4))
+                .fill(p.panel),
+        )
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for stage in &app.model.stages {
+                    stage_chip(ui, stage, &p);
+                }
+                if app.model.stages.is_empty() {
+                    ui.label(RichText::new("idle").small().color(p.text_weak));
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new(&app.status).color(p.text_strong));
+            });
+            ui.horizontal_wrapped(|ui| {
+                let focus_count = |f: u8| app.model.genomes.iter().filter(|g| g.focus == f).count();
+                ui.label(
+                    RichText::new(format!(
+                        "{} genomes ({}) · {} clusters · focus 0/1/2 = {}/{}/{} · {} events",
+                        fmt::count(app.model.genome_count() as u64),
+                        fmt::bp(app.model.total_length()),
+                        fmt::count(app.model.cluster_count() as u64),
+                        focus_count(fmt::FOCUS_SKETCH),
+                        focus_count(fmt::FOCUS_BLOCKS),
+                        focus_count(fmt::FOCUS_EXACT),
+                        fmt::count(app.model.events_seen),
+                    ))
+                    .small()
+                    .color(p.text_weak),
+                );
+                let source = match &app.model.source {
+                    crate::state::Source::Live => "live run".to_string(),
+                    crate::state::Source::Folder(dir) => format!("opened {}", dir.display()),
+                    crate::state::Source::Empty => String::new(),
                 };
-                let colour = if stage.finished {
-                    ui.visuals().weak_text_color()
+                if !source.is_empty() {
+                    ui.label(RichText::new(source).small().color(p.text_weak));
+                }
+            });
+        });
+}
+
+/// One stage of the status bar: name, count and clock, with a thin progress
+/// line under it.
+fn stage_chip(ui: &mut egui::Ui, stage: &crate::state::StageState, p: &theme::Palette) {
+    let text = match stage.fraction() {
+        Some(_) => format!(
+            "{} {}/{} · {}",
+            stage.name,
+            fmt::count(stage.done),
+            fmt::count(stage.total),
+            fmt::secs(stage.elapsed_ms())
+        ),
+        // A stage with no total has no fraction to show; only its clock is
+        // honest.
+        None => format!("{} · {}", stage.name, fmt::secs(stage.elapsed_ms())),
+    };
+    let colour = if stage.finished {
+        p.text_weak
+    } else {
+        p.text_strong
+    };
+    let frame = egui::Frame::new()
+        .fill(p.surface)
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(8, 2));
+    let resp = frame
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).small().color(colour));
+        })
+        .response;
+    if let Some(f) = stage.fraction() {
+        let r = resp.rect;
+        let y = r.bottom() - 1.5;
+        let x1 = r.left() + 6.0 + (r.width() - 12.0) * f as f32;
+        ui.painter().line_segment(
+            [egui::pos2(r.left() + 6.0, y), egui::pos2(x1, y)],
+            egui::Stroke::new(
+                1.5,
+                if stage.finished {
+                    p.text_weak
                 } else {
-                    ui.visuals().strong_text_color()
-                };
-                let resp = ui.colored_label(colour, text);
-                if let Some(f) = stage.fraction() {
-                    resp.on_hover_ui(|ui| {
-                        ui.add(egui::ProgressBar::new(f as f32).show_percentage());
-                    });
-                }
-                ui.separator();
-            }
-            if app.model.stages.is_empty() {
-                ui.weak("no stage has started");
-                ui.separator();
-            }
-            ui.label(RichText::new(&app.status).strong());
+                    p.accent
+                },
+            ),
+        );
+        resp.on_hover_ui(|ui| {
+            ui.add(egui::ProgressBar::new(f as f32).show_percentage());
         });
-        ui.horizontal(|ui| {
-            ui.weak(format!(
-                "{} genomes ({}) | {} clusters | focus 0/1/2 = {}/{}/{} | events {}",
-                fmt::count(app.model.genome_count() as u64),
-                fmt::bp(app.model.total_length()),
-                fmt::count(app.model.cluster_count() as u64),
-                app.model
-                    .genomes
-                    .iter()
-                    .filter(|g| g.focus == fmt::FOCUS_SKETCH)
-                    .count(),
-                app.model
-                    .genomes
-                    .iter()
-                    .filter(|g| g.focus == fmt::FOCUS_BLOCKS)
-                    .count(),
-                app.model
-                    .genomes
-                    .iter()
-                    .filter(|g| g.focus == fmt::FOCUS_EXACT)
-                    .count(),
-                fmt::count(app.model.events_seen),
-            ));
-            match &app.model.source {
-                crate::state::Source::Live => {
-                    ui.weak("(live run)");
-                }
-                crate::state::Source::Folder(p) => {
-                    ui.weak(format!("(opened {})", p.display()));
-                }
-                crate::state::Source::Empty => {}
-            }
-        });
-    });
+    }
 }

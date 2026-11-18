@@ -47,6 +47,18 @@ impl Item {
         }
     }
 
+    /// A button-sized name.
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Item::Tree => "tree.nwk",
+            Item::Clusters => "clusters",
+            Item::Genomes => "genomes",
+            Item::Distances => "distances",
+            Item::Variants => "variants",
+            Item::Png => "PNG",
+        }
+    }
+
     /// Everything except the picture, which needs a screenshot callback.
     pub fn files() -> [Item; 5] {
         [
@@ -55,6 +67,31 @@ impl Item {
             Item::Genomes,
             Item::Distances,
             Item::Variants,
+        ]
+    }
+
+    /// Every item, in the order the Export menu lists them.
+    pub fn menu() -> Vec<Item> {
+        Self::groups()
+            .iter()
+            .flat_map(|(_, items)| items.iter().copied())
+            .collect()
+    }
+
+    /// The items grouped the way the Run panel shows them.
+    pub fn groups() -> &'static [(&'static str, &'static [Item])] {
+        &[
+            (
+                "tables and trees",
+                &[
+                    Item::Tree,
+                    Item::Clusters,
+                    Item::Genomes,
+                    Item::Distances,
+                    Item::Variants,
+                ],
+            ),
+            ("pictures", &[Item::Png]),
         ]
     }
 }

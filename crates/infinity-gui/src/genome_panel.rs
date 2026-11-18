@@ -10,16 +10,16 @@ use egui::{Align, Layout, RichText, Sense, Vec2};
 
 use crate::app::InfinityApp;
 use crate::state::{sorted_indices, SortColumn};
-use crate::{colors, fmt};
+use crate::{colors, fmt, theme};
 
 /// Row height in pixels; also the virtualisation unit.
 const ROW_H: f32 = 16.0;
 /// Column widths of the fixed columns.
-const W_ID: f32 = 34.0;
+const W_ID: f32 = 30.0;
 const W_SWATCH: f32 = 14.0;
-const W_LEN: f32 = 58.0;
-const W_CONTIGS: f32 = 34.0;
-const W_FOCUS: f32 = 40.0;
+const W_LEN: f32 = 54.0;
+const W_CONTIGS: f32 = 30.0;
+const W_FOCUS: f32 = 36.0;
 
 /// `total_w` is the width of the whole window below the toolbar: the list may
 /// take at most about a third of it, so the tree always keeps room to draw.
@@ -38,16 +38,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
 fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mut found: Option<u32> = None;
     let mut clear_sel = false;
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!(
-                "GENOMES ({})",
-                fmt::count(app.model.genome_count() as u64)
-            ))
-            .strong(),
-        );
+    let mut sort_by: Option<SortColumn> = None;
+    let p = theme::palette(ui);
+    theme::panel_header(ui, "Genomes", |ui| {
+        ui.label(RichText::new(fmt::count(app.model.genome_count() as u64)).color(p.text_weak));
         if !app.selection.is_empty() {
-            ui.weak(format!("{} selected", app.selection.len()));
+            ui.label(RichText::new(format!("· {} selected", app.selection.len())).color(p.accent));
             if ui
                 .small_button("clear")
                 .on_hover_text("clear the selection")
@@ -58,10 +54,24 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         }
     });
     ui.horizontal(|ui| {
+        // N50 and GC are in the model but not worth a column of their own;
+        // they stay reachable as sort keys.
+        ui.menu_button("⇅", |ui| {
+            if ui.button("sort by N50").clicked() {
+                sort_by = Some(SortColumn::N50);
+                ui.close();
+            }
+            if ui.button("sort by GC").clicked() {
+                sort_by = Some(SortColumn::Gc);
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("more sort orders: N50, GC");
         let resp = ui.add(
             egui::TextEdit::singleline(&mut app.filter)
                 .desired_width(f32::INFINITY)
-                .hint_text("filter by name"),
+                .hint_text("🔍 filter by name"),
         );
         if resp.changed() {
             // Keep the tree's search box and the list filter in step: both are
@@ -79,118 +89,101 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         if let Some(g) = app.model.genome(id) {
             let name = g.name.clone();
             ui.horizontal(|ui| {
-                ui.weak("found:");
-                if ui.button(name.as_str()).clicked() {
+                theme::hint(ui, "found:");
+                if ui.small_button(name.as_str()).clicked() {
                     found = Some(id);
                 }
             });
         }
     }
     column_headers(ui, app);
-    ui.separator();
     if clear_sel {
         app.clear_selection();
     }
     if let Some(id) = found {
         app.select_genome(id, false);
     }
-}
-
-fn column_headers(ui: &mut egui::Ui, app: &mut InfinityApp) {
-    let mut clicked: Option<SortColumn> = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        header_button(ui, &mut clicked, app.sort, SortColumn::Id, "#", W_ID);
-        // The cluster swatch column doubles as the "group by cluster" sort.
-        header_button(
-            ui,
-            &mut clicked,
-            app.sort,
-            SortColumn::Cluster,
-            "c",
-            W_SWATCH,
-        );
-        header_button(
-            ui,
-            &mut clicked,
-            app.sort,
-            SortColumn::Name,
-            "name",
-            f32::INFINITY,
-        );
-        header_button(
-            ui,
-            &mut clicked,
-            app.sort,
-            SortColumn::Length,
-            "length",
-            W_LEN,
-        );
-        header_button(
-            ui,
-            &mut clicked,
-            app.sort,
-            SortColumn::Contigs,
-            "ctg",
-            W_CONTIGS,
-        );
-        header_button(
-            ui,
-            &mut clicked,
-            app.sort,
-            SortColumn::Focus,
-            "focus",
-            W_FOCUS,
-        );
-        // N50 and GC are in the model but not worth a column of their own; they
-        // stay reachable as sort keys.
-        ui.menu_button("⋮", |ui| {
-            if ui.button("sort by N50").clicked() {
-                clicked = Some(SortColumn::N50);
-                ui.close();
-            }
-            if ui.button("sort by GC").clicked() {
-                clicked = Some(SortColumn::Gc);
-                ui.close();
-            }
-        });
-    });
-    if let Some(c) = clicked {
+    if let Some(c) = sort_by {
         app.sort = app.sort.toggled(c);
     }
 }
 
-fn header_button(
-    ui: &mut egui::Ui,
-    clicked: &mut Option<SortColumn>,
-    sort: crate::state::SortSpec,
-    column: SortColumn,
-    label: &str,
-    width: f32,
-) {
-    let arrow = if sort.column != column {
-        ""
-    } else if sort.ascending {
-        " ↑"
-    } else {
-        " ↓"
-    };
-    let mut text = RichText::new(format!("{label}{arrow}")).small();
-    if sort.column == column {
-        text = text.strong();
+/// The x positions and widths of the columns for a row `width` wide. The rows
+/// and the header share this, so they always line up, and nothing in either is
+/// ever wider than the panel.
+fn columns(left: f32, width: f32) -> [(SortColumn, &'static str, f32, f32); 6] {
+    let name_w = (width - W_ID - W_SWATCH - W_LEN - W_CONTIGS - W_FOCUS - 12.0).max(40.0);
+    let mut x = left + 2.0;
+    let mut out = [(SortColumn::Id, "", 0.0, 0.0); 6];
+    for (i, (col, label, w)) in [
+        (SortColumn::Id, "#", W_ID),
+        (SortColumn::Cluster, "c", W_SWATCH),
+        (SortColumn::Name, "name", name_w),
+        (SortColumn::Length, "length", W_LEN),
+        (SortColumn::Contigs, "ctg", W_CONTIGS),
+        (SortColumn::Focus, "focus", W_FOCUS),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        out[i] = (col, label, x, w);
+        x += w;
     }
-    let resp = if width.is_finite() {
-        ui.add_sized(
-            Vec2::new(width, ROW_H),
-            egui::Button::new(text).frame(false),
-        )
-    } else {
-        ui.add(egui::Button::new(text).frame(false))
-    };
-    if resp.clicked() {
-        *clicked = Some(column);
+    out
+}
+
+/// One painted header row. Each cell is a click target that sorts by its
+/// column; clicking the sorted column again flips the direction.
+fn column_headers(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    let p = theme::palette(ui);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        egui::Stroke::new(1.0, p.border),
+    );
+    let mut clicked: Option<SortColumn> = None;
+    for (col, label, x, w) in columns(rect.left(), rect.width()) {
+        let cell =
+            egui::Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(w, rect.height()));
+        let resp = ui
+            .interact(cell, ui.scope_id().with(("sort", label)), Sense::click())
+            .on_hover_text(format!("sort by {label}"));
+        let sorted = app.sort.column == col;
+        let arrow = match (sorted, app.sort.ascending) {
+            (false, _) => "",
+            (true, true) => " ↑",
+            (true, false) => " ↓",
+        };
+        let colour = if sorted {
+            p.accent
+        } else if resp.hovered() {
+            p.text_strong
+        } else {
+            p.text_weak
+        };
+        // Numbers are right-aligned in the rows, so their headers are too.
+        let (anchor, at) = match col {
+            SortColumn::Length | SortColumn::Contigs | SortColumn::Focus => (
+                egui::Align2::RIGHT_CENTER,
+                egui::pos2(x + w - 4.0, cell.center().y),
+            ),
+            _ => (egui::Align2::LEFT_CENTER, egui::pos2(x, cell.center().y)),
+        };
+        painter.text(
+            at,
+            anchor,
+            format!("{label}{arrow}"),
+            egui::FontId::proportional(10.5),
+            colour,
+        );
+        if resp.clicked() {
+            clicked = Some(col);
+        }
     }
-    resp.on_hover_text(format!("sort by {label}"));
+    if let Some(c) = clicked {
+        app.sort = app.sort.toggled(c);
+    }
 }
 
 fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
@@ -216,6 +209,7 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mut click: Option<(u32, bool, bool)> = None;
 
     let model = &app.model;
+    let accent = theme::palette(ui).accent;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, ROW_H, total, |ui, range| {
@@ -231,9 +225,17 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
                 let painter = ui.painter();
                 if is_selected {
-                    painter.rect_filled(rect, 0, colors::wash(colors::SELECTED, 60));
+                    painter.rect_filled(rect, 3, theme::with_alpha(accent, 48));
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
+                        0,
+                        accent,
+                    );
                 } else if resp.hovered() {
-                    painter.rect_filled(rect, 0, ui.visuals().faint_bg_color);
+                    painter.rect_filled(rect, 3, ui.visuals().faint_bg_color);
+                } else if i % 2 == 1 {
+                    // A faint zebra stripe keeps a long list readable.
+                    painter.rect_filled(rect, 0, theme::with_alpha(ui.visuals().faint_bg_color, 120));
                 }
                 let mut x = rect.left() + 2.0;
                 painter.text(

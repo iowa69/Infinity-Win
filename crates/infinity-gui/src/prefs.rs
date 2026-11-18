@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use infinity_core::params::Parameters;
 
+use crate::settings::ResolutionSettings;
+
 /// Folder name under the platform's configuration directory.
 pub const APP_DIR: &str = "infinity";
 /// File name inside it.
@@ -32,6 +34,10 @@ pub struct Prefs {
     pub export_dir: String,
     /// Last parameter set, so a re-run does not mean re-typing.
     pub params: Parameters,
+    /// The Resolution and SNP-rule settings (see `settings`).
+    pub resolution: ResolutionSettings,
+    /// "dark", "light" or "system". Empty means dark, the default look.
+    pub theme: String,
 }
 
 /// The platform's configuration directory, resolved without a `dirs` crate so
@@ -84,6 +90,14 @@ pub fn load_from(path: &Path) -> Prefs {
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("params");
+            if let Ok(p) = serde_json::from_value::<Prefs>(v.clone()) {
+                return p;
+            }
+            // The same goes for the resolution settings, which mirror engine
+            // parameters that are still changing shape.
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("resolution");
+            }
             if let Ok(p) = serde_json::from_value::<Prefs>(v) {
                 return p;
             }
@@ -164,6 +178,9 @@ mod tests {
         p.export_dir = "/data/export".to_string();
         p.params.k = 21;
         p.params.cluster_dist = 0.01;
+        p.resolution.snp_thresholds = vec![3, 12];
+        p.resolution.snp_filter.enabled = false;
+        p.theme = "light".to_string();
         save_to(&p, &path).expect("writes");
         let back = load_from(&path);
         assert_eq!(back, p);
@@ -199,7 +216,18 @@ mod tests {
         assert_eq!(p.params, Parameters::default());
         p.params.validate().expect("the fallback must be valid");
 
-        for f in [broken, partial, foreign] {
+        // Resolution settings of an unknown shape fall back the same way.
+        let foreign_res = tmp("foreign-resolution");
+        std::fs::write(
+            &foreign_res,
+            r#"{"recent_inputs":["/data/y"],"resolution":{"resolution":"warp-speed"}}"#,
+        )
+        .unwrap();
+        let p = load_from(&foreign_res);
+        assert_eq!(p.recent_inputs, vec!["/data/y".to_string()]);
+        assert_eq!(p.resolution, ResolutionSettings::default());
+
+        for f in [broken, partial, foreign, foreign_res] {
             std::fs::remove_file(f).ok();
         }
     }

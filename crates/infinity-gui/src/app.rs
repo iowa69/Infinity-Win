@@ -87,6 +87,13 @@ pub struct InfinityApp {
     pub(crate) show_inputs: bool,
     /// Whether the right-hand panel is open.
     pub(crate) show_side: bool,
+    /// Whether the Settings window is open.
+    pub(crate) show_settings: bool,
+    /// The SNP threshold being typed in Settings, and why it was refused.
+    pub(crate) threshold_text: String,
+    pub(crate) threshold_error: Option<String>,
+    /// Set once the theme has been installed into the egui context.
+    theme_installed: bool,
     /// The cluster distance the slider last sent, so dragging it does not queue
     /// a re-clustering per pixel.
     last_dist_sent: f64,
@@ -207,6 +214,10 @@ impl InfinityApp {
             // and there is no file dialog to discover.
             show_inputs: true,
             show_side: true,
+            show_settings: false,
+            threshold_text: String::new(),
+            threshold_error: None,
+            theme_installed: false,
             last_dist_sent: params.cluster_dist,
         };
         app.validate_params();
@@ -237,7 +248,20 @@ impl InfinityApp {
     }
 
     pub(crate) fn validate_params(&mut self) {
-        self.params_error = self.prefs.params.validate().err();
+        self.params_error = self
+            .prefs
+            .params
+            .validate()
+            .and_then(|()| self.prefs.resolution.validate())
+            .err();
+    }
+
+    /// The parameter set a run starts with: the edited parameters, with the
+    /// Resolution and SNP-rule settings written in.
+    pub(crate) fn run_params(&self) -> infinity_core::params::Parameters {
+        let mut params = self.prefs.params.clone();
+        self.prefs.resolution.apply_to(&mut params);
+        params
     }
 
     // --- selection ---------------------------------------------------------
@@ -325,7 +349,7 @@ impl InfinityApp {
             self.status = "choose an output folder first".to_string();
             return;
         }
-        let params = self.prefs.params.clone();
+        let params = self.run_params();
         match run::start(self.inputs.clone(), params, outdir.clone(), ctx.clone()) {
             Ok(handle) => {
                 if let Some(note) = &handle.startup_note {
@@ -450,6 +474,16 @@ impl InfinityApp {
         if !report.ok() {
             self.model.push_local_note(report.errors.join("; "));
             self.show_notes = true;
+        }
+    }
+
+    /// Carry out an export asked for by the menu or the Run panel.
+    pub(crate) fn run_export(&mut self, action: crate::chrome::ExportAction, ctx: &Context) {
+        use crate::chrome::ExportAction;
+        match action {
+            ExportAction::Item(export::Item::Png) => self.export_png(ctx),
+            ExportAction::Item(item) => self.export_files(Some(item)),
+            ExportAction::All => self.export_files(None),
         }
     }
 
@@ -779,6 +813,11 @@ impl eframe::App for InfinityApp {
     /// hidden, so a long run keeps being folded into the model even when the
     /// user has minimised the window.
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if !self.theme_installed {
+            crate::theme::install(ctx);
+            ctx.set_theme(crate::theme::preference(&self.prefs.theme));
+            self.theme_installed = true;
+        }
         let now = ctx.input(|i| i.time);
         let more = self.drain_events();
         self.poll_run();
@@ -816,14 +855,21 @@ impl eframe::App for InfinityApp {
         let total_w = ui.available_width();
         crate::genome_panel::show(ui, self, total_w);
         crate::side_panel::show(ui, self, total_w);
+        let p = crate::theme::palette(ui);
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(4)))
+            .frame(
+                egui::Frame::central_panel(ui.style())
+                    .inner_margin(egui::Margin::same(6))
+                    .fill(p.panel),
+            )
             .show(ui, |ui| {
                 crate::map_panel::show(ui, self);
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(ui, |ui| crate::tree_panel::show(ui, self));
             });
+        let ctx = ui.ctx().clone();
+        crate::settings_panel::show(&ctx, self);
     }
 }
 

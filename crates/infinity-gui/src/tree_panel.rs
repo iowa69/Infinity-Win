@@ -17,7 +17,7 @@ use crate::app::{InfinityApp, TreeMode, TreeView};
 use crate::layout::{self, NodeKind, TreeLayout};
 use crate::pairwise::PairSource;
 use crate::state::UiModel;
-use crate::{colors, fmt};
+use crate::{colors, fmt, theme};
 
 /// Fraction of the panel width kept free for leaf labels when fitting.
 const LABEL_FRACTION: f32 = 0.32;
@@ -78,7 +78,6 @@ enum Hover {
 
 pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
     header(ui, app);
-    ui.separator();
     canvas(ui, app);
 }
 
@@ -93,12 +92,11 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
 
     // Wrapped rather than one long row: at the smallest window the controls
     // flow onto a second line instead of running under the side panel.
-    ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new("TREE").strong());
+    theme::panel_header(ui, "Tree", |ui| {
         let sel = app.selected_cluster;
         let label = match sel.and_then(|c| app.model.cluster(c)) {
             Some(c) => format!(
-                "cluster {} ({} genomes, {}{})",
+                "c{} · {} genomes · {}{}",
                 c.id,
                 c.size(),
                 fmt::focus_word(c.focus),
@@ -130,11 +128,10 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 }
             });
 
-        ui.separator();
         let resp = ui.add(
             egui::TextEdit::singleline(&mut app.tree.search)
-                .desired_width(150.0)
-                .hint_text("find a genome"),
+                .desired_width(120.0)
+                .hint_text("🔍 find a genome"),
         );
         if resp.changed() {
             app.tree.search_hit = app.model.search(&app.tree.search);
@@ -146,7 +143,12 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 .genome(id)
                 .map(|g| g.name.clone())
                 .unwrap_or_default();
-            if ui.button(format!("go to {name}")).clicked() {
+            let go = ui
+                .button("go to")
+                .on_hover_text(format!("select {name} and centre the tree on it"))
+                .clicked()
+                || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            if go {
                 app.select_genome(id, false);
                 centre_on(app, id);
             }
@@ -235,6 +237,7 @@ fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
                     p.dist_text(),
                     fmt::focus_label(p.focus, p.approximate)
                 ))
+                .small()
                 .color(colors::focus_color(p.focus, ui.visuals().dark_mode)),
             )
             .on_hover_text(match p.source {
@@ -246,7 +249,7 @@ fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
             });
         }
         None => {
-            ui.weak(app.pair_hint());
+            theme::hint(ui, app.pair_hint());
         }
     }
 }
@@ -309,13 +312,17 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     app.tree_rect = Some((rect, ui.ctx().pixels_per_point()));
     let dark = ui.visuals().dark_mode;
-    let bg = ui.visuals().panel_fill;
-    let border = ui.visuals().widgets.noninteractive.bg_stroke;
-    let weak = ui.visuals().weak_text_color();
-    let strong = ui.visuals().strong_text_color();
-    let text_col = ui.visuals().text_color();
+    let pal = theme::palette(ui);
+    // The canvas is the darkest (or lightest) surface of the window, framed by
+    // a hairline: the "stage" the tree is drawn on.
+    let bg = pal.canvas;
+    let border = Stroke::new(1.0, pal.border);
+    let weak = pal.text_weak;
+    let strong = pal.text_strong;
+    let text_col = pal.text;
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 0, bg);
+    painter.rect_filled(rect, 6, bg);
+    painter.rect_stroke(rect, 6, border, egui::StrokeKind::Inside);
 
     // Pointer state is read once, up front: `Response` is consumed by the
     // tooltip call at the end of the frame.
@@ -869,13 +876,12 @@ fn dotted(painter: &egui::Painter, x0: f32, x1: f32, y: f32, colour: Color32) {
 }
 
 fn draw_legend(painter: &egui::Painter, rect: Rect, dark: bool, bg: Color32, border: Stroke) {
-    let box_rect = Rect::from_min_size(rect.left_top() + Vec2::splat(6.0), Vec2::new(232.0, 62.0));
-    painter.rect_filled(
-        box_rect,
-        4,
-        Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 215),
-    );
-    painter.rect_stroke(box_rect, 4, border, egui::StrokeKind::Middle);
+    let box_rect = Rect::from_min_size(rect.left_top() + Vec2::splat(8.0), Vec2::new(214.0, 62.0));
+    // Half way between the canvas and a panel, slightly see-through, so the
+    // legend reads as floating above the tree rather than as part of it.
+    let fill = theme::mix(bg, theme::palette_for(dark).panel, 0.6);
+    painter.rect_filled(box_rect, 6, theme::with_alpha(fill, 225));
+    painter.rect_stroke(box_rect, 6, border, egui::StrokeKind::Inside);
     let font = FontId::proportional(11.0);
     for (i, text) in [
         "Focus 0 — sketch only, ≈ SNPs",
@@ -951,6 +957,11 @@ fn cluster_tooltip(model: &UiModel, id: u32) -> Vec<String> {
         format!("cluster {} — pivot {}", c.id, c.pivot_name),
         format!("{} genomes", c.size()),
         fmt::focus_label(c.focus, c.approximate),
+        format!(
+            "branch lengths in {} (from {})",
+            fmt::marked_unit(c.focus),
+            fmt::source_unit(c.focus)
+        ),
         "click to open or close, and to refine this cluster next".to_string(),
     ]
 }
