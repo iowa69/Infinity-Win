@@ -94,6 +94,9 @@ pub struct InfinityApp {
     pub(crate) threshold_error: Option<String>,
     /// Set once the theme has been installed into the egui context.
     theme_installed: bool,
+    /// Whether the last frame was drawn in the dark theme (for exports that
+    /// draw "like the screen" without a `Ui` at hand).
+    pub(crate) dark: bool,
     /// The cluster distance the slider last sent, so dragging it does not queue
     /// a re-clustering per pixel.
     last_dist_sent: f64,
@@ -218,6 +221,7 @@ impl InfinityApp {
             threshold_text: String::new(),
             threshold_error: None,
             theme_installed: false,
+            dark: true,
             last_dist_sent: params.cluster_dist,
         };
         app.validate_params();
@@ -438,6 +442,13 @@ impl InfinityApp {
         self.prefs.export_dir = self.export_text.clone();
         self.save_prefs();
         let mut notes = Vec::new();
+        let run_dir = self.run_dir();
+        let ctx = export::ExportCtx {
+            run_dir: run_dir.as_deref(),
+            layout: self.tree_layout.as_ref(),
+            svg: self.svg_options(),
+            ..export::ExportCtx::new(&self.model, self.results.as_ref())
+        };
         let report = match item {
             Some(i) => {
                 let mut r = export::Report::default();
@@ -449,20 +460,14 @@ impl InfinityApp {
                         .push(format!("cannot create {}: {e}", dir.display()));
                     r
                 } else {
-                    match export::write_item(
-                        i,
-                        &dir,
-                        &self.model,
-                        self.results.as_ref(),
-                        &mut notes,
-                    ) {
+                    match export::write_item(i, &dir, &ctx, &mut notes) {
                         Ok(paths) => r.written.extend(paths),
                         Err(e) => r.errors.push(format!("{}: {e}", i.label())),
                     }
                     r
                 }
             }
-            None => export::write_all(&dir, &self.model, self.results.as_ref()),
+            None => export::write_all_with(&dir, &ctx),
         };
         for n in &report.notes {
             self.model.push_local_note(n.clone());
@@ -477,13 +482,53 @@ impl InfinityApp {
         }
     }
 
-    /// Carry out an export asked for by the menu or the Run panel.
+    /// Carry out an export asked for by the menu or the Run panel. "Everything"
+    /// writes every file and then captures the PNG as well.
     pub(crate) fn run_export(&mut self, action: crate::chrome::ExportAction, ctx: &Context) {
         use crate::chrome::ExportAction;
         match action {
             ExportAction::Item(export::Item::Png) => self.export_png(ctx),
             ExportAction::Item(item) => self.export_files(Some(item)),
-            ExportAction::All => self.export_files(None),
+            ExportAction::All => {
+                self.export_files(None);
+                let summary = self.status.clone();
+                if self.tree_rect.is_some() && self.tree_layout.is_some() {
+                    self.export_png(ctx);
+                    self.status = format!("{summary}; capturing tree.png ...");
+                }
+            }
+        }
+    }
+
+    /// The folder the model came from: where a live run writes, or the output
+    /// folder that was opened. Engine-written exports are copied from here.
+    pub(crate) fn run_dir(&self) -> Option<PathBuf> {
+        match &self.model.source {
+            crate::state::Source::Folder(p) => Some(p.clone()),
+            crate::state::Source::Live => {
+                self.run_handle.as_ref().map(|h| h.outdir().to_path_buf())
+            }
+            crate::state::Source::Empty => None,
+        }
+    }
+
+    /// The SVG looks like the tree panel: same theme, same decorations, a row
+    /// height that is readable whatever the zoom on screen.
+    pub(crate) fn svg_options(&self) -> crate::svg::SvgOptions {
+        let dark = self.dark;
+        let width = self
+            .tree_rect
+            .map(|(r, _)| (r.width() * 0.68).max(480.0))
+            .unwrap_or(760.0);
+        crate::svg::SvgOptions {
+            dark,
+            legend: self.tree.show_legend,
+            branch_labels: self.tree.branch_labels,
+            aligned_tips: self.tree.aligned_tips,
+            color_strip: self.tree.color_strip,
+            tree_width: width,
+            row_px: self.tree.px_per_row.clamp(14.0, 24.0),
+            selected_cluster: self.selected_cluster,
         }
     }
 
@@ -850,6 +895,7 @@ impl eframe::App for InfinityApp {
         // a neighbouring panel: it wraps or is clipped instead. (Before, all
         // five were shown inside one `CentralPanel`, so the tree header and
         // canvas could widen past the right-hand panel and paint over it.)
+        self.dark = ui.visuals().dark_mode;
         crate::chrome::toolbar(ui, self);
         crate::chrome::status_bar(ui, self);
         let total_w = ui.available_width();

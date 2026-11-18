@@ -213,6 +213,11 @@ pub struct LayoutNode {
     /// inside a cluster, the tree root on the backbone). The unfold animation
     /// staggers branches by it.
     pub depth: u32,
+    /// Focus and "≈" of the edge *into* this node. The same as the node's own
+    /// everywhere except at a cluster root, whose edge is a backbone branch: a
+    /// sketch estimate even when the cluster below it is exact, and drawn so.
+    pub edge_focus: u8,
+    pub edge_approximate: bool,
 }
 
 /// A whole laid-out tree.
@@ -410,6 +415,12 @@ impl<'o> Builder<'o> {
                 (scale, region, cluster, depth)
             };
 
+        let (edge_focus, edge_approximate) = match (&node.kind, parent) {
+            (NodeKind::ClusterRoot { .. }, Some(p)) => {
+                (self.out.nodes[p].focus, self.out.nodes[p].approximate)
+            }
+            _ => (node.focus, node.approximate),
+        };
         let idx = self.out.nodes.len();
         self.out.nodes.push(LayoutNode {
             idx,
@@ -427,6 +438,8 @@ impl<'o> Builder<'o> {
             key: 0,
             cluster,
             depth,
+            edge_focus,
+            edge_approximate,
         });
 
         if node.children.is_empty() || node.kind.is_terminal() {
@@ -917,6 +930,16 @@ mod tests {
         assert_eq!(a1.cluster, Some(0));
         assert_eq!(a1.depth, 1);
         assert_eq!(l.nodes[l.root].cluster, None);
+        // The edge into an exact cluster is still a backbone estimate.
+        let root_a = l
+            .nodes
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::ClusterRoot { id: 0, .. }))
+            .unwrap();
+        assert_eq!(root_a.focus, 2);
+        assert_eq!(root_a.edge_focus, 0);
+        assert!(root_a.edge_approximate && !root_a.approximate);
+        assert_eq!(a1.edge_focus, 2);
     }
 
     #[test]

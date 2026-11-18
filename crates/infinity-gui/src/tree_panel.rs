@@ -544,7 +544,7 @@ fn draw_edges(d: &Draw<'_>, l: &TreeLayout) {
         let Some(&c) = positions.get(n.idx) else {
             continue;
         };
-        let style = colors::focus_style(n.focus, d.dark);
+        let style = colors::focus_style(n.edge_focus, d.dark);
         let child = d.view.screen(c);
         let parent = d.view.screen(p);
         // Cull branches that are entirely off screen: a thousand-genome tree
@@ -848,7 +848,7 @@ fn draw_branch_labels(d: &Draw<'_>, l: &TreeLayout) {
         }
         let text = format!(
             "{}{}",
-            if n.approximate { "≈" } else { "" },
+            if n.edge_approximate { "≈" } else { "" },
             fmt::snps(n.len)
         );
         let w = text.chars().count() as f32 * char_w;
@@ -860,7 +860,7 @@ fn draw_branch_labels(d: &Draw<'_>, l: &TreeLayout) {
             Align2::CENTER_BOTTOM,
             text,
             font.clone(),
-            colors::wash(colors::focus_color(n.focus, d.dark), 210),
+            colors::wash(colors::focus_color(n.edge_focus, d.dark), 210),
         );
     }
 }

@@ -1,5 +1,14 @@
-//! The export menu of section 8: the tree as Newick, the distance matrices, the
-//! variants, the clusters, and the tree picture as a PNG.
+//! The export menu of section 8, in three kinds:
+//!
+//! * **Written by the window** from its own model: the tree as Newick, the
+//!   annotated tree as NEXUS (FigTree) and as iTOL datasets, the clusters, the
+//!   genomes, the distance matrices, the variants, and the tree picture as SVG
+//!   (vector) and PNG (a screenshot of the tree panel).
+//! * **Copied from the run's output folder**: the files only the engine writes
+//!   (the Excel workbook, the square SNP matrices, VCF, the core-SNP
+//!   alignment). The window does not reimplement them; it copies them from the
+//!   folder it ran into or opened, and says plainly when an older run does not
+//!   have them.
 //!
 //! The tab-separated files use the same columns and the same 1-based positions as
 //! the engine's own output folder (section 9), so a file exported from the
@@ -16,8 +25,10 @@ use infinity_core::engine::RunResults;
 use infinity_core::tree::{graft, to_newick, Tree};
 
 use crate::fmt;
+use crate::layout::TreeLayout;
 use crate::pairwise::{self, MemberProfile};
 use crate::state::UiModel;
+use crate::svg::SvgOptions;
 
 /// Above this many members per cluster, pairwise distances are taken from the
 /// engine's matrix only. Deriving them here is quadratic in the members, and an
@@ -28,22 +39,36 @@ pub const DERIVED_PAIR_CAP: usize = 300;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
     Tree,
+    Nexus,
+    Itol,
     Clusters,
     Genomes,
     Distances,
     Variants,
+    Svg,
     Png,
+    Excel,
+    SnpMatrices,
+    Vcf,
+    SnpAlignment,
 }
 
 impl Item {
     pub fn label(&self) -> &'static str {
         match self {
             Item::Tree => "Tree (Newick)",
+            Item::Nexus => "Annotated tree (NEXUS, for FigTree)",
+            Item::Itol => "Cluster colours (iTOL datasets)",
             Item::Clusters => "Clusters (TSV)",
             Item::Genomes => "Genomes (TSV)",
             Item::Distances => "Distance matrices (TSV)",
             Item::Variants => "Variants (TSV)",
-            Item::Png => "Tree picture (PNG)",
+            Item::Svg => "Tree picture (SVG, vector)",
+            Item::Png => "Tree picture (PNG, as on screen)",
+            Item::Excel => "Excel workbook (from the run folder)",
+            Item::SnpMatrices => "Square SNP matrices (from the run folder)",
+            Item::Vcf => "VCF per cluster (from the run folder)",
+            Item::SnpAlignment => "Core-SNP alignment (from the run folder)",
         }
     }
 
@@ -51,23 +76,27 @@ impl Item {
     pub fn short_label(&self) -> &'static str {
         match self {
             Item::Tree => "tree.nwk",
+            Item::Nexus => "NEXUS",
+            Item::Itol => "iTOL",
             Item::Clusters => "clusters",
             Item::Genomes => "genomes",
             Item::Distances => "distances",
             Item::Variants => "variants",
+            Item::Svg => "SVG",
             Item::Png => "PNG",
+            Item::Excel => "Excel",
+            Item::SnpMatrices => "SNP matrices",
+            Item::Vcf => "VCF",
+            Item::SnpAlignment => "SNP alignment",
         }
     }
 
-    /// Everything except the picture, which needs a screenshot callback.
-    pub fn files() -> [Item; 5] {
-        [
-            Item::Tree,
-            Item::Clusters,
-            Item::Genomes,
-            Item::Distances,
-            Item::Variants,
-        ]
+    /// Everything except the PNG, which needs a screenshot callback.
+    pub fn files() -> Vec<Item> {
+        Self::menu()
+            .into_iter()
+            .filter(|i| *i != Item::Png)
+            .collect()
     }
 
     /// Every item, in the order the Export menu lists them.
@@ -81,18 +110,66 @@ impl Item {
     /// The items grouped the way the Run panel shows them.
     pub fn groups() -> &'static [(&'static str, &'static [Item])] {
         &[
+            ("trees", &[Item::Tree, Item::Nexus, Item::Itol]),
             (
-                "tables and trees",
+                "tables",
                 &[
-                    Item::Tree,
                     Item::Clusters,
                     Item::Genomes,
                     Item::Distances,
                     Item::Variants,
                 ],
             ),
-            ("pictures", &[Item::Png]),
+            (
+                "from the run folder",
+                &[
+                    Item::Excel,
+                    Item::SnpMatrices,
+                    Item::Vcf,
+                    Item::SnpAlignment,
+                ],
+            ),
+            ("pictures", &[Item::Svg, Item::Png]),
         ]
+    }
+
+    /// The engine-written files this item copies, as `*` patterns. Empty for
+    /// the items the window writes itself.
+    pub fn run_files(&self) -> &'static [&'static str] {
+        match self {
+            Item::Excel => &["results.xlsx"],
+            Item::SnpMatrices => &["cluster_*.snp_matrix.tsv", "snp_clusters.tsv"],
+            Item::Vcf => &["cluster_*.vcf"],
+            Item::SnpAlignment => &["cluster_*.core_snps.fasta"],
+            _ => &[],
+        }
+    }
+}
+
+/// Everything an export may need besides the target folder.
+#[derive(Clone, Copy)]
+pub struct ExportCtx<'a> {
+    pub model: &'a UiModel,
+    pub results: Option<&'a RunResults>,
+    /// The run's own output folder: where the engine-written files are copied
+    /// from. `None` when no run or opened folder is behind the model.
+    pub run_dir: Option<&'a Path>,
+    /// The tree exactly as laid out on screen, for the SVG. Without one the SVG
+    /// draws the whole tree with every cluster opened.
+    pub layout: Option<&'a TreeLayout>,
+    pub svg: SvgOptions,
+}
+
+impl<'a> ExportCtx<'a> {
+    /// A context with only the model: what the tests and a bare export need.
+    pub fn new(model: &'a UiModel, results: Option<&'a RunResults>) -> Self {
+        Self {
+            model,
+            results,
+            run_dir: None,
+            layout: None,
+            svg: SvgOptions::default(),
+        }
     }
 }
 
@@ -124,10 +201,18 @@ impl Report {
     }
 }
 
-/// Write every exportable file into `dir`.
+/// Write every exportable file into `dir`, with only the model to go on.
+#[cfg(test)]
 pub fn write_all(dir: &Path, model: &UiModel, results: Option<&RunResults>) -> Report {
+    write_all_with(dir, &ExportCtx::new(model, results))
+}
+
+/// Write every exportable file into `dir` (everything but the PNG). Files the
+/// run folder does not have are a note, not an error: "everything" means
+/// everything this run has.
+pub fn write_all_with(dir: &Path, ctx: &ExportCtx<'_>) -> Report {
     let mut report = Report::default();
-    if model.genome_count() == 0 {
+    if ctx.model.genome_count() == 0 {
         report.errors.push("nothing to export yet".to_string());
         return report;
     }
@@ -138,8 +223,9 @@ pub fn write_all(dir: &Path, model: &UiModel, results: Option<&RunResults>) -> R
         return report;
     }
     for item in Item::files() {
-        match write_item(item, dir, model, results, &mut report.notes) {
+        match write_item(item, dir, ctx, &mut report.notes) {
             Ok(paths) => report.written.extend(paths),
+            Err(e) if !item.run_files().is_empty() => report.notes.push(e),
             Err(e) => report.errors.push(format!("{}: {e}", item.label())),
         }
     }
@@ -150,15 +236,46 @@ pub fn write_all(dir: &Path, model: &UiModel, results: Option<&RunResults>) -> R
 pub fn write_item(
     item: Item,
     dir: &Path,
-    model: &UiModel,
-    results: Option<&RunResults>,
+    ctx: &ExportCtx<'_>,
     notes: &mut Vec<String>,
 ) -> Result<Vec<PathBuf>, String> {
+    let model = ctx.model;
+    let results = ctx.results;
     let mut out = Vec::new();
     match item {
         Item::Tree => {
             let p = dir.join("tree.nwk");
             write_file(&p, |w| tree_newick(w, model, results))?;
+            out.push(p);
+        }
+        Item::Nexus => {
+            let text = crate::annotate::nexus(model)?;
+            let p = dir.join("tree.nexus");
+            write_text(&p, &text)?;
+            out.push(p);
+        }
+        Item::Itol => {
+            let strip = dir.join("itol_cluster_strip.txt");
+            write_text(&strip, &crate::annotate::itol_color_strip(model))?;
+            let labels = dir.join("itol_label_colors.txt");
+            write_text(&labels, &crate::annotate::itol_label_colors(model))?;
+            out.push(strip);
+            out.push(labels);
+        }
+        Item::Svg => {
+            let owned;
+            let l = match ctx.layout {
+                Some(l) => l,
+                None => {
+                    let t = crate::annotate::full_display_tree(model).ok_or_else(|| {
+                        "no tree yet: the backbone has not been built".to_string()
+                    })?;
+                    owned = crate::layout::layout(&t);
+                    &owned
+                }
+            };
+            let p = dir.join("tree.svg");
+            write_text(&p, &crate::svg::render(l, model, &ctx.svg))?;
             out.push(p);
         }
         Item::Clusters => {
@@ -217,12 +334,70 @@ pub fn write_item(
                 notes.push("no distances to export yet".to_string());
             }
         }
+        Item::Excel | Item::SnpMatrices | Item::Vcf | Item::SnpAlignment => {
+            out = copy_from_run(item, dir, ctx.run_dir)?;
+        }
         Item::Png => {
             // Needs a screenshot, which only the interface can take.
             return Err("the picture is exported from the tree panel".to_string());
         }
     }
     Ok(out)
+}
+
+/// Copy the engine-written files of `item` from the run folder into `dir`.
+fn copy_from_run(item: Item, dir: &Path, run_dir: Option<&Path>) -> Result<Vec<PathBuf>, String> {
+    let patterns = item.run_files();
+    let what = patterns.join(", ");
+    let Some(src) = run_dir else {
+        return Err(format!(
+            "{what}: there is no run folder to copy from; run the genomes or open a \
+             finished output folder first"
+        ));
+    };
+    let entries = std::fs::read_dir(src).map_err(|e| format!("reading {}: {e}", src.display()))?;
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| patterns.iter().any(|p| glob_match(p, n)))
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Err(format!(
+            "{what} not found in {}: this run was made by an engine that did not write \
+             it yet; run again to get it",
+            src.display()
+        ));
+    }
+    let same_dir = match (src.canonicalize(), dir.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    let mut out = Vec::with_capacity(names.len());
+    for n in names {
+        let to = dir.join(&n);
+        if !same_dir {
+            std::fs::copy(src.join(&n), &to).map_err(|e| format!("copying {n}: {e}"))?;
+        }
+        out.push(to);
+    }
+    Ok(out)
+}
+
+/// A file-name match with at most one `*`, which is all the export patterns
+/// need (`cluster_*.vcf`).
+pub fn glob_match(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((pre, suf)) => {
+            name.len() >= pre.len() + suf.len() && name.starts_with(pre) && name.ends_with(suf)
+        }
+    }
+}
+
+fn write_text(path: &Path, text: &str) -> Result<(), String> {
+    std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 fn cluster_ids(model: &UiModel) -> Vec<u32> {
@@ -800,7 +975,91 @@ mod tests {
         // A cluster with no map data leaves no header-only file behind.
         assert!(!dir.join("cluster_1.variants.tsv").exists());
         assert!(!report.written.is_empty());
+        // The window's own tree files come with "everything".
+        assert!(dir.join("tree.nexus").is_file());
+        assert!(dir.join("tree.svg").is_file());
+        assert!(dir.join("itol_cluster_strip.txt").is_file());
+        assert!(dir.join("itol_label_colors.txt").is_file());
+        // With no run folder behind the model, the engine-written files are a
+        // note, not an error.
+        assert!(
+            report.notes.iter().any(|n| n.contains("results.xlsx")),
+            "{:?}",
+            report.notes
+        );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn engine_files_are_copied_from_the_run_folder_or_reported_missing() {
+        let base = std::env::temp_dir().join(format!("infinity-gui-copy-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let run = base.join("run");
+        let out = base.join("out");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(run.join("results.xlsx"), b"PK fake").unwrap();
+        std::fs::write(run.join("cluster_0.snp_matrix.tsv"), "\tg0\ng0\t0\n").unwrap();
+        std::fs::write(run.join("cluster_3.snp_matrix.tsv"), "x").unwrap();
+        std::fs::write(run.join("snp_clusters.tsv"), "x").unwrap();
+        std::fs::write(run.join("cluster_0.dist.tsv"), "not copied").unwrap();
+        let m = model_with_maps(2);
+        let ctx = ExportCtx {
+            run_dir: Some(&run),
+            ..ExportCtx::new(&m, None)
+        };
+        let mut notes = Vec::new();
+        let got = write_item(Item::Excel, &out, &ctx, &mut notes).expect("copied");
+        assert_eq!(got, vec![out.join("results.xlsx")]);
+        assert_eq!(std::fs::read(out.join("results.xlsx")).unwrap(), b"PK fake");
+        let got = write_item(Item::SnpMatrices, &out, &ctx, &mut notes).expect("copied");
+        assert_eq!(got.len(), 3, "two matrices and the SNP clusters: {got:?}");
+        assert!(!out.join("cluster_0.dist.tsv").exists());
+        // An older run has no VCF: a clear message naming what is missing.
+        let err = write_item(Item::Vcf, &out, &ctx, &mut notes).expect_err("no vcf");
+        assert!(
+            err.contains("cluster_*.vcf") && err.contains("not found"),
+            "{err}"
+        );
+        // No run folder at all is said differently.
+        let bare = ExportCtx::new(&m, None);
+        let err = write_item(Item::Excel, &out, &bare, &mut notes).expect_err("no folder");
+        assert!(err.contains("no run folder"), "{err}");
+        // Exporting into the run folder itself does not copy a file onto itself.
+        let ctx_same = ExportCtx {
+            run_dir: Some(&run),
+            ..ExportCtx::new(&m, None)
+        };
+        let got = write_item(Item::Excel, &run, &ctx_same, &mut notes).expect("same folder");
+        assert_eq!(got.len(), 1);
+        assert_eq!(std::fs::read(run.join("results.xlsx")).unwrap(), b"PK fake");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn globs_match_one_star() {
+        assert!(glob_match("cluster_*.vcf", "cluster_12.vcf"));
+        assert!(!glob_match("cluster_*.vcf", "cluster_12.vcf.gz"));
+        assert!(!glob_match("cluster_*.vcf", "cluster.vcf"));
+        assert!(glob_match("results.xlsx", "results.xlsx"));
+        assert!(!glob_match("results.xlsx", "old_results.xlsx"));
+    }
+
+    #[test]
+    fn every_menu_item_has_words_and_only_engine_items_copy() {
+        for i in Item::menu() {
+            assert!(!i.label().is_empty() && !i.short_label().is_empty());
+            let copies = !i.run_files().is_empty();
+            assert_eq!(
+                copies,
+                matches!(
+                    i,
+                    Item::Excel | Item::SnpMatrices | Item::Vcf | Item::SnpAlignment
+                )
+            );
+        }
+        assert!(!Item::files().contains(&Item::Png));
+        assert!(Item::menu().contains(&Item::Png));
     }
 
     #[test]
