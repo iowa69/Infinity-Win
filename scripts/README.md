@@ -170,29 +170,63 @@ matrix still leaves a usable, honest summary behind.
 ### `accuracy_over_time.py` — the key figure
 
 Parses `events.jsonl` and produces tree accuracy versus elapsed time, one curve
-per configuration.
+per configuration, one panel per dataset.
 
-Accuracy at an instant = **Robinson-Foulds distance** between the tree emitted by
-then and the truth tree, *after collapsing branches shorter than half a SNP*.
-The full tree at each instant is re-assembled the way section 6.9 describes: take
-the `backbone_tree` (leaves are clusters) and replace each pivot leaf with the
-latest `cluster_focus` subtree.
+**What one point means.** At each `backbone_tree` / `cluster_focus` event the
+script rebuilds the tree the program was *showing* at that instant, the way
+section 6.9 describes: the backbone, with every pivot leaf replaced by its
+cluster. A cluster that has not emitted a tree yet is an **unresolved star of
+its members**; every other cluster is its latest emitted tree (Focus 0, 1 or 2).
+That whole tree is scored against the truth over the **full leaf set** - every
+genome of the run that the truth knows - so a genome that is not resolved yet
+counts as unresolved, never as "not there yet". The curve therefore starts near
+1 and falls as clusters become exact.
+
+* **Normalised Robinson-Foulds** = (splits in one tree but not the other) /
+  (splits of the two trees added together). 1 = no split right (a star scores
+  1 against any resolved truth), 0 = identical topology. Splits are unrooted
+  bipartitions of the full leaf set.
+* **Half a SNP, per unit.** Branches shorter than half a SNP are collapsed in
+  each part's own units: Focus 2 cluster trees are in SNPs (< 0.5), Focus 1
+  trees in difference pieces (< 0.5 piece), the backbone and Focus 0 trees in
+  substitutions per site (< 0.5 / comparable bp). The truth is collapsed in its
+  units (SNPs for simulator truth).
+* **Simulated truth.** `infinity simulate` writes one truth tree per cluster
+  (`tree_cNN.nwk`, rooted at the cluster root) and no full tree. Every cluster
+  root is the reference with its own independent substitutions, so the full
+  truth is those trees **joined at one star**: each cluster is a clade, no order
+  of clusters is claimed.
+* **Real data.** The dataset's reference tree, restricted to the genomes that
+  are both in the run and in the tree (the IQ-TREE tree's 11 extra reference
+  genomes are left out and reported).
+* **Why a simulated curve can end above 0** although `infinity bench` reports
+  per-cluster RF 0: the full tree also claims where each cluster hangs off the
+  rest. `rf_between_clusters` counts splits that separate whole truth clusters
+  (the backbone resolving what the truth leaves as a star);
+  `rf_within_clusters` counts splits that cut a cluster - a wrong cluster tree,
+  or a cluster tree rooted at its midpoint (6.9) instead of the true cluster
+  root. On the November 2026 `sim_100` baseline the end value 10 is 1 between +
+  9 within, and the 9 are entirely rooting (unrooted per-cluster RF is 0).
+
+Splits are leaf bitmasks; each emitted cluster tree is turned into splits once,
+so a 5000-genome run with 300 tree events scores in seconds.
 
 ```bash
 # one run
 scripts/accuracy_over_time.py --run-dir bench-work/matrix/ncbi_pd_cluster/baseline \
     --truth-tree bench-work/ncbi_pd_cluster/truth/cluster.treefile
 
-# the whole matrix
+# the whole matrix (truth from each dataset.json, else from matrix/summary.json)
 scripts/accuracy_over_time.py --matrix-dir bench-work/matrix
+
+# the older measure: mean RF of the cluster trees emitted so far, each against
+# its own truth tree (what `infinity bench` reports per cluster)
+scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --scoring per-cluster
 
 # read RF values from a bench JSON instead of recomputing them
 scripts/accuracy_over_time.py --run-dir <dir> --rf-from <dir>/bench.json --rf-mode bench
 
-# force the pure-Python RF even when a bench.json exists
-scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode internal
-
-# let the CLI's own RF code do the scoring (one temp output folder per tree)
+# let the CLI's own RF code do the scoring
 scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode infinity --infinity <path>
 ```
 
@@ -200,45 +234,48 @@ scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode infinity 
 
 | mode | behaviour |
 |---|---|
-| `auto` (default) | the best source that can actually form a curve: a `bench.json` series with RF at two or more instants, else RF recomputed here, else the bench series anyway. The choice is recorded per row in `rf_source` and explained in the notes. |
+| `auto` (default) | RF recomputed here over the full leaf set whenever a truth exists (simulator folder or reference tree); otherwise a `bench.json` series, labelled. The choice is recorded per row in `rf_source`. |
 | `bench` | require RF values from `--rf-from <bench.json>` (or `<run-dir>/bench.json`); no truth tree needed |
-| `internal` | always compute RF in pure Python from the emitted Newick, against per-cluster truth trees (`--truth-dir`) or one reference tree (`--truth-tree`) |
+| `internal` | always compute RF here; fail if there is no truth |
 | `infinity` | re-run `infinity bench --output <run dir> --truth <truth dir>` and read its series; needs a simulator truth folder |
 
-`--rf-from`/`--rf-mode bench` is what makes the script usable **before** the CLI's
-`bench` subcommand exists, and `internal` is what makes it usable when `bench`
-exists but its series has no time resolution (see section 4).
+An explicit `--truth-tree` or `--truth-dir` is used as given; truth is only
+discovered (from `<work>/<dataset>/dataset.json`, then from the matrix
+`summary.json`, which is the only record of a simulated dataset kept on tmpfs)
+when neither is passed.
 
-**"Half a SNP" needs a unit.** Infinity-Win writes substitutions per site inside
-clusters (section 6.9) while the simulator's truth tree is in SNPs (section 10.1),
-so one number cannot serve both. `--collapse-mode`:
+`--collapse-mode` (`auto`, `snps`, `length X`, `none`) and `--comparable-bp`
+work as before; `auto` takes the comparable-site count from `cluster_*.dist.tsv`
+or the mean genome length (`run.json` total_length / genomes). An unconverted
+"half a SNP" is never silently applied: the CSV carries the truth threshold and
+the status JSON the run-side thresholds.
 
-- `auto` (default) — use `--comparable-bp` if given (or the largest
-  `comparable_bp` in `cluster_*.dist.tsv`, else `run.json.total_length`), giving
-  `threshold = collapse_snps / comparable_bp`; otherwise, if the truth tree's own
-  branch lengths look like integer SNP counts, use `collapse_snps` directly;
-  otherwise **do not collapse and say so**.
-- `snps` — require a comparable-site count; error out rather than guess.
-- `length X` — an absolute threshold in tree units.
-- `none` — no collapsing.
+Robinson-Foulds needs **four or more taxa**: with fewer scorable genomes (the
+3-genome outbreak trio) RF is empty, never zero.
 
-An unconverted "half a SNP" is never silently applied: the CSV carries the
-threshold that was actually used, and the reason is printed.
-
-Robinson-Foulds needs **four or more taxa**. Points where fewer than four truth
-leaves are present (very early in a run, or the 3-genome outbreak trio) get an
-empty RF and a note, never a zero. `leaves_shared` says how much of the tree
-existed at that instant.
+**The figure.** Small multiples, one panel per dataset (a dataset with no
+scorable truth gets a panel that says why), the time axis log-scaled per panel
+when its times span more than 5x (`--linear-x` forces linear). Each
+configuration has one fixed colour, marker and dash pattern in every panel and
+every figure (`CONFIG_STYLES`; colours from the dataviz reference palette,
+validated for colour-vision deficiency), so one legend serves all panels. Curves
+are steps: the displayed tree stays the same until the next event replaces it.
+The definition above is printed under the figure.
 
 Outputs: `accuracy_over_time__<dataset>__<config>.csv` per run,
-`accuracy_over_time.csv` combined, and `accuracy_over_time*.png` when matplotlib
-is available. CSV columns:
+`accuracy_over_time.csv` combined, `accuracy_over_time.png` (all panels) and
+`accuracy_over_time__<dataset>.png` when matplotlib is available. CSV columns:
 
 ```
 dataset, config, t_ms, t_s, seq, event, cluster, focus, rf_source,
 leaves_run, leaves_truth, leaves_shared, splits_run, splits_truth, splits_shared,
-rf, rf_normalized, collapse_threshold, note
+leaves_exact, clusters_exact, rf, rf_normalized, rf_between_clusters,
+rf_within_clusters, collapse_threshold, note
 ```
+
+`leaves_shared` is the number of genomes scored (the full leaf set),
+`leaves_run` how many of them the displayed tree contained, `leaves_exact` how
+many were in a Focus 2 cluster at that instant.
 
 ### `baselines.py` — the outside baselines (Linux only, not part of the program)
 
@@ -445,22 +482,12 @@ recorded, and keeps the run's own timings and counters, which are still valid.
 
 ### Where the accuracy-over-time curve comes from
 
-`accuracy_over_time.py --rf-mode auto` picks the best available source, and says
-which one it used in the CSV's `rf_source` column and in its notes:
-
-1. a `bench.json` series **with RF at two or more distinct instants** (the
-   engine's own numbers — preferred whenever it can actually form a curve);
-2. otherwise RF **recomputed in Python** at every emitted tree: each emitted
-   cluster tree against the matching `tree_*.nwk` truth tree (simulated data), or
-   the assembled full tree against one reference tree (real data);
-3. otherwise the `bench.json` series anyway, labelled, because one point is
-   better than none.
-
-Today the engine's `timeline` reports `rf_normalised: null` for live trees, so on
-simulated data path 2 is what produces the curve. If `bench` later scores live
-trees against truth, path 1 takes over automatically with no script change. Use
-`--rf-mode bench` to force the bench values, `internal` to force the recomputed
-ones, or `infinity` to have the CLI re-run `bench` first.
+`accuracy_over_time.py --rf-mode auto` recomputes RF itself whenever a truth
+exists, because only that gives one definition (the displayed tree over the full
+leaf set) for simulated and real data alike. The engine's `bench.json`
+`timeline` reports `rf_normalised: null` for live trees and its final per-cluster
+`trees` share one timestamp, so it is used only when there is no truth to score
+against; `--rf-mode bench` / `infinity` still force it.
 
 ### Output files the scripts parse, and how leniently
 

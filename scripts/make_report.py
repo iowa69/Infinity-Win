@@ -303,8 +303,14 @@ def build_accuracy_curves(
     collapse_snps: float,
     max_points: int,
     enabled: bool = True,
+    summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Drive ``accuracy_over_time.py`` over every usable cell."""
+    """Drive ``accuracy_over_time.py`` over every usable cell.
+
+    Truth is looked up in ``<work>/<dataset>/dataset.json`` and then in the
+    matrix summary, which is the only record of where a simulated dataset kept
+    outside the work folder has its truth.
+    """
     doc: Dict[str, Any] = {
         "figures_dir": str(figures_dir),
         "datasets": {},
@@ -316,25 +322,17 @@ def build_accuracy_curves(
         return doc
     common.ensure_dir(figures_dir)
     all_series: Dict[str, List[Dict[str, Any]]] = {}
+    labels = aot.labels_from_summary(summary)
+    empty_reasons: Dict[str, str] = {}
     for dataset, cells in sorted(by_dataset.items()):
-        dataset_dir = work / dataset
-        truth_tree: Optional[Path] = None
-        truth_dir: Optional[Path] = None
-        if dataset_dir.is_dir():
-            obj, _ = common.load_json_optional(dataset_dir / "dataset.json")
-            if isinstance(obj, dict):
-                truth = obj.get("truth") or {}
-                tree = truth.get("tree")
-                if tree and Path(tree).exists():
-                    truth_tree = Path(tree)
-                tdir = truth.get("dir")
-                if tdir and Path(tdir).is_dir():
-                    truth_dir = Path(tdir)
+        truth_tree, truth_dir, truth_origin = common.dataset_truth(work, dataset, summary)
         per_dataset: Dict[str, Any] = {
             "runs": {},
             "truth_tree": str(truth_tree) if truth_tree else None,
             "truth_dir": str(truth_dir) if truth_dir else None,
+            "truth_origin": truth_origin,
             "simulator_truth": bool(truth_dir and common.is_simulator_truth_dir(truth_dir)),
+            "label": labels.get(dataset, dataset),
         }
         # Why this dataset may have no accuracy curve at all, stated once and
         # precisely: no reference declared, and/or too few taxa for RF to exist.
@@ -403,6 +401,8 @@ def build_accuracy_curves(
                             "t_s": float(defined[-1]["t_ms"]) / 1000.0,
                             "rf": defined[-1].get("rf"),
                             "rf_normalized": defined[-1].get("rf_normalized"),
+                            "rf_between_clusters": defined[-1].get("rf_between_clusters"),
+                            "rf_within_clusters": defined[-1].get("rf_within_clusters"),
                         }
                     res["t_span_s"] = [
                         float(ordered[0]["t_ms"]) / 1000.0,
@@ -417,10 +417,17 @@ def build_accuracy_curves(
             if rows:
                 series[config] = rows
                 all_series[f"{dataset}/{config}"] = rows
+        if not series:
+            first_problem = next(
+                (r.get("problems")[0] for r in per_dataset["runs"].values() if r.get("problems")),
+                "no configuration produced accuracy points",
+            )
+            empty_reasons[dataset] = truth_note or first_problem
         if series:
             png = figures_dir / f"accuracy_over_time__{dataset}.png"
             written, reason = aot.plot_curves(
-                series, png, title=f"Tree accuracy over time - {dataset}"
+                series, png, title=f"Tree accuracy over time - {dataset}",
+                labels=labels, default_dataset=dataset,
             )
             per_dataset["figure"] = str(png) if written else None
             per_dataset["figure_error"] = None if written else reason
@@ -438,11 +445,24 @@ def build_accuracy_curves(
         doc["combined_csv"] = str(combined)
         doc["combined_rows"] = len(rows)
         png = figures_dir / "accuracy_over_time__all.png"
-        written, reason = aot.plot_curves(all_series, png, title="Tree accuracy over time - all datasets")
+        written, reason = aot.plot_curves(
+            all_series, png, title="Tree accuracy over time - every dataset",
+            labels=labels, empty=empty_reasons,
+        )
         doc["combined_figure"] = str(png) if written else None
         if not written:
             doc["problems"].append(f"combined figure not written: {reason}")
     return doc
+
+
+def _residual(last: Dict[str, Any]) -> str:
+    """``"RF (between / within clusters)"`` for the last point of a curve."""
+    if last.get("rf") in (None, ""):
+        return "n/a"
+    between, within = last.get("rf_between_clusters"), last.get("rf_within_clusters")
+    if between in (None, "") or within in (None, ""):
+        return common.fmt(last.get("rf"), ".4g")
+    return f"{common.fmt(last.get('rf'), '.4g')} ({between} / {within})"
 
 
 def curve_endpoints(doc: Dict[str, Any]) -> List[List[Any]]:
@@ -471,6 +491,7 @@ def curve_endpoints(doc: Dict[str, Any]) -> List[List[Any]]:
                     common.fmt(first.get("rf_normalized"), ".4f"),
                     common.fmt(last.get("t_s"), ".4g"),
                     common.fmt(last.get("rf_normalized"), ".4f"),
+                    _residual(last),
                     why[:200],
                 ]
             )
@@ -1390,11 +1411,44 @@ def render_report(
     out.append("## 7. The key figure: tree accuracy versus elapsed time")
     out.append("")
     out.append(
-        "Accuracy at a given instant is the Robinson-Foulds distance between the "
-        "tree Infinity-Win had emitted by then and the truth tree, after collapsing "
-        "branches shorter than half a SNP. The curves are built by replaying "
-        "`events.jsonl` and re-assembling the full tree after every "
-        "`backbone_tree` / `cluster_focus` event (PROJECT.md section 6.9)."
+        "Accuracy at a given instant is the normalised Robinson-Foulds distance "
+        "between the **whole tree the program was showing** and the truth tree, "
+        "over the **full leaf set** - every genome of the dataset that the truth "
+        "knows - after collapsing branches shorter than half a SNP. The curves are "
+        "built by replaying `events.jsonl`: after every `backbone_tree` / "
+        "`cluster_focus` event the displayed tree is re-assembled as PROJECT.md "
+        "section 6.9 describes (the backbone, with each pivot leaf replaced by its "
+        "cluster), where a cluster that has not emitted a tree yet is an "
+        "unresolved star of its members and every other cluster is its latest "
+        "emitted tree. So each curve starts near 1 (a star resolves nothing) and "
+        "falls as clusters become exact."
+    )
+    out.append("")
+    out.append(
+        "- **Normalisation:** RF / (splits in the displayed tree + splits in the "
+        "truth): 1 = no split right, 0 = identical topology. Splits are "
+        "unrooted bipartitions of the full leaf set."
+    )
+    out.append(
+        "- **Simulated truth:** `infinity simulate` writes one truth tree per "
+        "cluster and no full tree. Every cluster root is derived from the "
+        "reference independently, so the full truth is those trees joined at one "
+        "star: each cluster is a clade, and no order of clusters is claimed."
+    )
+    out.append(
+        "- **Why the simulated curves do not end at exactly 0:** the full tree also "
+        "claims where each cluster hangs off the rest. Two things the per-cluster "
+        "RF of `infinity bench` ignores are counted here: splits *between* "
+        "clusters that the backbone resolves although the truth is a star, and "
+        "splits *within* a cluster that move because the cluster tree is rooted "
+        "at its midpoint (section 6.9) rather than at the true cluster root. The "
+        "`final RF` column below splits the residual into those two parts "
+        "(between / within)."
+    )
+    out.append(
+        "- **Real data:** scored against the dataset's reference tree, restricted "
+        "to the genomes that are both in the run and in that tree; extra "
+        "reference/outgroup leaves are left out."
     )
     out.append("")
     figures: List[str] = []
@@ -1430,16 +1484,17 @@ def render_report(
     if endpoint_rows:
         out.append(
             "Curve endpoints (the same data as the figure, as text). `first` is the "
-            "first instant whose RF is defined; while only part of the tree exists "
-            "there may be fewer than four shared taxa and RF is then undefined "
-            "rather than zero - those points are counted in `no RF`."
+            "first instant whose RF is defined; RF is undefined (never zero) when "
+            "fewer than four genomes can be scored - those points are counted in "
+            "`no RF`. `collapse threshold` is the truth tree's, in its own units."
         )
         out.append("")
         out.append(
             common.markdown_table(
                 ["dataset", "config", "status", "points", "no RF", "RF source",
                  "collapse threshold", "first t (s)", "first RF (norm)",
-                 "last t (s)", "last RF (norm)", "why empty (if it is)"],
+                 "last t (s)", "last RF (norm)", "final RF (between / within)",
+                 "why empty (if it is)"],
                 endpoint_rows,
             )
         )
@@ -1690,6 +1745,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         collapse_snps=args.collapse_snps,
         max_points=args.max_points,
         enabled=not args.no_figures,
+        summary=summary,
     )
     for problem in expected_problems:
         accuracy_doc.setdefault("problems", []).append(problem)

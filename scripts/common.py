@@ -2238,7 +2238,7 @@ def comparable_bp_for(outdir: Path, run_json: Optional[RunJson] = None) -> Optio
     """A comparable-site count to convert "half a SNP" into branch-length units.
 
     Prefers the largest ``comparable_bp`` seen in ``cluster_*.dist.tsv``, and
-    falls back to ``run.json.total_length``.
+    falls back to the mean genome length (``run.json`` total_length / genomes).
     """
     rows, _ = load_cluster_distances(Path(outdir))
     values = [r["comparable_bp"] for r in rows if r.get("comparable_bp")]
@@ -2246,8 +2246,11 @@ def comparable_bp_for(outdir: Path, run_json: Optional[RunJson] = None) -> Optio
         return max(values)
     if run_json is None:
         run_json = load_run_json(Path(outdir), required=False)
-    if run_json is not None:
-        return run_json.total_length
+    if run_json is not None and run_json.total_length:
+        # total_length is summed over every genome; half a SNP is a fraction of
+        # ONE genome's comparable sites, so use the mean genome length.
+        genomes = run_json.genomes
+        return int(run_json.total_length / genomes) if genomes else run_json.total_length
     return None
 
 
@@ -2322,6 +2325,42 @@ def find_datasets(work_dir: Path, names: Optional[Sequence[str]] = None) -> List
             "run scripts/real_datasets.py --datasets all first"
         )
     return out
+
+
+def dataset_truth(
+    work_dir: Optional[Path],
+    name: str,
+    summary: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Path], Optional[Path], str]:
+    """``(reference tree, truth folder, where they came from)`` for one dataset.
+
+    Looks at ``<work>/<name>/dataset.json`` first, then at the ``datasets`` list
+    of a matrix ``summary.json``: a simulated dataset can live outside the work
+    folder (on tmpfs, say), and then the summary is the only place that still
+    knows where its truth is. Paths that do not exist are dropped.
+    """
+    candidates: List[Tuple[Dict[str, Any], str]] = []
+    if work_dir is not None:
+        path = Path(work_dir) / name / "dataset.json"
+        obj, _ = load_json_optional(path)
+        if isinstance(obj, dict):
+            candidates.append((obj, str(path)))
+    for entry in (summary or {}).get("datasets") or []:
+        if isinstance(entry, dict) and str(entry.get("name")) == str(name):
+            candidates.append((entry, "matrix summary.json"))
+    tree: Optional[Path] = None
+    tdir: Optional[Path] = None
+    origin = "no dataset descriptor found"
+    for obj, where in candidates:
+        truth = obj.get("truth") if isinstance(obj.get("truth"), dict) else {}
+        t, d = truth.get("tree"), truth.get("dir")
+        if tree is None and t and Path(t).exists():
+            tree, origin = Path(t), where
+        if tdir is None and d and Path(d).is_dir():
+            tdir, origin = Path(d), where
+        if tree is None and tdir is None:
+            origin = f"{where} declares no existing truth"
+    return tree, tdir, origin
 
 
 # ---------------------------------------------------------------------------
