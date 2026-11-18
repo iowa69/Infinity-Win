@@ -108,7 +108,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let max_h = (ui.available_height() * 0.6).max(90.0);
     egui::Panel::bottom("map")
         .resizable(true)
-        .default_size(196.0)
+        .default_size(170.0)
         .size_range(74.0..=max_h)
         .frame(
             egui::Frame::NONE

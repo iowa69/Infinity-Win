@@ -235,6 +235,9 @@ pub fn panel_header<R>(ui: &mut egui::Ui, text: &str, add: impl FnOnce(&mut egui
     let p = palette(ui);
     let r = ui
         .horizontal_wrapped(|ui| {
+            // Whole controls move to the next line when the row is full; a
+            // label is never broken in the middle of a word.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.label(title(text, &p));
             add(ui)
         })
@@ -316,8 +319,12 @@ pub fn stat_row(ui: &mut egui::Ui, label: &str, value: &str) {
         });
     } else {
         ui.label(RichText::new(label).color(p.text_weak));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).color(p.text));
+        // Inside a one-row `horizontal`, so the right-to-left layout takes one
+        // line, not the rest of the panel's height.
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(value).color(p.text));
+            });
         });
     }
 }
