@@ -187,15 +187,26 @@ impl ResolutionSettings {
 
     /// Write these settings into a run's parameter set.
     ///
-    /// The engine does not have these fields yet, so this is the single place
-    /// to wire them: everything else in the window already treats them as real.
     pub fn apply_to(&self, params: &mut Parameters) {
-        // WIRE: once `infinity_core::params::Parameters` has these fields:
-        //   params.resolution = self.resolution.into();
-        //   params.snp_thresholds = self.snp_thresholds.clone();
-        //   params.refine_backbone = self.refine_backbone;
-        //   params.snp_filter = self.snp_filter.clone().into();
-        let _ = params;
+        use infinity_core::params::Resolution as CoreResolution;
+        params.resolution = match self.resolution {
+            Resolution::Sketch => CoreResolution::Sketch,
+            Resolution::Blocks => CoreResolution::Blocks,
+            Resolution::ExactSnps => CoreResolution::Exact,
+        };
+        params.snp_thresholds = self.snp_thresholds.iter().map(|&t| t as u64).collect();
+        params.refine_backbone = self.refine_backbone;
+        let f = &self.snp_filter;
+        params.snp_filter = infinity_core::filter::SnpFilter {
+            enabled: f.enabled,
+            core: f.core_only,
+            min_contig_len: f.min_contig_len,
+            end_margin: f.contig_end_margin,
+            high_copy_ratio: f.high_copy_ratio,
+            scan_window: f.cluster_window,
+            scan_alpha: f.alpha,
+            ..infinity_core::filter::SnpFilter::default()
+        };
     }
 }
 

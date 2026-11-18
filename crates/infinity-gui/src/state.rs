@@ -140,8 +140,6 @@ pub enum BackboneUnit {
     #[default]
     SubsPerSite,
     /// SNPs already. `exact` is false while they are still estimates.
-    // WIRE: set by the engine's `BackboneExact` event once it exists.
-    #[allow(dead_code)]
     Snps { exact: bool },
 }
 
@@ -295,7 +293,10 @@ impl UiModel {
                 threshold,
                 clusters,
             } => self.on_clustered(t_ms, threshold, clusters),
-            Event::BackboneTree { newick, pivots } => self.on_backbone(t_ms, newick, pivots),
+            Event::BackboneTree { newick, pivots } => {
+                self.on_backbone(t_ms, newick, pivots);
+                self.backbone_unit = BackboneUnit::SubsPerSite;
+            }
             Event::ClusterFocus(info) => self.on_cluster_focus(t_ms, info),
             Event::MapUpdate(info) => self.on_map_update(*info),
             Event::Counters(c) => self.counters.merge(&c),
@@ -311,11 +312,18 @@ impl UiModel {
                 local: false,
             }),
             Event::Finished(s) => self.on_finished(*s),
-            // Round-2 engine events; the desktop program wires them separately.
-            Event::ClusterDetail(_)
-            | Event::Focus1Map(_)
-            | Event::MapFilters { .. }
-            | Event::BackboneExact(_) => {}
+            // The exact backbone: pivot-to-pivot SNPs replace the sketch tree.
+            Event::BackboneExact(b) => {
+                // Pairs too far apart to align carry a sketch estimate and
+                // nothing compared; the tree is exact only if no pair is.
+                let n = b.pivots.len();
+                let exact = (0..n).all(|i| (0..n).all(|j| i == j || b.comparable[i][j] > 0));
+                self.on_backbone(t_ms, b.newick, b.pivots);
+                self.backbone_unit = BackboneUnit::Snps { exact };
+            }
+            // Matrices, Focus 1 maps and per-variant filters are written to the
+            // output folder; the panels do not draw them yet.
+            Event::ClusterDetail(_) | Event::Focus1Map(_) | Event::MapFilters { .. } => {}
         }
     }
 
