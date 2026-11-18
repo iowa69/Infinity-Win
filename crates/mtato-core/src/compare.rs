@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::align::{walked_range, xdrop_walk, AlignScores};
+use crate::align::{walked_range, xdrop_walk, AlignScores, Walk};
 use crate::blocks::{block_ranges, hash_block};
 use crate::counters::Counters;
 use crate::fasta::GenomeData;
@@ -236,23 +236,51 @@ impl PieceCache {
         got
     }
 
-    pub fn insert(&self, key: PieceKey, value: DiffResult) {
+    /// Store a resolved piece. First writer wins, so a slot is never
+    /// overwritten by a racing worker.
+    ///
+    /// Returns `true` when this call is the one that should be charged for the
+    /// work: the cache is disabled (nothing is deduplicated), or the slot was
+    /// vacant. Returns `false` only when another worker populated it first.
+    /// Callers use that to add to `bases_aligned` and `alignments_run` exactly
+    /// once per *distinct* piece, which is what makes those two counters
+    /// identical at any thread count (section 0 rule 3).
+    pub fn insert(&self, key: PieceKey, value: DiffResult) -> bool {
         if !self.enabled {
-            return;
+            // Nothing is deduplicated, so every resolution is distinct work.
+            return true;
         }
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.entry(key).or_insert_with(|| {
-                Arc::new(CachedPiece {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            // A poisoned map cannot deduplicate either, so charge the work.
+            Err(_) => return true,
+        };
+        match guard.entry(key) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Arc::new(CachedPiece {
                     variants: value.variants.clone(),
                     n_positions: value.n_positions.clone(),
                     align_failed: value.align_failed,
-                })
-            });
+                }));
+                true
+            }
         }
     }
 
     pub fn hits(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
+    }
+
+    /// True when the key is already present, WITHOUT recording a cache hit.
+    /// Probing must not inflate the hit counter that section 11 reports.
+    pub fn contains(&self, key: &PieceKey) -> bool {
+        self.enabled
+            && self
+                .inner
+                .lock()
+                .map(|g| g.contains_key(key))
+                .unwrap_or(false)
     }
 
     /// Look a piece up and return its resolved content as owned data.
@@ -293,6 +321,16 @@ pub struct Focus1 {
     /// Pivot positions where nothing could be called because a base was N on
     /// either side, as `(pivot contig, start, end)`.
     pub not_called: Vec<(u32, u64, u64)>,
+    /// Variants that steps A-D already settle without any base-level
+    /// resolution: the SNPs the ungapped end extension of 6.6 step D found
+    /// inside the part it kept ("Mismatches inside the kept part are SNPs"),
+    /// each flagged [`flags::END_EXT`].
+    ///
+    /// These are part of the Focus 1 picture, not of Focus 2: they are known
+    /// the moment the contig ends have been walked. They are carried here so
+    /// that the staged run (Focus 1 then Focus 2) does not lose them — the
+    /// Focus 2 pass starts from this list and adds the resolved pieces to it.
+    pub variants: Vec<Variant>,
     pub novel_bp: u64,
     pub counters: Counters,
 }
@@ -798,6 +836,26 @@ pub struct EndResult {
     pub not_called: Vec<(u32, u64, u64)>,
 }
 
+/// Express a member base as an allele on the pivot's forward strand.
+///
+/// `ref_allele` is a pivot allele by construction (6.7), so `alt_allele` has to
+/// be one too, or the two columns of a single row describe different strands.
+/// When the member runs antiparallel to the pivot across a contig end (`rel`),
+/// the member's own forward-strand base must be complemented — the same reason
+/// the x-drop walk there is given `complement_alt`. This matters for more than
+/// presentation: `Profile::from_comparison` puts the alt byte into `snp_map`,
+/// and `pair_distance` compares it against the pivot's base, so a member-strand
+/// allele would make two members carrying the *same* substitution on opposite
+/// strands count as differing from each other.
+#[inline]
+fn pivot_strand_allele(member_base: u8, rel: bool) -> u8 {
+    if rel {
+        crate::seq::complement_byte(member_base)
+    } else {
+        member_base
+    }
+}
+
 /// Extend outward from the shared points nearest each contig end (6.6 D).
 ///
 /// Between a contig end and its nearest shared point there is no second anchor,
@@ -837,11 +895,13 @@ pub fn extend_contig_ends(
         let res = xdrop_walk(
             pres,
             seq,
-            p_start,
-            m_at as i64 - 1,
-            p_dir,
-            -1,
-            rel,
+            Walk {
+                r_start: p_start,
+                a_start: m_at as i64 - 1,
+                r_dir: p_dir,
+                a_dir: -1,
+                complement_alt: rel,
+            },
             &scores,
             params.xdrop,
         );
@@ -863,7 +923,7 @@ pub fn extend_contig_ends(
                 pivot_start: ppos as u64,
                 pivot_end: ppos as u64 + 1,
                 ref_allele: (rb as char).to_string(),
-                alt_allele: (ab as char).to_string(),
+                alt_allele: (pivot_strand_allele(ab, rel) as char).to_string(),
                 genome_contig: contig,
                 genome_start: gpos as u64,
                 genome_end: gpos as u64 + 1,
@@ -899,11 +959,13 @@ pub fn extend_contig_ends(
         let res = xdrop_walk(
             pres,
             seq,
-            p_start,
-            m_at as i64,
-            p_dir,
-            1,
-            rel,
+            Walk {
+                r_start: p_start,
+                a_start: m_at as i64,
+                r_dir: p_dir,
+                a_dir: 1,
+                complement_alt: rel,
+            },
             &scores,
             params.xdrop,
         );
@@ -925,7 +987,7 @@ pub fn extend_contig_ends(
                 pivot_start: ppos as u64,
                 pivot_end: ppos as u64 + 1,
                 ref_allele: (rb as char).to_string(),
-                alt_allele: (ab as char).to_string(),
+                alt_allele: (pivot_strand_allele(ab, rel) as char).to_string(),
                 genome_contig: contig,
                 genome_start: gpos as u64,
                 genome_end: gpos as u64 + 1,
@@ -1021,6 +1083,8 @@ pub fn compare_member(
     let mut counters = Counters::default();
     let mut focus1 = Focus1::default();
     let mut variants: Vec<Variant> = Vec::new();
+    let mut resolutions = 0u64;
+    let mut first_computations = 0u64;
 
     for (ci, contig) in member.contigs.iter().enumerate() {
         let cid = ci as u32;
@@ -1056,6 +1120,11 @@ pub fn compare_member(
             &mut counters,
         );
 
+        // Step D settles these SNPs on its own, so they belong to the Focus 1
+        // picture (see [`Focus1::variants`]) and must survive into the staged
+        // Focus 2 pass, which resumes from `focus1` rather than from this
+        // function's local list.
+        focus1.variants.extend(ends.variants.iter().cloned());
         variants.extend(ends.variants);
         focus1.covered.extend(covered);
         focus1.covered.extend(ends.covered);
@@ -1068,7 +1137,11 @@ pub fn compare_member(
         if resolve {
             for p in &diff_pieces {
                 let alt = p.alt(&contig.seq);
-                let res = resolve_piece(pivot, p, &alt, params, cache, &mut counters);
+                let (res, first) = resolve_piece(pivot, p, &alt, params, cache, &mut counters);
+                resolutions += 1;
+                if first {
+                    first_computations += 1;
+                }
                 for rv in &res.variants {
                     variants.push(piece_variant(p, rv));
                 }
@@ -1081,6 +1154,10 @@ pub fn compare_member(
         }
         focus1.pieces.extend(diff_pieces);
     }
+
+    // See the note in `resolve_focus1`: cache hits are derived, not counted per
+    // lookup, so that the number cannot move with the thread count.
+    counters.cache_hits = resolutions.saturating_sub(first_computations);
 
     // Novel bp: member bases that are unplaced or inserted (6.8).
     let unplaced_bp: u64 = focus1
@@ -1146,6 +1223,12 @@ pub fn scan_contig(
 }
 
 /// Resolve one difference piece into variants, through the cache (6.10).
+///
+/// Returns the result together with whether *this* call was the one that
+/// populated the cache slot. The caller uses that flag to account for the work
+/// exactly once per distinct piece, which is what keeps `bases_aligned`,
+/// `alignments_run` and the derived `cache_hits` identical at any thread count;
+/// see [`PieceCache::insert`].
 pub fn resolve_piece(
     pivot: &PivotIndex,
     piece: &DiffPiece,
@@ -1153,25 +1236,34 @@ pub fn resolve_piece(
     params: &Parameters,
     cache: &PieceCache,
     counters: &mut Counters,
-) -> DiffResult {
+) -> (DiffResult, bool) {
     let key = piece.cache_key();
     if let Some(hit) = cache.get(&key) {
-        counters.cache_hits += 1;
-        return DiffResult {
-            variants: hit.variants.clone(),
-            n_positions: hit.n_positions.clone(),
-            align_failed: hit.align_failed,
-            used_dp: false,
-        };
+        return (
+            DiffResult {
+                variants: hit.variants.clone(),
+                n_positions: hit.n_positions.clone(),
+                align_failed: hit.align_failed,
+                used_dp: false,
+            },
+            false,
+        );
     }
     let ref_slice = &pivot.contig_seq(piece.pcontig)[piece.ps as usize..piece.pe as usize];
-    counters.bases_aligned += ref_slice.len().max(alt.len()) as u64;
     let result = crate::variant::diff(ref_slice, alt, &DiffParams::from(params));
-    if result.used_dp {
-        counters.alignments_run += 1;
+    // Charge the alignment to whoever actually populated the cache slot, not to
+    // every worker that missed it. Two workers racing on a mutation shared by a
+    // whole clade both compute it but only one wins the first-wins insert, so
+    // `bases_aligned` and `alignments_run` mean "distinct pieces aligned" and
+    // come out identical at any thread count (section 0 rule 3).
+    let won = cache.insert(key, result.clone());
+    if won {
+        counters.bases_aligned += ref_slice.len().max(alt.len()) as u64;
+        if result.used_dp {
+            counters.alignments_run += 1;
+        }
     }
-    cache.insert(key, result.clone());
-    result
+    (result, won)
 }
 
 /// Translate a piece-local raw variant into pivot coordinates.
@@ -1544,6 +1636,115 @@ mod tests {
         assert!(c.get(&key).is_none());
         assert_eq!(c.hits(), 0);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn probing_the_cache_does_not_count_as_a_hit() {
+        // Section 11 reports the cache-hit rate as a headline number, so the
+        // pre-pass that only decides whether a member's FASTA has to be read
+        // must not inflate it. `contains` probes, `cached` consumes.
+        let c = PieceCache::new(true);
+        let key = (7u64, 0u32, 10u64, 20u64);
+        assert!(!c.contains(&key));
+        c.insert(key, DiffResult::default());
+        assert_eq!(c.hits(), 0, "inserting is not a hit");
+        assert!(c.contains(&key));
+        assert!(c.contains(&key));
+        assert_eq!(c.hits(), 0, "contains() must never record a hit");
+        assert!(c.cached(&key).is_some());
+        assert_eq!(c.hits(), 1, "cached() records exactly one hit");
+        assert!(c.cached(&key).is_some());
+        assert_eq!(c.hits(), 2);
+        // A disabled cache holds nothing, so it never contains anything either.
+        let off = PieceCache::new(false);
+        off.insert(key, DiffResult::default());
+        assert!(!off.contains(&key));
+    }
+
+    #[test]
+    fn only_the_worker_that_fills_a_slot_is_told_it_won() {
+        // `insert` reports whether this call populated the slot, which is how
+        // `bases_aligned` and `alignments_run` stay identical at any thread
+        // count: racing workers both resolve a shared mutation, but only the
+        // winner charges it.
+        let c = PieceCache::new(true);
+        let key = (3u64, 1u32, 0u64, 9u64);
+        assert!(c.insert(key, DiffResult::default()), "a vacant slot is won");
+        assert!(!c.insert(key, DiffResult::default()), "first writer wins");
+        assert_eq!(c.len(), 1);
+        // Nothing is deduplicated when the cache is off, so every resolution
+        // is distinct work and must be charged.
+        let off = PieceCache::new(false);
+        assert!(off.insert(key, DiffResult::default()));
+        assert!(off.insert(key, DiffResult::default()));
+    }
+
+    #[test]
+    fn an_end_extension_snp_reports_both_alleles_on_the_pivot_strand() {
+        // 6.6 step D over an antiparallel contig. The member runs backwards
+        // against the pivot, which is exactly why the x-drop walk is given
+        // `complement_alt`; the stored `alt` has to be complemented for the
+        // same reason, or `ref` and `alt` in one row are on different strands.
+        // That is not only presentation: `Profile::from_comparison` puts the
+        // alt byte into `snp_map` and `pair_distance` compares it against the
+        // pivot's base, so a member-strand allele would make two members
+        // carrying the same substitution on opposite strands count as
+        // differing from each other.
+        let k = 21usize;
+        let len = 200usize;
+        let pivot_seq: Vec<u8> = (0..len).map(|i| b"ACGT"[i % 4]).collect();
+        let mut member_seq = revcomp(&pivot_seq);
+        // Member position q faces pivot position len-1-q, so 190 faces 9. Nine
+        // matching bases follow the mismatch, so the x-drop rule keeps the walk
+        // (and the mismatch) all the way to the end instead of cutting it off.
+        member_seq[190] = b'A';
+        assert_ne!(member_seq[190], revcomp(&pivot_seq)[190]);
+        let params = Parameters {
+            k,
+            densities: [64, 16, 4],
+            ..Default::default()
+        };
+        let pivot_data = GenomeData {
+            name: "pivot".into(),
+            contigs: vec![crate::fasta::Contig {
+                name: "c0".into(),
+                seq: pivot_seq.clone(),
+            }],
+        };
+        let pivot = PivotIndex::new("pivot", &pivot_data, &params);
+
+        // One reversed shared point at the very start of the member contig: the
+        // member anchor [0, k) is the reverse complement of the pivot anchor
+        // [len-k, len), so its forward-strand start is len-k (D5). With nothing
+        // to the left of it, only the right end is extended.
+        let points = [SharedPoint {
+            gpos: 0,
+            ppos: len as u64 - k as u64,
+            pcontig: 0,
+            rel: true,
+            from_block: false,
+        }];
+        let mut counters = Counters::default();
+        let ends = extend_contig_ends(&pivot, 0, &member_seq, &points, &[], &params, &mut counters);
+
+        assert_eq!(counters.end_extensions, 1);
+        assert_eq!(ends.variants.len(), 1, "{:?}", ends.variants);
+        let v = &ends.variants[0];
+        assert_eq!(v.kind, VariantKind::Snp);
+        assert_ne!(v.flags & flags::END_EXT, 0);
+        assert_eq!(v.strand, '-', "the member runs opposite to the pivot");
+        assert_eq!((v.pivot_start, v.pivot_end), (9, 10));
+        assert_eq!((v.genome_start, v.genome_end), (190, 191));
+        assert_eq!(v.ref_allele, "C", "the pivot base at 9");
+        assert_eq!(
+            v.alt_allele,
+            (crate::seq::complement_byte(b'A') as char).to_string(),
+            "alt must be the pivot-strand reading of the member base"
+        );
+        assert_ne!(
+            v.alt_allele, "A",
+            "that is the member strand, not the pivot"
+        );
     }
 
     #[test]

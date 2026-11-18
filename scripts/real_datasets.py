@@ -437,9 +437,13 @@ def build_ncbi_pd_cluster(dest: Path, args: argparse.Namespace) -> Dict[str, Any
         "notes": [
             "Both reference files were produced outside M-Tato and are copied "
             "here unchanged so that this dataset folder is self-contained.",
-            "`mtato bench` should treat tree/cluster.treefile as the reference "
-            "tree (--truth-tree) and ska2/cluster_reads_distance.tsv as the "
-            "reference distances (--truth-distances, format 'ska2').",
+            "`mtato bench --truth` only accepts a `mtato simulate` truth folder "
+            "(tree_*.nwk, pairwise_snps.tsv, clusters.tsv), so it cannot score "
+            "this real dataset. The comparisons that do apply are made by the "
+            "scripts: `baselines.py compare` joins these SKA2 distances against "
+            "the run's cluster_*.dist.tsv and computes RF against "
+            "tree/cluster.treefile, and `accuracy_over_time.py` builds the "
+            "accuracy curve from events.jsonl against the same reference tree.",
         ],
     }
     if IQTREE_TREE.exists():
@@ -451,6 +455,38 @@ def build_ncbi_pd_cluster(dest: Path, args: argparse.Namespace) -> Dict[str, Any
             "method": "IQ-TREE maximum likelihood on the SKA2 core alignment",
             "sha256": common.sha256_of(dst),
         }
+        # The reference tree may cover more taxa than the assemblies copied here
+        # (outgroups, reference genomes). Comparisons are restricted to the shared
+        # leaves; record that instead of letting it show up as a mysterious gap.
+        try:
+            ref_tree = common.read_newick_file(dst)
+            ref_leaves = set(ref_tree.leaf_names())
+            copied = {r.name for r in records}
+            extra = sorted(ref_leaves - copied)
+            missing = sorted(copied - ref_leaves)
+            truth["tree_leaf_check"] = {
+                "reference_tree_leaves": len(ref_leaves),
+                "assemblies_copied": len(copied),
+                "in_both": len(ref_leaves & copied),
+                "only_in_reference_tree": extra,
+                "only_in_assemblies": missing,
+            }
+            if extra:
+                truth.setdefault("notes", []).append(
+                    f"The reference tree has {len(ref_leaves)} leaves but only "
+                    f"{len(copied)} assemblies are in this dataset: "
+                    f"{len(extra)} extra taxon/taxa ({', '.join(extra[:4])}"
+                    f"{'...' if len(extra) > 4 else ''}) are reference or outgroup "
+                    "genomes that were not part of the cluster download. Tree "
+                    "comparisons are restricted to the shared leaves."
+                )
+            if missing:
+                problems.append(
+                    f"{len(missing)} copied genome(s) do not appear in the reference "
+                    f"tree: {missing[:5]}"
+                )
+        except common.PrereqError as exc:
+            problems.append(f"could not parse the copied reference tree: {exc}")
     else:
         problems.append(f"reference tree not present at {IQTREE_TREE}")
     if IQTREE_BIONJ.exists():

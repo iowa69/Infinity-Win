@@ -208,7 +208,12 @@ pub fn write_cluster_variants(dir: &Path, r: &RunResults, cluster: u32) -> std::
                 or_dash(&v.alt_allele),
                 v.kind.as_str(),
                 name_or_index(genome_contigs, v.genome_contig),
-                v.genome_start + 1,
+                // The same convention on both sides of the row. Writing
+                // `genome_start + 1` unconditionally made an insertion's
+                // member coordinate one greater than its pivot coordinate even
+                // though, for a forward-strand insertion, they are the same
+                // number: both name the base the insertion sits after.
+                one_based(v.genome_start, v.kind),
                 v.strand,
                 v.flags_string()
             )?;

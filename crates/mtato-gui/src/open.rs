@@ -168,7 +168,7 @@ pub fn read_folder(dir: &Path, read_bytes: &AtomicU64, ctx: &Context) -> Result<
     if model.summary.is_none() {
         if let Ok(text) = std::fs::read_to_string(dir.join(RUN_JSON)) {
             if let Ok(s) = serde_json::from_str::<RunSummary>(&text) {
-                model.apply(0.0, mtato_core::events::Event::Finished(s));
+                model.apply(0.0, mtato_core::events::Event::Finished(Box::new(s)));
             }
         }
     }

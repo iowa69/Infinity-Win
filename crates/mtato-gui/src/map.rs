@@ -106,13 +106,14 @@ pub fn complement(uncovered: &[Iv], total: u64) -> Vec<Iv> {
 }
 
 /// Why the map is showing the rows it is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RowReason {
     /// The genomes the user selected, restricted to this cluster.
     Selection,
     /// Nothing selected, so the cluster's members, up to a cap.
     WholeCluster,
     /// No cluster chosen, or the cluster has no map data yet.
+    #[default]
     NoData,
 }
 

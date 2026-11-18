@@ -80,6 +80,11 @@ pub fn focus_style(focus: u8, dark: bool) -> FocusStyle {
     }
 }
 
+/// Just the colour of a focus level, for text and swatches.
+pub fn focus_color(focus: u8, dark: bool) -> Color32 {
+    focus_style(focus, dark).color
+}
+
 impl FocusStyle {
     pub fn stroke(&self) -> Stroke {
         Stroke::new(self.width, self.color)

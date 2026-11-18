@@ -741,6 +741,114 @@ class TestMakeReport(ScriptCase):
         # the fake makes every configuration identical, so nothing can "pay"
         self.assertNotIn("**pays**", text)
 
+    def invariance(self) -> Dict[str, Any]:
+        """The structured invariance result, so tests do not parse markdown."""
+        summary = json.loads((self.matrix / "summary.json").read_text(encoding="utf-8"))
+        return make_report.check_switch_invariance(make_report.collect(summary))
+
+    def statuses(self, config: str) -> Dict[str, str]:
+        return {
+            dataset: entry["configs"][config]["status"]
+            for dataset, entry in self.invariance().items()
+            if config in (entry.get("configs") or {})
+        }
+
+    def test_switch_invariance_is_checked_and_reported(self) -> None:
+        """Section 10.2 property 6: switches must not change the answer."""
+        run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
+        # the fake is deterministic, so every switch reproduces the baseline
+        for config in ("flat", "no_block_skip", "no_piece_cache", "no_profile_grouping"):
+            self.assertEqual(self.statuses(config), {"fix_small": "identical"}, config)
+        # the fake collapses everything into one cluster under --single-cluster,
+        # so its pair set differs by construction; that is "expected", not a defect
+        self.assertIn(
+            self.statuses("single_cluster")["fix_small"], ("identical", "expected")
+        )
+        text = self.report()
+        self.assertIn("Switch invariance", text)
+        self.assertIn("property 6 holds", text)
+        self.assertNotIn("no documented reason", text)
+
+    def test_a_switch_that_changes_the_answer_is_flagged_as_a_defect(self) -> None:
+        run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
+        self.corrupt_distances(self.run_dir("flat"), delta=41)
+        record = self.invariance()["fix_small"]["configs"]["flat"]
+        self.assertEqual(record["status"], "DEFECT")
+        self.assertEqual(record["pairs_differing"], 1)
+        self.assertEqual(record["max_abs_diff_snps"], 41)
+        self.assertTrue(record["variants_identical"], "only the distances were changed")
+        text = self.report()
+        self.assertIn("no documented reason", text)
+        self.assertIn("41", text, "the size of the disagreement must be shown")
+
+    def test_a_variant_only_difference_is_still_a_defect(self) -> None:
+        """Property 6 covers variants as well as distances."""
+        run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
+        self.add_variant_row(self.run_dir("no_piece_cache"))
+        record = self.invariance()["fix_small"]["configs"]["no_piece_cache"]
+        self.assertEqual(record["status"], "DEFECT")
+        self.assertEqual(record["pairs_differing"], 0, "distances still match")
+        self.assertFalse(record["variants_identical"])
+        self.assertEqual(record["variant_rows_only_in_config"], 1)
+        text = self.report()
+        self.assertIn("variant list", text)
+
+    def test_no_block_skip_is_classified_against_decisions_d16(self) -> None:
+        """D16 allows a distance change with identical variants, not a variant change."""
+        run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
+        # distances differ, variants do not -> the documented D16 deviation
+        self.corrupt_distances(self.run_dir("no_block_skip"), delta=7)
+        record = self.invariance()["fix_small"]["configs"]["no_block_skip"]
+        self.assertEqual(record["status"], "documented deviation")
+        self.assertTrue(record["variants_identical"])
+        text = self.report()
+        self.assertIn("DECISIONS.md D16", text)
+        self.assertIn("coverage-bookkeeping", text)
+        # now change the variants too -> beyond what D16 records
+        self.add_variant_row(self.run_dir("no_block_skip"))
+        record = self.invariance()["fix_small"]["configs"]["no_block_skip"]
+        self.assertEqual(record["status"], "UNDOCUMENTED")
+        self.assertFalse(record["variants_identical"])
+
+    def test_single_cluster_differences_are_expected_not_a_defect(self) -> None:
+        run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
+        self.corrupt_distances(self.run_dir("single_cluster"), delta=9999)
+        record = self.invariance()["fix_small"]["configs"]["single_cluster"]
+        self.assertEqual(record["status"], "expected")
+        text = self.report()
+        self.assertIn("expected (different pivot)", text)
+        self.assertNotIn("no documented reason", text)
+
+    def test_variant_rows_are_compared_across_cluster_renumbering(self) -> None:
+        """The fingerprint pools rows, so a renumbered clustering still matches."""
+        run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
+        base = make_report.variants_fingerprint(self.run_dir("baseline"))
+        same = make_report.variants_fingerprint(self.run_dir("baseline"))
+        self.assertTrue(make_report.diff_variants(base, same)["identical"])
+        self.assertGreater(len(base["rows"]), 0, "the fixture must write some variants")
+        other = make_report.variants_fingerprint(self.run_dir("flat"))
+        self.assertTrue(
+            make_report.diff_variants(base, other)["identical"],
+            "the fake writes the same variants for every configuration",
+        )
+
+    def corrupt_distances(self, run_dir: Path, *, delta: int) -> None:
+        """Shift the first pair's SNP count in a run's distance file."""
+        dist = run_dir / "cluster_0.dist.tsv"
+        lines = dist.read_text(encoding="utf-8").splitlines()
+        header = lines[0].split("\t")
+        fields = lines[1].split("\t")
+        fields[header.index("snps")] = str(int(fields[header.index("snps")]) + delta)
+        lines[1] = "\t".join(fields)
+        dist.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def add_variant_row(self, run_dir: Path) -> None:
+        """Duplicate one variant row, so the variant multiset differs."""
+        variants = run_dir / "cluster_0.variants.tsv"
+        lines = variants.read_text(encoding="utf-8").splitlines()
+        lines.append(lines[1])
+        variants.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def test_the_figure_and_its_numbers_are_both_referenced(self) -> None:
         run_matrix.main(self.matrix_argv("--datasets", "fix_small"))
         text = self.report()
@@ -795,12 +903,36 @@ class TestAcceptanceCheck(ScriptCase):
         self.dist_json = self.root / "trio_distances.json"
         self.dist_json.write_text(json.dumps([list(d) for d in distances]), encoding="utf-8")
         os.environ["FAKE_MTATO_DIST_JSON"] = str(self.dist_json)
+        # A fixture expected-values file with no filtered secondary basis, so the
+        # PASS/FAIL assertions below test one thing at a time. The shipped file
+        # (which does declare one) is exercised by its own test.
+        self.expected_dir = self.root / "expected"
+        self.expected_dir.mkdir(parents=True, exist_ok=True)
+        (self.expected_dir / "salmonella_trio.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "dataset": "salmonella_trio",
+                    "title": "fixture expected values",
+                    "abs_tolerance_snps": 1,
+                    "pairs": [
+                        {"genome_a": a, "genome_b": b, "snps": s, "source": "fixture"}
+                        for a, b, s in distances
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
-    def report(self) -> str:
+    def run_dir(self, config: str, dataset: str = "salmonella_trio") -> Path:
+        return super().run_dir(config, dataset)
+
+    def report(self, expected_dir: Optional[Path] = None) -> str:
         out = self.root / "REPORT.md"
         make_report.main(
             ["--work-dir", str(self.work), "--matrix-dir", str(self.matrix),
-             "--out", str(out), "--no-figures"]
+             "--out", str(out), "--no-figures",
+             "--expected-dir", str(expected_dir or self.expected_dir)]
         )
         return out.read_text(encoding="utf-8")
 
@@ -834,6 +966,82 @@ class TestAcceptanceCheck(ScriptCase):
         text = self.report()
         self.assertIn("not measured", text)
         self.assertIn("PARTIAL", text)
+
+    def test_the_shipped_expected_file_adds_a_filtered_second_basis(self) -> None:
+        """The real file declares a filtered basis, so both are shown and labelled.
+
+        M-Tato does not filter (section 2, section 15) while every published
+        reference number is filtered, so the report must not compare them as
+        though they were the same measurement.
+        """
+        self.assertTrue(self.expected_file.exists(), "the shipped expected-values file is required")
+        shipped = json.loads(self.expected_file.read_text(encoding="utf-8"))
+        basis = (shipped.get("comparison_basis") or {}).get("secondary") or {}
+        self.assertTrue(basis.get("min_pivot_contig_bp"), "the shipped file must declare a filter")
+        self.assertTrue(basis.get("caveat"), "the filtered basis must carry its caveat")
+        run_matrix.main(self.matrix_argv("--datasets", "salmonella_trio", "--configs", "baseline"))
+        text = self.report(expected_dir=self.expected_file.parent)
+        self.assertIn("Two bases are reported", text)
+        self.assertIn("as reported", text)
+        self.assertIn("filtered", text)
+        # the recomputation's own limits must be stated, not hidden
+        self.assertIn("does NOT apply the comparable-coverage restriction", basis["caveat"])
+
+    def test_filtered_recomputation_excludes_short_pivot_contigs(self) -> None:
+        """The filter must drop short-contig variants and keep the rest."""
+        run_matrix.main(self.matrix_argv("--datasets", "salmonella_trio", "--configs", "baseline"))
+        run_dir = self.run_dir("baseline")
+        variants = run_dir / "cluster_0.variants.tsv"
+        lines = variants.read_text(encoding="utf-8").splitlines()
+        # rewrite pivot contig names so the length is embedded, one short and one long
+        header = lines[0].split("\t")
+        contig_col = header.index("pivot_contig")
+        rows = [line.split("\t") for line in lines[1:]]
+        for i, row in enumerate(rows):
+            row[contig_col] = "ctg_short_len1448_cov139.5" if i == 0 else "ctg_long_len442493_cov42.0"
+        variants.write_text(
+            "\n".join([lines[0]] + ["\t".join(r) for r in rows]) + "\n", encoding="utf-8"
+        )
+        unfiltered = common.recompute_pairwise_snps(run_dir)
+        filtered = common.recompute_pairwise_snps(run_dir, min_pivot_contig_bp=5000)
+        self.assertGreater(unfiltered.variants_used, filtered.variants_used)
+        self.assertGreaterEqual(filtered.variants_excluded, 1)
+        self.assertTrue(filtered.filter_applied)
+        # every pair must still be present, including a genuinely identical one
+        self.assertEqual(set(unfiltered.pairs), set(filtered.pairs))
+
+    def test_a_genome_with_no_variants_still_yields_zero_distance_pairs(self) -> None:
+        """A member identical to the pivot writes no variant rows but is not lost.
+
+        Without seeding every cluster member from genomes.tsv, such a genome would
+        be absent from the recomputed distances and a true 0-SNP pair would look
+        like "never compared" - which the acceptance check would then score as
+        `not measured` instead of a pass.
+        """
+        run_matrix.main(self.matrix_argv("--datasets", "salmonella_trio", "--configs", "baseline"))
+        run_dir = self.run_dir("baseline")
+        variants = run_dir / "cluster_0.variants.tsv"
+        lines = variants.read_text(encoding="utf-8").splitlines()
+        # the pivot (isolate-A) has no variant rows at all, yet must still be paired
+        self.assertFalse(any(line.startswith("isolate-A\t") for line in lines[1:]))
+        result = common.recompute_pairwise_snps(run_dir)
+        self.assertEqual(len(result.pairs), 3, "all three pairs of the trio must be present")
+        paired = [k for k in result.pairs if "isolate-A" in k]
+        self.assertEqual(len(paired), 2, "the variant-free pivot must appear in both its pairs")
+
+        # Now make isolate-C identical to the pivot too: the pair between them must
+        # be reported as 0, not dropped.
+        variants.write_text(
+            "\n".join([lines[0]] + [l for l in lines[1:] if not l.startswith("isolate-C\t")])
+            + "\n",
+            encoding="utf-8",
+        )
+        result = common.recompute_pairwise_snps(run_dir)
+        self.assertEqual(len(result.pairs), 3)
+        self.assertEqual(
+            result.pairs[common.pair_key("isolate-A", "isolate-C")], 0,
+            "two genomes with no variants must be 0 SNPs apart, not missing",
+        )
 
 
 # ---------------------------------------------------------------------------

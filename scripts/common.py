@@ -1916,6 +1916,227 @@ def load_variants_tsv(outdir: Path, cluster: Optional[str] = None) -> Tuple[Tabl
     return table, list(table.problems)
 
 
+CONTIG_LENGTH_IN_NAME = re.compile(r"_len(\d+)_")
+
+VARIANT_COLUMN_ALIASES = {
+    "genome_name": ("genome_name", "genome", "member", "name", "sample"),
+    "pivot_contig": ("pivot_contig", "ref_contig", "contig"),
+    "pivot_pos": ("pivot_pos", "pivot_position", "pos", "position"),
+    "ref": ("ref", "reference", "ref_allele"),
+    "alt": ("alt", "alternate", "alt_allele"),
+    "type": ("type", "variant_type", "kind"),
+    "flags": ("flags", "flag", "annotations"),
+}
+
+
+@dataclass
+class RecombinedDistances:
+    """Pairwise SNP counts recomputed from ``cluster_*.variants.tsv``."""
+
+    pairs: Dict[Tuple[str, str], Optional[int]]
+    problems: List[str] = field(default_factory=list)
+    #: Variants dropped by the filter, so a filtered number is never silent.
+    variants_total: int = 0
+    variants_used: int = 0
+    variants_excluded: int = 0
+    filter_applied: bool = False
+    filter_reason: str = ""
+
+
+def recompute_pairwise_snps(
+    outdir: Path,
+    *,
+    min_pivot_contig_bp: Optional[int] = None,
+    exclude_flags: Sequence[str] = (),
+    snp_types: Sequence[str] = ("snp", "SNP", "sub", "substitution"),
+) -> RecombinedDistances:
+    """Recompute pairwise SNP counts from the variant lists, optionally filtered.
+
+    M-Tato does not filter its variants: section 2 lists no filtering among its
+    goals and section 15 says repeats are flagged, not corrected. Published
+    reference numbers, on the other hand, are always filtered (SKA2 restricts to
+    the shared k-mer core; a mapping pipeline drops high-depth and low-identity
+    regions). Comparing the two unfiltered is not apples to apples, so this
+    recomputes distances on a stated basis:
+
+    * ``min_pivot_contig_bp`` drops variants on pivot contigs shorter than this.
+      The length is read from the contig name (``..._len442493_cov42.0``); when a
+      name carries no length the filter cannot be applied and that is reported
+      rather than silently ignored.
+    * ``exclude_flags`` drops variants whose ``flags`` column contains any of
+      them (for example ``low_identity``, ``repeat``, ``dup``).
+
+    Distance follows section 6.9: a member without a variant at a pivot position
+    carries the pivot base (the ``ref`` column), so two members differ where their
+    alleles at that position differ.
+    """
+    outdir = Path(outdir)
+    result = RecombinedDistances(pairs={})
+    if not outdir.is_dir():
+        result.problems.append(f"output folder does not exist: {outdir}")
+        return result
+    variant_files = sorted(outdir.glob("cluster_*.variants.tsv"))
+    if not variant_files:
+        result.problems.append(f"no cluster_*.variants.tsv in {outdir}")
+        return result
+
+    exclude = {f.strip().lower() for f in exclude_flags if f.strip()}
+    snp_set = {t.lower() for t in snp_types}
+    # genome -> {(contig, pos): allele}
+    profiles: Dict[str, Dict[Tuple[str, int], str]] = {}
+    contig_lengths: Dict[str, Optional[int]] = {}
+    unparsable_contigs: set = set()
+    # Seed every cluster member, including those with no variants at all and the
+    # pivot (whose profile is empty by definition, section 6.9).
+    members_by_cluster = _cluster_members(outdir)
+    for members in members_by_cluster.values():
+        for name in members:
+            profiles.setdefault(name, {})
+    if min_pivot_contig_bp:
+        result.filter_applied = True
+    if exclude:
+        result.filter_applied = True
+
+    for path in variant_files:
+        cluster_id = path.name[len("cluster_") : -len(".variants.tsv")]
+        try:
+            table = read_table(path)
+        except PrereqError as exc:
+            result.problems.append(str(exc))
+            continue
+        cols = {f: table.find_column(*a) for f, a in VARIANT_COLUMN_ALIASES.items()}
+        if cols["genome_name"] is None or cols["pivot_pos"] is None:
+            result.problems.append(
+                f"{path.name}: cannot identify the genome/position columns "
+                f"(header {table.header}); file skipped"
+            )
+            continue
+        # The pivot of this cluster has an empty profile but must still appear as
+        # a member, otherwise its pairs are missing from the result.
+        pivot_name = _pivot_name_for_cluster(outdir, cluster_id)
+        if pivot_name:
+            profiles.setdefault(pivot_name, {})
+        for row in table.rows:
+            result.variants_total += 1
+            gname = (row.get(cols["genome_name"]) or "").strip()
+            if not gname:
+                continue
+            contig = (row.get(cols["pivot_contig"]) or "").strip() if cols["pivot_contig"] else ""
+            vtype = (row.get(cols["type"]) or "").strip().lower() if cols["type"] else "snp"
+            flags_raw = (row.get(cols["flags"]) or "").strip().lower() if cols["flags"] else ""
+            if vtype and vtype not in snp_set:
+                result.variants_excluded += 1
+                continue
+            if exclude:
+                flag_set = {f for f in re.split(r"[,;|\s]+", flags_raw) if f}
+                if flag_set & exclude:
+                    result.variants_excluded += 1
+                    continue
+            if min_pivot_contig_bp and contig:
+                if contig not in contig_lengths:
+                    match = CONTIG_LENGTH_IN_NAME.search(contig)
+                    contig_lengths[contig] = int(match.group(1)) if match else None
+                    if contig_lengths[contig] is None:
+                        unparsable_contigs.add(contig)
+                length = contig_lengths[contig]
+                if length is not None and length < min_pivot_contig_bp:
+                    result.variants_excluded += 1
+                    continue
+            pos_raw = (row.get(cols["pivot_pos"]) or "").strip()
+            try:
+                pos = int(float(pos_raw))
+            except ValueError:
+                result.variants_excluded += 1
+                continue
+            allele = (row.get(cols["alt"]) or "").strip() if cols["alt"] else ""
+            ref = (row.get(cols["ref"]) or "").strip() if cols["ref"] else ""
+            key = (contig, pos)
+            profile = profiles.setdefault(gname, {})
+            profile[key] = allele or ref or "?"
+            profile.setdefault(("__ref__", contig, pos), ref)  # type: ignore[arg-type]
+            result.variants_used += 1
+
+    if unparsable_contigs and min_pivot_contig_bp:
+        result.filter_reason = (
+            f"{len(unparsable_contigs)} pivot contig name(s) carry no _len<N>_ field, "
+            "so the contig-length filter could not be applied to their variants "
+            f"(e.g. {sorted(unparsable_contigs)[0]}); those variants were KEPT"
+        )
+        result.problems.append(result.filter_reason)
+
+    # ref allele lookup, so a member without a variant gets the pivot base
+    ref_alleles: Dict[Tuple[str, int], str] = {}
+    for profile in profiles.values():
+        for key, value in list(profile.items()):
+            if isinstance(key, tuple) and len(key) == 3 and key[0] == "__ref__":
+                ref_alleles[(key[1], key[2])] = value
+                del profile[key]  # type: ignore[arg-type]
+
+    names = sorted(profiles)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            pa, pb = profiles[a], profiles[b]
+            positions = set(pa) | set(pb)
+            snps = 0
+            for key in positions:
+                ref = ref_alleles.get(key, "")
+                allele_a = pa.get(key, ref)
+                allele_b = pb.get(key, ref)
+                if allele_a != allele_b:
+                    snps += 1
+            result.pairs[pair_key(a, b)] = snps
+    if not result.pairs:
+        result.problems.append("no variant rows could be read, so no pair was recomputed")
+    return result
+
+
+def _cluster_members(outdir: Path) -> Dict[str, List[str]]:
+    """Every genome name per cluster id, from ``genomes.tsv``.
+
+    Needed because a member identical to its pivot contributes no variant rows at
+    all: without this it would be missing from the recomputed distances, and a
+    true 0-SNP pair would look like "never compared" instead of "identical".
+    """
+    path = outdir / "genomes.tsv"
+    out: Dict[str, List[str]] = {}
+    if not path.exists():
+        return out
+    try:
+        table = read_table(path)
+    except PrereqError:
+        return out
+    name_col = table.find_column("name", "genome_name", "genome", "sample")
+    cluster_col = table.find_column("cluster", "cluster_id")
+    if name_col is None or cluster_col is None:
+        return out
+    for row in table.rows:
+        name = (row.get(name_col) or "").strip()
+        cluster = (row.get(cluster_col) or "").strip()
+        if name and cluster:
+            out.setdefault(cluster, []).append(name)
+    return out
+
+
+def _pivot_name_for_cluster(outdir: Path, cluster_id: str) -> Optional[str]:
+    """The pivot genome name of one cluster, from ``clusters.tsv``."""
+    path = outdir / "clusters.tsv"
+    if not path.exists():
+        return None
+    try:
+        table = read_table(path)
+    except PrereqError:
+        return None
+    id_col = table.find_column("cluster_id", "cluster", "id")
+    name_col = table.find_column("pivot_name", "pivot")
+    if id_col is None or name_col is None:
+        return None
+    for row in table.rows:
+        if (row.get(id_col) or "").strip() == str(cluster_id):
+            value = (row.get(name_col) or "").strip()
+            return value or None
+    return None
+
+
 def comparable_bp_for(outdir: Path, run_json: Optional[RunJson] = None) -> Optional[int]:
     """A comparable-site count to convert "half a SNP" into branch-length units.
 

@@ -264,7 +264,7 @@ impl UiModel {
                 text,
                 local: false,
             }),
-            Event::Finished(s) => self.on_finished(s),
+            Event::Finished(s) => self.on_finished(*s),
         }
     }
 
@@ -1020,7 +1020,7 @@ mod tests {
         total.pieces_compared = 15;
         let mut s = RunSummary::new("test", Parameters::default());
         s.counters = total;
-        m.apply(1.0, Event::Finished(s));
+        m.apply(1.0, Event::Finished(Box::new(s)));
         assert_eq!(m.counters.pieces_compared, 15, "not 30");
         assert!(m.finished);
     }

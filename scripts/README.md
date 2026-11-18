@@ -200,14 +200,14 @@ scripts/accuracy_over_time.py --matrix-dir bench-work/matrix --rf-mode mtato --m
 
 | mode | behaviour |
 |---|---|
-| `auto` (default) | use a `bench.json` RF timeline when one exists, else compute RF here |
-| `bench` | require RF values from `--rf-from <bench.json>`; no truth tree needed |
-| `internal` | always compute RF in pure Python from the emitted Newick |
-| `mtato` | write each emitted tree to a temporary output folder and ask `mtato bench` to score it |
+| `auto` (default) | the best source that can actually form a curve: a `bench.json` series with RF at two or more instants, else RF recomputed here, else the bench series anyway. The choice is recorded per row in `rf_source` and explained in the notes. |
+| `bench` | require RF values from `--rf-from <bench.json>` (or `<run-dir>/bench.json`); no truth tree needed |
+| `internal` | always compute RF in pure Python from the emitted Newick, against per-cluster truth trees (`--truth-dir`) or one reference tree (`--truth-tree`) |
+| `mtato` | re-run `mtato bench --output <run dir> --truth <truth dir>` and read its series; needs a simulator truth folder |
 
 `--rf-from`/`--rf-mode bench` is what makes the script usable **before** the CLI's
 `bench` subcommand exists, and `internal` is what makes it usable when `bench`
-exists but emits no timeline.
+exists but its series has no time resolution (see section 4).
 
 **"Half a SNP" needs a unit.** M-Tato writes substitutions per site inside
 clusters (section 6.9) while the simulator's truth tree is in SNPs (section 10.1),
@@ -290,10 +290,11 @@ scripts/make_report.py --out /tmp/REPORT.md     # write somewhere else
 ```
 
 Sections: verdict summary → datasets → per-dataset results (time to first tree,
-time to exact tree, peak memory, counters, accuracy) → verdict detail per switch
-and dataset → acceptance check against published values → the key figure →
-outside baselines → **failures, gaps and data-quality notes** → performance
-targets (section 10.4) → reproduction commands.
+time to exact tree, peak memory, counters, and a separate accuracy table) →
+verdict detail per switch and dataset → acceptance check against published values
+→ **switch invariance** → the key figure → outside baselines → **failures, gaps
+and data-quality notes** → performance targets (section 10.4) → reproduction
+commands.
 
 The verdict is exactly section 11's rule: *a part of the idea pays if turning it
 off makes time-to-exact or peak memory at least 20% worse on at least two of the
@@ -308,6 +309,15 @@ hide missing data:
 | not measurable | no dataset had a usable time-to-exact or peak memory |
 
 "Undetermined" and "not measurable" are never reported as a pass.
+
+**Switch invariance** (section 6 of the report) checks PROJECT.md section 10.2
+property 6 — that flat mode, hierarchical mode and every cache switch give
+*identical* variants, distances and trees. Each configuration's pairwise SNP
+counts are compared with the baseline's; any difference is reported as a defect
+with examples and the size of the disagreement, because a switch that is faster
+but wrong has not been shown to pay. `single_cluster` is excluded from that
+count and annotated instead: it changes which genome every member is compared to,
+so a different comparable-pair set is expected by design, not a violation.
 
 The report also carries an **acceptance check** for the Salmonella trio: the
 published pairwise SNP distances in `scripts/expected/salmonella_trio.json`
@@ -353,76 +363,104 @@ a near-miss is visible.
 
 ---
 
-## 4. The `mtato bench` contract these scripts expect
+## 4. The `mtato bench` interface these scripts use
 
-`run_matrix.py`, `accuracy_over_time.py` and `baselines.py` invoke `bench` as
-follows. Everything in brackets is optional.
-
-```
-mtato bench <output_dir>
-            [--truth <truth_dir>]                    # a simulator truth folder
-            [--truth-tree <newick>]                  # reference tree (real datasets)
-            [--truth-distances <tsv>]                # reference pairwise distances
-            [--truth-distances-format ska2]          # only "ska2" is used today
-            [--collapse-snps <float>]                # collapse branches < N SNPs for RF
-            [--comparable-bp <int>]                  # SNPs -> substitutions/site
-            [--dataset <name>] [--config <name>]     # echoed back into the JSON
-            [--json <path>]                          # default <output_dir>/bench.json
-```
-
-`accuracy_over_time.py --rf-mode mtato` additionally calls the single-tree form,
-with `<output_dir>` being a temporary folder that contains only a `tree.nwk`:
+This matches the **implemented** CLI (`mtato bench --help`), not an assumed one:
 
 ```
-mtato bench <tmp_dir> --truth-tree <newick> --collapse-snps <f> --json <tmp>/bench.json
+mtato bench --output <run dir>          # an M-Tato output folder (run.json + trees)
+            --truth  <truth dir>        # a `mtato simulate` truth folder
+            [-j, --json <path>]         # default <output>/bench.json
+            [--collapse-below <float>]  # collapse branches shorter than this (default 0.5)
+            [--quiet]                   # write the JSON, do not print the table
 ```
 
-Expected `bench.json` (fields the scripts read; unknown fields are kept and
-ignored, missing fields are reported as gaps rather than defaulted):
+`--truth` is **required** and must be a simulator truth folder: `tree_*.nwk`
+(one truth tree per cluster, branch lengths in SNPs), `pairwise_snps.tsv`
+(`genome_a  genome_b  snps`) and `clusters.tsv` (`genome  cluster_id`).
+
+**Consequence for the real datasets.** They have no simulator truth folder — they
+have a SKA2 distance table and an IQ-TREE reference tree instead. So
+`run_matrix.py` *skips* `bench` for them, records why, and the comparison is made
+by the scripts instead:
+
+| dataset | accuracy comes from |
+|---|---|
+| simulated (`truth.dir` is a simulator folder) | `mtato bench` → `bench.json` |
+| `ncbi_pd_cluster` | `baselines.py compare` (SKA2 join + RF vs `cluster.treefile`) and `accuracy_over_time.py --rf-mode internal` |
+| `salmonella_trio` | the acceptance check in `make_report.py` (published SNP distances) and `baselines.py compare` |
+| `s_aureus_cc` | nothing — no truth exists; counters and timings only |
+
+`common.is_simulator_truth_dir()` is what decides this, so a reference folder is
+never handed to `--truth` where it would fail and look like an M-Tato bug.
+
+### `bench.json` as written by the CLI
 
 ```jsonc
 {
-  "schema_version": 1,
-  "output_dir": "...", "truth_tree": "...", "truth_dir": "...",
-  "dataset": "ncbi_pd_cluster", "config": "baseline",
-  "collapse_threshold": 1.07e-7,          // branch-length units actually used
+  "output": "...", "truth": "...",
+  "run": { /* the whole run.json, so bench.json is self-contained */ },
 
-  "tree": {                               // final tree vs truth
-    "rf": 12, "rf_normalized": 0.04,
-    "splits_run": 300, "splits_truth": 305, "splits_shared": 293,
-    "leaves_run": 32, "leaves_truth": 32, "leaves_shared": 32,
-    "collapse_threshold": 1.07e-7,
-    "problems": []
+  "distance": {
+    "pairs_in_truth": 20, "pairs_compared": 20, "pairs_missing_from_output": 0,
+    "pairs_exact": 16, "max_abs_error": 1, "sum_abs_error": 4,
+    "sum_true_snps": 210, "sum_reported_snps": 212,
+    "worst_pair": ["sim_c00_s000", "sim_c00_s004", 10, 11]   // a, b, true, reported
   },
 
-  "rf_timeline": [                        // what the key figure prefers
-    { "t_ms": 4310.5, "seq": 12, "event": "cluster_focus",
-      "cluster": 0, "focus": 2,
-      "rf": 8, "rf_normalized": 0.02,
-      "leaves_shared": 32, "splits_run": 300, "splits_truth": 305 }
+  "clusters": {
+    "genomes_in_truth": 10, "genomes_compared": 10, "true_clusters": 2,
+    "reported_clusters": 2, "recovered_exactly": 2, "pairwise_f1": 1.0
+  },
+
+  // Final RF, one entry per cluster tree. There is NO single full-tree RF.
+  "trees": [
+    { "source": "cluster_1", "truth": "tree_c00", "leaves": 5, "rf": 1,
+      "splits_emitted": 2, "splits_true": 1, "rf_normalised": 0.3333,
+      "t_ms": 75.1, "approximate": false, "focus": 2, "units": "snps" }
   ],
 
-  "distances": {                          // vs --truth-distances
-    "reference": "...", "pairs_compared": 496, "pairs_exact": 400,
-    "mean_abs_error_snps": 0.5, "max_abs_error_snps": 3, "correlation": 0.99
-  },
+  // One entry per emitted tree, i.e. the accuracy-over-time series.
+  // NOTE: for live trees the engine currently reports rf_normalised = null
+  // (it does not score them against truth), so this series has no usable time
+  // resolution yet - see "Where the curve comes from" below.
+  "timeline": [ { "source": "backbone (live)", "leaves": 2, "rf": 0,
+                  "splits_emitted": 0, "splits_true": 0, "rf_normalised": null,
+                  "t_ms": 24.9, "approximate": true, "focus": 0,
+                  "units": "subs_per_site" } ],
 
-  "variants":  { "true_positives": 0, "false_positives": 0, "false_negatives": 0 },
-  "clusters":  { "true_clusters": 20, "recovered": 20 },
-  "timings":   { }, "counters": { }, "peak_memory_bytes": 0,
-  "warnings": [], "errors": []
+  "problems": []
 }
 ```
 
-Exit status matters: `bench` must exit non-zero when it cannot score the run (no
-truth, no `tree.nwk`, unparsable tree). `run_matrix.py` treats "non-zero exit and
-no `bench.json`" as `bench.status = "failed"` with the stderr tail recorded, and
-keeps the run's own timings and counters, which are still valid.
+Note `rf_normalised` (British spelling) — `common.BenchJson` reads both
+spellings. Because RF is per cluster, the aggregate the report shows is the
+**sum** of `trees[].rf` and the **mean** of `trees[].rf_normalised`, and both are
+labelled as such rather than presented as one tree's distance.
 
-`rf_timeline` is optional but worth having: with it the key figure is drawn from
-the engine's own RF code. Without it, `accuracy_over_time.py` recomputes every
-point in Python (`--rf-mode internal`), and `bench.json`'s single aggregate
-`tree.rf` still yields one point.
+Exit status matters: `bench` exits non-zero when it cannot score the run (no
+truth folder, no `tree.nwk`, unparsable tree). `run_matrix.py` treats "non-zero
+exit and no `bench.json`" as `bench.status = "failed"` with the stderr tail
+recorded, and keeps the run's own timings and counters, which are still valid.
+
+### Where the accuracy-over-time curve comes from
+
+`accuracy_over_time.py --rf-mode auto` picks the best available source, and says
+which one it used in the CSV's `rf_source` column and in its notes:
+
+1. a `bench.json` series **with RF at two or more distinct instants** (the
+   engine's own numbers — preferred whenever it can actually form a curve);
+2. otherwise RF **recomputed in Python** at every emitted tree: each emitted
+   cluster tree against the matching `tree_*.nwk` truth tree (simulated data), or
+   the assembled full tree against one reference tree (real data);
+3. otherwise the `bench.json` series anyway, labelled, because one point is
+   better than none.
+
+Today the engine's `timeline` reports `rf_normalised: null` for live trees, so on
+simulated data path 2 is what produces the curve. If `bench` later scores live
+trees against truth, path 1 takes over automatically with no script change. Use
+`--rf-mode bench` to force the bench values, `internal` to force the recomputed
+ones, or `mtato` to have the CLI re-run `bench` first.
 
 ### Output files the scripts parse, and how leniently
 
@@ -430,9 +468,10 @@ point in Python (`--rf-mode internal`), and `bench.json`'s single aggregate
 |---|---|---|
 | `run.json` | `run_matrix`, `make_report` | every key optional; null timings stay `null`; unknown keys ignored |
 | `events.jsonl` | `accuracy_over_time` | bad lines counted and skipped with their line numbers; envelope shape `{"seq","t_ms","wall_ms","event":{"event","data"}}` |
-| `cluster_<id>.dist.tsv` | `baselines`, `make_report`, `common` | columns matched by alias: `genome_a/genome1/sample1/a/...`, `snps/snp_count/...`, `comparable_bp/sites/...`, `distance/dist/...`; a file whose two genome columns cannot be identified is reported and skipped, never guessed at |
+| `cluster_<id>.dist.tsv` | `baselines`, `make_report`, `common` | the real header is `genome_a name_a genome_b name_b snps indels comparable_bp subs_per_site`; **names are matched before ids**, because joining on the numeric id would match nothing and look like a clean zero. Alternatives (`sample1/sample2`, `snp_count`, `sites`, `distance`) are also accepted; a file whose two genome columns cannot be identified is reported and skipped, never guessed at |
 | `tree.nwk`, `cluster_<id>.nwk` | `accuracy_over_time`, `baselines` | internal node labels, `[&...]` comments, quoted names, multiple trees |
-| `genomes.tsv`, `clusters.tsv`, `cluster_<id>.variants.tsv` | available via `common.load_*` | same alias matching; ragged rows blank-filled and reported |
+| `genomes.tsv` | `run_matrix`, `baselines` | `id name path length contigs n50 gc cluster is_pivot focus snps_vs_pivot indels_vs_pivot uncovered_bp novel_bp` |
+| `clusters.tsv`, `cluster_<id>.variants.tsv` | available via `common.load_*` | same alias matching; ragged rows blank-filled and reported |
 
 A column may be missing while the tool is still being built. Readers report that
 as a problem string that ends up in `REPORT.md` section 8 — they do not crash and
@@ -486,7 +525,11 @@ in `tempfile.mkdtemp()` directories under `/tmp` and removed afterwards.
 4. **The IQ-TREE tree is a reference, not ground truth** — a maximum-likelihood
    tree from a SKA2 split-k-mer core alignment. M-Tato builds
    neighbour-joining trees, so exact agreement is not expected; the RF distance
-   is reported as a number, not judged pass/fail.
+   is reported as a number, not judged pass/fail. It also has **43 leaves while
+   the dataset has 32 assemblies**: 11 reference/outgroup genomes (`GCF_*`) are
+   in the tree but were not part of the cluster download. Comparisons are
+   restricted to the shared leaves, and `real_datasets.py` records the exact
+   mismatch in `dataset.json` under `truth.tree_leaf_check`.
 5. **SKA2 distances came from reads, M-Tato's from assemblies.** Small
    disagreements are expected and are reported per pair.
 6. **`s_aureus_cc` has no accuracy truth.** It tests clustering separation and

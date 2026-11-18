@@ -442,6 +442,23 @@ mod tests {
             assert_eq!(back, env, "round trip must be exact for {j}");
             assert!(!env.event_name().is_empty());
         }
+
+        // `events.jsonl` is a documented interface (section 7) that `scripts/`
+        // and `mtato bench` read, so the two boxed payloads must stay invisible
+        // in the JSON: `data` is the payload object itself, keyed by the
+        // payload's own field names, never a nested wrapper.
+        let j = serde_json::to_value(Event::Finished(Box::new(RunSummary::new(
+            "t",
+            crate::params::Parameters::default(),
+        ))))
+        .expect("serialises");
+        assert_eq!(j["event"], "finished");
+        assert_eq!(j["data"]["version"], "t", "boxing wrapped the payload: {j}");
+        assert!(j["data"]["timings"].is_object(), "{j}");
+        assert!(
+            j["data"]["timings"]["total_ms"].is_null(),
+            "an unset stage must stay null (D7): {j}"
+        );
     }
 
     #[test]

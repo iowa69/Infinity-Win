@@ -333,35 +333,58 @@ fn alt_s_len(alt: &[u8]) -> usize {
     alt.len()
 }
 
-/// Extend in any combination of directions, ungapped.
+/// The geometry of one [`xdrop_walk`]: where each side starts and which way it
+/// walks.
 ///
 /// `r_dir` and `a_dir` are `+1` or `-1`: the walk compares
 /// `ref_s[r_start + i*r_dir]` with `alt[a_start + i*a_dir]` for `i = 0, 1, ...`
 /// and stops at the first index out of range, or when the running score has
-/// fallen `xdrop` below its best. `mismatches` holds the step indices, not the
-/// coordinates, so the caller can convert them whichever way it needs.
+/// fallen `xdrop` below its best.
+#[derive(Debug, Clone, Copy)]
+pub struct Walk {
+    /// Start index on the reference side.
+    pub r_start: i64,
+    /// Start index on the alt side.
+    pub a_start: i64,
+    /// `+1` or `-1`: the reference's walking direction.
+    pub r_dir: i64,
+    /// `+1` or `-1`: the alt's walking direction.
+    pub a_dir: i64,
+    /// Compare the complement of the `alt` base rather than the base itself.
+    ///
+    /// This is load-bearing, not a convenience flag. It is required when the
+    /// two strands are antiparallel: a *matching* position then holds
+    /// complementary bases, and comparing them directly would report a
+    /// mismatch at every single position and stop the extension after five
+    /// steps. Only the comparison is complemented — the caller still reports
+    /// the member's actual base as the variant allele. See DECISIONS.md D5 for
+    /// the related anchor-start mapping.
+    pub complement_alt: bool,
+}
+
+/// Extend in any combination of directions, ungapped.
+///
+/// `mismatches` in the result holds the step indices, not the coordinates, so
+/// the caller can convert them whichever way it needs.
 ///
 /// This generalises [`xdrop_forward`] and [`xdrop_backward`], and it is what
 /// 6.6 step D needs when the member runs opposite to the pivot: there the
-/// member walks backwards while the pivot walks forwards.
-///
-/// `complement_alt` compares the complement of the `alt` base rather than the
-/// base itself. That is required when the two strands are antiparallel: a
-/// *matching* position then holds complementary bases, and comparing them
-/// directly would report a mismatch at every single position and stop the
-/// extension after five steps. Only the comparison is complemented — the caller
-/// still reports the member's actual base as the variant allele.
+/// member walks backwards while the pivot walks forwards. See [`Walk`] for the
+/// geometry, including the antiparallel `complement_alt` case.
 pub fn xdrop_walk(
     ref_s: &[u8],
     alt: &[u8],
-    r_start: i64,
-    a_start: i64,
-    r_dir: i64,
-    a_dir: i64,
-    complement_alt: bool,
+    walk: Walk,
     scores: &AlignScores,
     xdrop: i32,
 ) -> XdropResult {
+    let Walk {
+        r_start,
+        a_start,
+        r_dir,
+        a_dir,
+        complement_alt,
+    } = walk;
     let mut score = 0i32;
     let mut best = 0i32;
     let mut best_len = 0usize;
@@ -649,7 +672,19 @@ mod tests {
         // same ten A's read the other way.
         let r = s("GGGGGGAAAAAAAAAA");
         let a = s("AAAAAAAAAAGGGGGG");
-        let res = xdrop_walk(&r, &a, 6, 9, 1, -1, false, &AlignScores::default(), 15);
+        let res = xdrop_walk(
+            &r,
+            &a,
+            Walk {
+                r_start: 6,
+                a_start: 9,
+                r_dir: 1,
+                a_dir: -1,
+                complement_alt: false,
+            },
+            &AlignScores::default(),
+            15,
+        );
         assert_eq!(res.len, 10);
         assert!(res.mismatches.is_empty());
         assert!(res.hit_end, "both sides ran out together");
@@ -664,9 +699,25 @@ mod tests {
         let a = s("CCCCCCCCCCTTTTTTTTTT"); // reverse complement of r
         let scores = AlignScores::default();
         // Walk r forward from 0 and a backward from its last base.
-        let plain = xdrop_walk(&r, &a, 0, 19, 1, -1, false, &scores, 15);
+        let back = Walk {
+            r_start: 0,
+            a_start: 19,
+            r_dir: 1,
+            a_dir: -1,
+            complement_alt: false,
+        };
+        let plain = xdrop_walk(&r, &a, back, &scores, 15);
         assert_eq!(plain.len, 0, "without complementing nothing matches");
-        let cmp = xdrop_walk(&r, &a, 0, 19, 1, -1, true, &scores, 15);
+        let cmp = xdrop_walk(
+            &r,
+            &a,
+            Walk {
+                complement_alt: true,
+                ..back
+            },
+            &scores,
+            15,
+        );
         assert_eq!(cmp.len, 20, "with complementing the whole run matches");
         assert!(cmp.mismatches.is_empty());
     }
@@ -679,7 +730,19 @@ mod tests {
         let mut a = s("CCCCCCCCCCTTTTTTTTTT");
         a[4] = b'A'; // should be C, to complement the G it faces
         let scores = AlignScores::default();
-        let res = xdrop_walk(&r, &a, 0, 19, 1, -1, true, &scores, 15);
+        let res = xdrop_walk(
+            &r,
+            &a,
+            Walk {
+                r_start: 0,
+                a_start: 19,
+                r_dir: 1,
+                a_dir: -1,
+                complement_alt: true,
+            },
+            &scores,
+            15,
+        );
         assert_eq!(res.len, 20);
         // a[4] is reached at step 19 - 4 = 15.
         assert_eq!(res.mismatches, vec![15]);
@@ -689,7 +752,19 @@ mod tests {
     fn xdrop_walk_forward_matches_xdrop_forward() {
         let r = s("AAAAAAAAAACCCCCCCCCC");
         let a = s("AAAATAAAAACCCCCCCCCC");
-        let w = xdrop_walk(&r, &a, 0, 0, 1, 1, false, &AlignScores::default(), 15);
+        let w = xdrop_walk(
+            &r,
+            &a,
+            Walk {
+                r_start: 0,
+                a_start: 0,
+                r_dir: 1,
+                a_dir: 1,
+                complement_alt: false,
+            },
+            &AlignScores::default(),
+            15,
+        );
         let f = xdrop_forward(&r, &a, 0, 0, &AlignScores::default(), 15);
         assert_eq!(w.len, f.len);
         assert_eq!(w.mismatches, f.mismatches);

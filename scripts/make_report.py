@@ -169,13 +169,32 @@ def collect(summary: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
 # ---------------------------------------------------------------------------
 
 
+def _overall_status(checks: Sequence[Any]) -> str:
+    """PASS / FAIL / PARTIAL / not measured, from a list of ExpectedCheck."""
+    if not checks:
+        return "not measured"
+    n_pass = sum(1 for c in checks if c.passed is True)
+    n_fail = sum(1 for c in checks if c.passed is False)
+    n_na = sum(1 for c in checks if c.passed is None)
+    if n_pass + n_fail == 0:
+        return "not measured"
+    if n_fail:
+        return "FAIL"
+    if n_na:
+        return "PARTIAL (some pairs not measured)"
+    return "PASS"
+
+
 def run_expected_checks(
-    work: Path, summary: Dict[str, Any], by_dataset: Dict[str, Dict[str, Dict[str, Any]]]
+    work: Path,
+    summary: Dict[str, Any],
+    by_dataset: Dict[str, Dict[str, Dict[str, Any]]],
+    expected_dir: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Compare M-Tato's pairwise SNP counts with published expected values."""
     results: List[Dict[str, Any]] = []
     problems: List[str] = []
-    expected_dir = common.repo_root() / "scripts" / "expected"
+    expected_dir = Path(expected_dir) if expected_dir else common.repo_root() / "scripts" / "expected"
     if not expected_dir.is_dir():
         problems.append(f"no expected-values folder at {expected_dir}")
         return results, problems
@@ -207,7 +226,9 @@ def run_expected_checks(
         for config, meas in sorted(cells.items()):
             out_dir = meas.get("out_dir")
             observed: Dict[Tuple[str, str], Optional[float]] = {}
+            observed_filtered: Dict[Tuple[str, str], Optional[float]] = {}
             cell_problems: List[str] = []
+            filter_info: Dict[str, Any] = {}
             if out_dir and Path(out_dir).is_dir():
                 rows, row_problems = common.load_cluster_distances(Path(out_dir))
                 cell_problems.extend(row_problems)
@@ -218,9 +239,35 @@ def run_expected_checks(
                     cell_problems.append(
                         "no pairwise distances could be read from this output folder"
                     )
+                # Secondary basis: the same comparison after the filter that every
+                # published reference number was produced with. Declared in the
+                # expected-values file, not hard-coded here.
+                basis = (expected.get("comparison_basis") or {}).get("secondary") or {}
+                if basis.get("min_pivot_contig_bp") or basis.get("exclude_flags"):
+                    recomputed = common.recompute_pairwise_snps(
+                        Path(out_dir),
+                        min_pivot_contig_bp=basis.get("min_pivot_contig_bp"),
+                        exclude_flags=tuple(basis.get("exclude_flags") or ()),
+                    )
+                    observed_filtered = dict(recomputed.pairs)
+                    cell_problems.extend(recomputed.problems)
+                    filter_info = {
+                        "label": basis.get("label"),
+                        "min_pivot_contig_bp": basis.get("min_pivot_contig_bp"),
+                        "exclude_flags": list(basis.get("exclude_flags") or []),
+                        "variants_total": recomputed.variants_total,
+                        "variants_used": recomputed.variants_used,
+                        "variants_excluded": recomputed.variants_excluded,
+                        "caveat": basis.get("caveat"),
+                    }
             else:
                 cell_problems.append(f"output folder missing: {out_dir}")
             checks = common.check_expected_pairs(expected, observed)
+            checks_filtered = (
+                common.check_expected_pairs(expected, observed_filtered)
+                if observed_filtered
+                else []
+            )
             n_pass = sum(1 for c in checks if c.passed is True)
             n_fail = sum(1 for c in checks if c.passed is False)
             n_na = sum(1 for c in checks if c.passed is None)
@@ -234,6 +281,9 @@ def run_expected_checks(
                     else ("PASS" if n_fail == 0 and n_na == 0 else
                           ("FAIL" if n_fail else "PARTIAL (some pairs not measured)"))
                 ),
+                "checks_filtered": [c.as_dict() for c in checks_filtered],
+                "status_filtered": _overall_status(checks_filtered),
+                "filter": filter_info,
                 "problems": cell_problems,
             }
         results.append(entry)
@@ -286,6 +336,23 @@ def build_accuracy_curves(
             "truth_dir": str(truth_dir) if truth_dir else None,
             "simulator_truth": bool(truth_dir and common.is_simulator_truth_dir(truth_dir)),
         }
+        # Why this dataset may have no accuracy curve at all, stated once and
+        # precisely: no reference declared, and/or too few taxa for RF to exist.
+        genomes = next((m.get("genomes") for m in cells.values() if m.get("genomes")), None)
+        truth_note = None
+        if truth_tree is None and truth_dir is None:
+            truth_note = (
+                "this dataset declares no reference tree and no simulator truth "
+                "folder, so tree accuracy cannot be scored"
+            )
+            if genomes is not None and genomes < 4:
+                truth_note += (
+                    f"; with {genomes} genomes the Robinson-Foulds distance is "
+                    "undefined in any case (it needs at least four taxa), so this "
+                    "dataset contributes distance accuracy and the acceptance "
+                    "check only"
+                )
+        per_dataset["truth_note"] = truth_note
         series: Dict[str, List[Dict[str, Any]]] = {}
         for config, meas in sorted(cells.items()):
             out_dir = meas.get("out_dir")
@@ -341,6 +408,11 @@ def build_accuracy_curves(
                         float(ordered[0]["t_ms"]) / 1000.0,
                         float(ordered[-1]["t_ms"]) / 1000.0,
                     ]
+            if truth_note and not res.get("points"):
+                # Put the dataset-level reason first: it is the one that matters.
+                res["problems"] = [truth_note] + [
+                    p for p in res.get("problems", []) if p != truth_note
+                ]
             per_dataset["runs"][config] = res
             if rows:
                 series[config] = rows
@@ -381,6 +453,11 @@ def curve_endpoints(doc: Dict[str, Any]) -> List[List[Any]]:
             points = run.get("points") or 0
             first = run.get("first") or {}
             last = run.get("last") or {}
+            # A curve with no points must say why, not just look blank.
+            why = ""
+            if not points:
+                problems = run.get("problems") or []
+                why = problems[0] if problems else run.get("reason") or "no reason recorded"
             rows.append(
                 [
                     dataset,
@@ -388,12 +465,13 @@ def curve_endpoints(doc: Dict[str, Any]) -> List[List[Any]]:
                     run.get("status"),
                     points,
                     run.get("points_without_rf"),
-                    run.get("rf_source"),
+                    run.get("rf_source") or "n/a",
                     common.fmt((run.get("collapse") or {}).get("threshold"), ".3g"),
                     common.fmt(first.get("t_s"), ".4g"),
                     common.fmt(first.get("rf_normalized"), ".4f"),
                     common.fmt(last.get("t_s"), ".4g"),
                     common.fmt(last.get("rf_normalized"), ".4f"),
+                    why[:200],
                 ]
             )
     return rows
@@ -443,6 +521,243 @@ def rel(path: Optional[str], root: Path) -> str:
         return str(p.relative_to(root))
     except ValueError:
         return str(p)
+
+
+def variants_fingerprint(outdir: Path) -> Dict[str, Any]:
+    """A comparable fingerprint of every variant row in an output folder.
+
+    All ``cluster_<id>.variants.tsv`` rows are pooled and sorted, *ignoring which
+    cluster file each row came from*: cluster numbering and the number of clusters
+    can legitimately shift between configurations (``--single-cluster`` collapses
+    everything into one), so keying by file name would report a difference where
+    the variant set is the same. Pooling gives the invariant that actually
+    matters - the same set of variants overall.
+
+    Used to tell two kinds of disagreement apart: a switch that changes the
+    *variants* contradicts DECISIONS.md D16, while one that leaves them identical
+    and only moves the distances is the coverage-bookkeeping difference D16
+    records.
+    """
+    outdir = Path(outdir)
+    rows: List[str] = []
+    files = 0
+    problems: List[str] = []
+    if not outdir.is_dir():
+        return {"rows": [], "files": 0, "problems": [f"no such folder: {outdir}"]}
+    for path in sorted(outdir.glob("cluster_*.variants.tsv")):
+        files += 1
+        try:
+            table = common.read_table(path)
+        except common.PrereqError as exc:
+            problems.append(str(exc))
+            continue
+        for row in table.rows:
+            rows.append("|".join(row.get(col, "") for col in table.header))
+    rows.sort()
+    return {"rows": rows, "files": files, "problems": problems}
+
+
+def diff_variants(base: Dict[str, Any], other: Dict[str, Any]) -> Dict[str, Any]:
+    """Multiset difference between two variant fingerprints."""
+    from collections import Counter
+
+    base_counts = Counter(base.get("rows") or [])
+    other_counts = Counter(other.get("rows") or [])
+    only_base = sum((base_counts - other_counts).values())
+    only_other = sum((other_counts - base_counts).values())
+    return {
+        "identical": base_counts == other_counts,
+        "rows_baseline": sum(base_counts.values()),
+        "rows_config": sum(other_counts.values()),
+        "rows_only_in_baseline": only_base,
+        "rows_only_in_config": only_other,
+        "files_baseline": base.get("files"),
+        "files_config": other.get("files"),
+        "problems": list(base.get("problems") or []) + list(other.get("problems") or []),
+    }
+
+
+#: Switches DECISIONS.md D16 states are exactly result-neutral. A distance
+#: difference from any of these is an undocumented defect.
+MUST_BE_EXACTLY_NEUTRAL = ("flat", "no_piece_cache", "no_profile_grouping")
+#: DECISIONS.md D16: `--no-block-skip` keeps the variants identical but changes
+#: the coverage bookkeeping, so its distances may legitimately differ. That is a
+#: finding for section 11, not a defect - but it must be reported, never hidden.
+DOCUMENTED_NON_NEUTRAL = ("no_block_skip",)
+#: `--single-cluster` changes the pivot, so its pair set and coordinates differ
+#: by construction.
+EXPECTED_TO_DIFFER = ("single_cluster",)
+
+
+def check_switch_invariance(
+    by_dataset: Dict[str, Dict[str, Dict[str, Any]]]
+) -> Dict[str, Any]:
+    """Test PROJECT.md section 10.2 property 6 at the benchmark level.
+
+    "Flat mode, hierarchical mode, and every cache switch give identical
+    variants, distances, and trees." Every switch is supposed to change only how
+    much work is done, never the answer. Each configuration's pairwise SNP counts
+    and variant lists are compared with the baseline's, and the result is
+    classified as one of:
+
+    ``identical``            reproduced the baseline exactly
+    ``DEFECT``               differs, and DECISIONS.md does not say it may
+    ``documented deviation`` differs, as DECISIONS.md D16 records for
+                             ``--no-block-skip`` (variants identical, coverage not)
+    ``undocumented``         ``--no-block-skip`` changed the *variants*, which D16
+                             says must stay identical - a new problem
+    ``expected``             ``--single-cluster``, which changes the pivot
+    """
+    out: Dict[str, Any] = {}
+    for dataset, cells in sorted(by_dataset.items()):
+        baseline = cells.get("baseline") or {}
+        baseline_dir = baseline.get("out_dir")
+        entry: Dict[str, Any] = {"configs": {}, "problems": []}
+        if not baseline_dir or not Path(baseline_dir).is_dir():
+            entry["problems"].append(
+                f"no baseline output folder to compare against ({baseline_dir})"
+            )
+            out[dataset] = entry
+            continue
+        base_rows, base_problems = common.load_cluster_distances(Path(baseline_dir))
+        entry["problems"].extend(f"baseline: {p}" for p in base_problems)
+        base_index = {
+            common.pair_key(r["a"], r["b"]): r.get("snps") for r in base_rows
+        }
+        base_variants = variants_fingerprint(Path(baseline_dir))
+        for config, meas in sorted(cells.items()):
+            if config == "baseline":
+                continue
+            other_dir = meas.get("out_dir")
+            record: Dict[str, Any] = {"status": "not run"}
+            if not other_dir or not Path(other_dir).is_dir():
+                record["problems"] = [f"no output folder ({other_dir})"]
+                entry["configs"][config] = record
+                continue
+            rows, problems = common.load_cluster_distances(Path(other_dir))
+            record["problems"] = list(problems)
+            index = {common.pair_key(r["a"], r["b"]): r.get("snps") for r in rows}
+            shared = sorted(set(base_index) & set(index))
+            differing = []
+            max_diff = 0
+            for key in shared:
+                a, b = base_index[key], index[key]
+                if a is None or b is None:
+                    continue
+                if a != b:
+                    differing.append((key, a, b))
+                    max_diff = max(max_diff, abs(int(a) - int(b)))
+            other_variants = variants_fingerprint(Path(other_dir))
+            vdiff = diff_variants(base_variants, other_variants)
+            variants_identical = bool(vdiff["identical"])
+            record["problems"].extend(vdiff["problems"])
+            record.update(
+                {
+                    "pairs_compared": len(shared),
+                    "pairs_only_in_baseline": len(set(base_index) - set(index)),
+                    "pairs_only_in_config": len(set(index) - set(base_index)),
+                    "pairs_differing": len(differing),
+                    "max_abs_diff_snps": max_diff if differing else None,
+                    "variants_identical": variants_identical,
+                    "variant_rows_baseline": vdiff["rows_baseline"],
+                    "variant_rows_config": vdiff["rows_config"],
+                    "variant_rows_only_in_baseline": vdiff["rows_only_in_baseline"],
+                    "variant_rows_only_in_config": vdiff["rows_only_in_config"],
+                    "examples": [
+                        {"pair": list(k), "baseline": a, "config": b}
+                        for k, a, b in differing[:5]
+                    ],
+                }
+            )
+            if not shared:
+                record["status"] = "no comparable pairs"
+            elif not differing and variants_identical:
+                record["status"] = "identical"
+            elif config in EXPECTED_TO_DIFFER:
+                record["status"] = "expected"
+            elif config in DOCUMENTED_NON_NEUTRAL:
+                # D16 records a distance/coverage difference with the variant list
+                # unchanged. If the variants moved too, that is beyond D16.
+                record["status"] = (
+                    "documented deviation" if variants_identical else "UNDOCUMENTED"
+                )
+            else:
+                # Property 6 covers variants, distances and trees, so a variant-only
+                # difference is just as much a failure as a distance difference.
+                record["status"] = "DEFECT"
+                if not differing:
+                    record["problems"].append(
+                        "pairwise distances match the baseline but the variant list "
+                        "does not; property 6 requires both to be identical"
+                    )
+            entry["configs"][config] = record
+        out[dataset] = entry
+    return out
+
+
+def render_invariance(doc: Dict[str, Any]) -> str:
+    out: List[str] = []
+    if not doc:
+        return "_No datasets to compare._"
+    marks = {
+        "identical": "identical",
+        "DEFECT": "**DEFECT**",
+        "documented deviation": "documented deviation (D16)",
+        "UNDOCUMENTED": "**UNDOCUMENTED**",
+        "expected": "expected (different pivot)",
+        "no comparable pairs": "no comparable pairs",
+        "not run": "not run",
+    }
+    for dataset, entry in sorted(doc.items()):
+        out.append(f"### {dataset}")
+        out.append("")
+        rows: List[List[Any]] = []
+        for config, rec in sorted((entry.get("configs") or {}).items()):
+            status = rec.get("status")
+            variant_note = {True: "yes", False: "**no**", None: "n/a"}[
+                rec.get("variants_identical")
+            ]
+            if rec.get("variants_identical") is False:
+                variant_note += (
+                    f" ({common.fmt(rec.get('variant_rows_only_in_baseline'))} rows only "
+                    f"in baseline, {common.fmt(rec.get('variant_rows_only_in_config'))} "
+                    f"only in `{config}`; {common.fmt(rec.get('variant_rows_baseline'))} "
+                    f"vs {common.fmt(rec.get('variant_rows_config'))} total)"
+                )
+            rows.append(
+                [
+                    config,
+                    marks.get(status, status),
+                    common.fmt(rec.get("pairs_compared")),
+                    common.fmt(rec.get("pairs_differing")),
+                    common.fmt(rec.get("max_abs_diff_snps"), ".4g"),
+                    variant_note,
+                    common.fmt(rec.get("pairs_only_in_baseline")),
+                    common.fmt(rec.get("pairs_only_in_config")),
+                ]
+            )
+        out.append(
+            common.markdown_table(
+                ["config", "distances vs baseline", "pairs compared",
+                 "pairs differing", "max |diff| SNPs", "variant lists identical",
+                 "pairs only in baseline", "pairs only in config"],
+                rows,
+            )
+        )
+        out.append("")
+        for config, rec in sorted((entry.get("configs") or {}).items()):
+            if rec.get("examples"):
+                out.append(f"Examples of differing pairs under `{config}`:")
+                out.append("")
+                for ex in rec["examples"]:
+                    out.append(
+                        f"- {ex['pair'][0]} vs {ex['pair'][1]}: baseline {ex['baseline']} "
+                        f"SNPs, `{config}` {ex['config']} SNPs"
+                    )
+                out.append("")
+        for problem in entry.get("problems") or []:
+            out.append(f"> {problem}")
+    return "\n".join(out)
 
 
 def verdict_mark(passed: Optional[bool]) -> str:
@@ -637,11 +952,46 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
             out.append("_No configuration produced a check._")
             out.append("")
             continue
+        # The two bases: what the engine reported, and the same comparison after
+        # the filter every published reference number was produced with.
+        any_filtered = any((info.get("checks_filtered") or []) for info in by_config.values())
+        if any_filtered:
+            filt = next(
+                (info.get("filter") or {} for info in by_config.values() if info.get("filter")),
+                {},
+            )
+            out.append("")
+            out.append(
+                f"Two bases are reported. **As reported** is the engine's own "
+                f"`cluster_<id>.dist.tsv`, which is authoritative. **Filtered** is "
+                f"{filt.get('label') or 'a filtered recomputation'}"
+                + (
+                    f" (pivot contigs >= {filt.get('min_pivot_contig_bp')} bp)"
+                    if filt.get("min_pivot_contig_bp")
+                    else ""
+                )
+                + ", recomputed from `cluster_<id>.variants.tsv` by the benchmark "
+                "scripts. It exists because M-Tato deliberately does not filter "
+                "(section 2 lists no filtering among its goals; section 15 says "
+                "repeats are flagged, not corrected) while every published "
+                "reference number here *is* filtered - so the unfiltered comparison "
+                "is not apples to apples."
+            )
+            if filt.get("caveat"):
+                out.append("")
+                out.append(f"> {filt['caveat']}")
         rows = []
         for config, info in sorted(by_config.items()):
             checks = info.get("checks") or []
+            filtered = {
+                (tuple(c.get("pair") or []) and "-".join(c["pair"])) or c.get("name"): c
+                for c in (info.get("checks_filtered") or [])
+            }
             for check in checks:
                 pair = "-".join(check.get("pair") or []) or check.get("name")
+                fcheck = filtered.get(pair) or {}
+                f_obs = fcheck.get("observed")
+                f_pass = fcheck.get("passed")
                 rows.append(
                     [
                         config,
@@ -657,23 +1007,34 @@ def render_expected(entries: Sequence[Dict[str, Any]]) -> str:
                                 "+.4g",
                             )
                         ),
-                        f"+/- {common.fmt(check.get('tolerance'), '.4g')}",
                         verdict_mark(check.get("passed")),
+                        common.fmt(f_obs, ".4g") if any_filtered else "",
+                        verdict_mark(f_pass) if any_filtered else "",
+                        f"+/- {common.fmt(check.get('tolerance'), '.4g')}",
                         check.get("source") or "",
                     ]
                 )
-            status = info.get("status")
-            rows.append(
-                [f"`{config}` overall", "", "", "", "", "", f"**{status}**",
-                 "; ".join(info.get("problems") or [])[:160]]
-            )
+            filt_info = info.get("filter") or {}
+            note = "; ".join(info.get("problems") or [])[:160]
+            if any_filtered and filt_info:
+                note = (
+                    f"variants {common.fmt(filt_info.get('variants_used'))} used / "
+                    f"{common.fmt(filt_info.get('variants_excluded'))} excluded by the "
+                    f"filter. {note}"
+                ).strip()
+            header = [f"`{config}` overall", "", "", "", "",
+                      f"**{info.get('status')}**"]
+            if any_filtered:
+                header.append("")
+                header.append(f"**{info.get('status_filtered')}**")
+            header += ["", note]
+            rows.append(header)
         out.append("")
-        out.append(
-            common.markdown_table(
-                ["config", "pair", "expected", "observed", "diff", "tolerance", "verdict", "provenance / note"],
-                rows,
-            )
-        )
+        head = ["config", "pair", "expected", "as reported", "diff", "verdict"]
+        if any_filtered:
+            head += ["filtered", "verdict"]
+        head += ["tolerance", "provenance / note"]
+        out.append(common.markdown_table(head, rows))
         out.append("")
     return "\n".join(out)
 
@@ -765,6 +1126,7 @@ def render_report(
     by_dataset: Dict[str, Dict[str, Dict[str, Any]]],
     verdicts: Sequence[common.Verdict],
     expected_entries: Sequence[Dict[str, Any]],
+    invariance_doc: Dict[str, Any],
     accuracy_doc: Dict[str, Any],
     baselines_doc: Dict[str, Any],
     datasets_meta: Sequence[Dict[str, Any]],
@@ -965,8 +1327,67 @@ def render_report(
     out.append(render_expected(expected_entries))
     out.append("")
 
+    # ---- switch invariance ----------------------------------------------
+    out.append("## 6. Switch invariance: do the switches change the answer?")
+    out.append("")
+    out.append(
+        "PROJECT.md section 10.2 property 6 requires that flat mode, hierarchical "
+        "mode and every cache switch give **identical** variants, distances and "
+        "trees: each switch removes work, not accuracy. This compares every "
+        "configuration's pairwise SNP counts *and* its variant lists with the "
+        "baseline's. A switch that is faster but wrong has not been shown to pay, "
+        "so a difference is classified rather than quietly averaged away:"
+    )
+    out.append("")
+    out.append(
+        "| classification | meaning |\n|---|---|\n"
+        "| identical | reproduced the baseline exactly |\n"
+        f"| **DEFECT** | differs, and nothing in DECISIONS.md says it may "
+        f"({', '.join('`' + m + '`' for m in MUST_BE_EXACTLY_NEUTRAL)}) |\n"
+        "| documented deviation (D16) | `no_block_skip` changed distances while its "
+        "variant list stayed identical - exactly what DECISIONS.md D16 records |\n"
+        "| **UNDOCUMENTED** | `no_block_skip` changed the *variants* too, which D16 "
+        "says must stay identical |\n"
+        "| expected (different pivot) | `single_cluster` compares every genome to one "
+        "pivot, so its pair set and coordinates differ by construction |\n"
+    )
+    counts: Dict[str, int] = {}
+    for entry in invariance_doc.values():
+        for rec in (entry.get("configs") or {}).values():
+            status = str(rec.get("status"))
+            counts[status] = counts.get(status, 0) + 1
+    n_defect = counts.get("DEFECT", 0) + counts.get("UNDOCUMENTED", 0)
+    n_documented = counts.get("documented deviation", 0)
+    n_identical = counts.get("identical", 0)
+    if n_defect:
+        out.append(
+            f"> **{n_defect} configuration/dataset combination(s) differ from the "
+            "baseline with no documented reason.** Section 10.2 property 6 is not "
+            "satisfied, so the timing differences in section 3 cannot be read as "
+            "pure optimisation gains until this is fixed."
+        )
+        out.append("")
+    if n_documented:
+        out.append(
+            f"> `no_block_skip` differs on {n_documented} dataset(s) with its variant "
+            "list unchanged. That is the coverage-bookkeeping difference recorded in "
+            "DECISIONS.md D16, not a defect - but per D16 it is reported here "
+            "alongside its speed difference, and it means `--no-block-skip` is **not** "
+            "a pure performance switch: block skipping costs a measurable amount of "
+            "coverage on fragmented assemblies."
+        )
+        out.append("")
+    if not n_defect and not n_documented:
+        out.append(
+            f"> Every optimisation switch reproduced the baseline exactly "
+            f"({n_identical} combination(s)): section 10.2 property 6 holds."
+        )
+        out.append("")
+    out.append(render_invariance(invariance_doc))
+    out.append("")
+
     # ---- accuracy over time ---------------------------------------------
-    out.append("## 6. The key figure: tree accuracy versus elapsed time")
+    out.append("## 7. The key figure: tree accuracy versus elapsed time")
     out.append("")
     out.append(
         "Accuracy at a given instant is the Robinson-Foulds distance between the "
@@ -1018,7 +1439,7 @@ def render_report(
             common.markdown_table(
                 ["dataset", "config", "status", "points", "no RF", "RF source",
                  "collapse threshold", "first t (s)", "first RF (norm)",
-                 "last t (s)", "last RF (norm)"],
+                 "last t (s)", "last RF (norm)", "why empty (if it is)"],
                 endpoint_rows,
             )
         )
@@ -1028,7 +1449,7 @@ def render_report(
     out.append("")
 
     # ---- baselines -------------------------------------------------------
-    out.append("## 7. Outside baselines")
+    out.append("## 8. Outside baselines")
     out.append("")
     out.append(
         "Linux only, not part of the program (PROJECT.md section 11). Neither "
@@ -1041,7 +1462,7 @@ def render_report(
     out.append("")
 
     # ---- failures --------------------------------------------------------
-    out.append("## 8. Failures, gaps and data-quality notes")
+    out.append("## 9. Failures, gaps and data-quality notes")
     out.append("")
     out.append(
         "Everything that did not work, or that worked only partially, is listed "
@@ -1091,7 +1512,7 @@ def render_report(
         out.append("")
 
     # ---- performance targets --------------------------------------------
-    out.append("## 9. Performance targets (PROJECT.md section 10.4)")
+    out.append("## 10. Performance targets (PROJECT.md section 10.4)")
     out.append("")
     out.append(
         "Targets are reported against, not gated. The reference machine is 8 "
@@ -1126,7 +1547,7 @@ def render_report(
     out.append("")
 
     # ---- reproduction ---------------------------------------------------
-    out.append("## 10. How to reproduce")
+    out.append("## 11. How to reproduce")
     out.append("")
     out.append("```bash")
     out.append("export PATH=\"$HOME/.cargo/bin:$PATH\"")
@@ -1174,6 +1595,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, default=None, help="report path (default <repo>/REPORT.md)")
     p.add_argument("--figures-dir", type=Path, default=None, help="where figures/CSVs go")
     p.add_argument("--baselines-dir", type=Path, default=None, help="baseline outputs (default <work>/baselines)")
+    p.add_argument(
+        "--expected-dir",
+        type=Path,
+        default=None,
+        help="folder of expected-values JSON files for the acceptance check "
+        "(default <repo>/scripts/expected)",
+    )
     p.add_argument("--no-figures", action="store_true", help="do not regenerate accuracy curves")
     p.add_argument("--collapse-snps", type=float, default=0.5, help="RF collapse threshold in SNPs")
     p.add_argument("--max-points", type=int, default=400, help="cap scored points per configuration")
@@ -1252,7 +1680,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         )
 
-    expected_entries, expected_problems = run_expected_checks(work, summary, by_dataset)
+    expected_entries, expected_problems = run_expected_checks(
+        work, summary, by_dataset, expected_dir=args.expected_dir
+    )
     accuracy_doc = build_accuracy_curves(
         by_dataset,
         work,
@@ -1264,12 +1694,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for problem in expected_problems:
         accuracy_doc.setdefault("problems", []).append(problem)
     baselines_doc = collect_baselines(work)
+    invariance_doc = check_switch_invariance(by_dataset)
 
     text = render_report(
         summary,
         by_dataset,
         verdicts,
         expected_entries,
+        invariance_doc,
         accuracy_doc,
         baselines_doc,
         datasets_meta,

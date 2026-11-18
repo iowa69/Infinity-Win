@@ -6,6 +6,24 @@
   "description": "Ground truth for the acceptance check in REPORT.md. These three numbers were produced by analyses that predate M-Tato and are independent of it: a SKA2 split-k-mer distance on trimmed reads, and a reference-mapping SNP call after filtering. They are an acceptance check, not a target to tune against.",
   "abs_tolerance_snps": 1,
   "tolerance_rationale": "M-Tato compares ASSEMBLIES while the reference numbers come from READS (SKA2) and from a mapping-plus-filtering pipeline. Assembly errors, repeat collapsing, and differences in filtering move a 0-2 SNP distance by one or two counts without any of the methods being wrong. A discrepancy of exactly +/-1 SNP is therefore accepted and still printed; anything larger fails. make_report.py prints expected, observed and the difference for every pair, so a near-miss is never hidden.",
+  "comparison_basis": {
+    "primary": {
+      "id": "as_reported",
+      "label": "M-Tato as reported (unfiltered)",
+      "source": "cluster_<id>.dist.tsv, the engine's own distance",
+      "note": "This is the authoritative number: it applies the comparable-coverage restriction of PROJECT.md section 6.9, which a recomputation from the variant list does not."
+    },
+    "secondary": {
+      "id": "filtered_contigs_5kb",
+      "label": "Recomputed from variants, pivot contigs >= 5 kb only",
+      "min_pivot_contig_bp": 5000,
+      "exclude_flags": [],
+      "source": "cluster_<id>.variants.tsv, recomputed by scripts/common.recompute_pairwise_snps()",
+      "rationale": "Every published reference number in this file is FILTERED: SKA2 restricts itself to the shared k-mer core, and the mapping pipeline drops high-depth and low-identity regions (32 raw SNPs -> 2 filtered for isolate-A-isolate-B). M-Tato deliberately does not filter (PROJECT.md section 2 lists no filtering among its goals; section 15 says repeats are flagged, not corrected). Comparing unfiltered output against filtered references is therefore not apples to apples, so the same comparison is also run on a filtered basis: variants on pivot contigs shorter than 5 kb are dropped. The contig length is read from the contig name (e.g. isolate-B_contig37_len1448_cov139.5).",
+      "provenance": "docs/REAL_DATA_VALIDATION.md - the extra differences between isolate-A and isolate-B all sit on one 1,448 bp pivot contig at 139.5x coverage, about 3.4x the chromosomal depth, i.e. a high-copy element that every reference pipeline excludes.",
+      "caveat": "This is a recomputation by the benchmark scripts, not an engine output. It counts positions where two members' alleles differ and does NOT apply the comparable-coverage restriction of section 6.9, so its unfiltered value can exceed the engine's own. Treat it as evidence about the filter, never as a replacement for the engine's distance."
+    }
+  },
   "pairs": [
     {
       "name": "isolate-A-isolate-B",

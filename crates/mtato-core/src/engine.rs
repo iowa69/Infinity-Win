@@ -364,7 +364,18 @@ fn median_length(records: &[GenomeRecord]) -> u64 {
         return 0;
     }
     lens.sort_unstable();
-    lens[lens.len() / 2]
+    let mid = lens.len() / 2;
+    if lens.len() % 2 == 1 {
+        return lens[mid];
+    }
+    // An even count has no single middle element, so average the two. Taking
+    // the upper one alone made the 500 kb threshold of 6.1 depend on whether
+    // the genome count happened to be even: for {499_998, 500_001} the true
+    // median is 499_999.5, which is under the threshold and must fire the
+    // small-genome rule, but the upper element is 500_001 and does not.
+    // Integer division rounds down, which cannot make the rule fire when the
+    // true median is at or above the threshold.
+    (lens[mid - 1] + lens[mid]) / 2
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +582,32 @@ pub struct ClusterResult {
     pub pivot_len: u64,
     /// Contig names of the cluster's pivot, for the variant files.
     pub pivot_contig_names: Vec<String>,
+    /// Members dropped at Focus 2 because their FASTA could not be read. Each
+    /// is also emitted as a warning; carrying it here lets `apply_cluster_result`
+    /// put it in `run.json`'s notes, so a run that silently lost a member is
+    /// impossible.
+    pub notes: Vec<String>,
+}
+
+/// Move the clusters the user selected to the front of the work order.
+///
+/// 6.11.3: "a cluster the user selects jumps to the front". `order` holds
+/// indices into `clusters` while `wanted` holds cluster ids, so the lookup
+/// translates one into the other. Walking the requests in reverse and inserting
+/// each at position 0 leaves them at the front in the order they were made.
+///
+/// The element removed from `order` is the element put back at the front:
+/// nothing is dropped and nothing is duplicated. Inserting the *position* that
+/// was found instead of the cluster index that was removed silently drops the
+/// selected cluster from this pass and refines an unrelated one first, which
+/// cannot panic (a position is always a valid index here) and so fails quietly.
+fn prioritize(order: &mut Vec<usize>, clusters: &[Cluster], wanted: &[u32]) {
+    for want in wanted.iter().rev() {
+        if let Some(pos) = order.iter().position(|&i| clusters[i].id == *want) {
+            let ci = order.remove(pos);
+            order.insert(0, ci);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -615,15 +652,7 @@ fn refine_clusters(
                 .cmp(&clustering.clusters[a].size())
                 .then(a.cmp(&b))
         });
-        for want in prioritised.iter().rev() {
-            if let Some(pos) = order
-                .iter()
-                .position(|&i| clustering.clusters[i].id == *want)
-            {
-                order.remove(pos);
-                order.insert(0, pos);
-            }
-        }
+        prioritize(&mut order, &clustering.clusters, &prioritised);
 
         let mut worked = false;
         for ci in order {
@@ -673,7 +702,16 @@ fn refine_one_cluster(
     let members: Vec<u32> = cluster.non_pivot().collect();
 
     if members.is_empty() {
-        // "Clusters with a single genome need no index" (6.5).
+        // "Clusters with a single genome need no index" (6.5). It still needs a
+        // tree. `build_full_tree` grafts the cluster tree over the backbone
+        // leaf that names the pivot, and `Tree::default()` is the *empty* tree,
+        // so leaving it at the default deleted this genome from `tree.nwk` —
+        // and under `--focus0-only` (D11) every cluster is a singleton, which
+        // produced a `tree.nwk` with no leaves at all.
+        let leaf = Tree::Leaf {
+            name: results.names[pivot_id as usize].clone(),
+            len: 0.0,
+        };
         return Ok(ClusterResult {
             focus: 2,
             pivot_len: pivot_rec.stats.length,
@@ -682,6 +720,8 @@ fn refine_one_cluster(
                 .get(&pivot_id)
                 .cloned()
                 .unwrap_or_default(),
+            snp_tree: leaf.clone(),
+            subs_tree: leaf,
             ..Default::default()
         });
     }
@@ -776,25 +816,59 @@ fn refine_one_cluster(
     }
 
     // ---- Focus 2: resolve every difference piece (6.11.3) ----
-    let resolved: Vec<Option<MemberComparison>> = pool.install(|| {
+    let resolved: Vec<Result<Option<MemberComparison>, (u32, String)>> = pool.install(|| {
         f1.par_iter()
             .map(|c1| {
                 if controls.cancelled() {
-                    return None;
+                    return Ok(None);
                 }
                 let rec = &results.records[c1.genome_id as usize];
-                Some(resolve_focus1(&pivot, rec, &c1.focus1, params, &cache))
+                match resolve_focus1(&pivot, rec, &c1.focus1, params, &cache) {
+                    Ok(cmp) => Ok(Some(cmp)),
+                    // Carry the genome id out with the error so that the
+                    // warnings and the notes can be emitted in genome order.
+                    Err(e) => Err((c1.genome_id, e)),
+                }
             })
             .collect()
     });
 
     let mut comparisons: Vec<(u32, MemberComparison)> = Vec::new();
-    for c in resolved.into_iter().flatten() {
-        counters.merge(&c.counters);
-        comparisons.push((c.genome_id, c));
+    let mut dropped: Vec<(u32, String)> = Vec::new();
+    for r in resolved {
+        match r {
+            Ok(Some(c)) => {
+                counters.merge(&c.counters);
+                comparisons.push((c.genome_id, c));
+            }
+            // Cancelled: skip quietly, the whole run is being wound down.
+            Ok(None) => {}
+            Err(e) => dropped.push(e),
+        }
+    }
+    // Warn in genome order rather than in worker-completion order, so that
+    // neither `events.jsonl` nor `run.json`'s notes depend on the thread count
+    // (section 0 rule 3). The Focus 1 pass warns from inside its workers, which
+    // is fine there only because a failed read removes the genome from `f1`
+    // entirely; here the genome is in the tree, so the warning has to be
+    // attributable.
+    dropped.sort_by_key(|(id, _)| *id);
+    let mut notes: Vec<String> = Vec::with_capacity(dropped.len());
+    for (id, e) in dropped {
+        let msg = format!(
+            "cluster {}: dropping member {} from Focus 2: {e}; \
+             it is reported as having no variants, which is not a measurement",
+            cluster.id, results.names[id as usize]
+        );
+        sink.warn(msg.clone());
+        notes.push(msg);
     }
     comparisons.sort_by_key(|x| x.0);
-    counters.cache_hits = cache.hits();
+    // `cache_hits` is deliberately NOT taken from `cache.hits()`. The atomic
+    // counts every successful lookup by every worker, while the merged
+    // per-worker counters already record exactly one hit per piece resolved
+    // from the cache. Overwriting the sum with the atomic doubled the hit count
+    // and made it depend on how the workers raced.
 
     let mut profiles: Vec<Profile> = vec![Profile::pivot(pivot_id)];
     for (_, cmp) in &comparisons {
@@ -884,6 +958,7 @@ fn refine_one_cluster(
         counters,
         pivot_len: pivot.total_len,
         pivot_contig_names: pivot_names,
+        notes,
     })
 }
 
@@ -900,62 +975,106 @@ fn piece_view(p: &crate::compare::DiffPiece, pivot_names: &[String]) -> PieceVie
     }
 }
 
+/// Read a member's FASTA for the Focus 2 pass, naming the file in any error.
+///
+/// A member that cannot be read has to be reported, never silently dropped:
+/// dropping it would leave a genome that looks identical to its pivot in
+/// `genomes.tsv`, in `cluster_<id>.dist.tsv` and in the tree, which is a wrong
+/// answer presented as a right one (section 0 rule 8).
+fn read_member(rec: &GenomeRecord) -> Result<GenomeData, String> {
+    crate::fasta::read_genome(&rec.path).map_err(|e| format!("reading {}: {e}", rec.path.display()))
+}
+
 /// Turn a Focus 1 result into an exact one without repeating steps A-D.
 ///
 /// A member whose difference pieces are all already in the cache is not read
 /// from disk again at all, which is the memory rule of 6.10.
+///
+/// The error is a read failure that names the file; the caller warns about it
+/// and drops the member from the cluster rather than passing it off as
+/// identical to the pivot.
 fn resolve_focus1(
     pivot: &PivotIndex,
     rec: &GenomeRecord,
     f1: &Focus1,
     params: &Parameters,
     cache: &PieceCache,
-) -> MemberComparison {
+) -> Result<MemberComparison, String> {
     // Fresh counters: the Focus 1 pass already accounted for steps A-D and the
     // caller merged those. Counting them again here would double every number
     // the experiment of section 11 reports.
     let mut counters = Counters::default();
     let dp = DiffParams::from(params);
 
-    let needs_data = f1
-        .pieces
-        .iter()
-        .any(|p| cache.cached(&p.cache_key()).is_none());
-    let data = if needs_data {
-        crate::fasta::read_genome(&rec.path).ok()
+    // `contains`, not `cached`: this pre-pass only decides whether the member's
+    // FASTA has to be read, and probing must not record a hit on top of the one
+    // the resolution loop records for the same piece. Counting both drove
+    // `cache_hits` to 2N for N pieces in exactly the case the cache exists for
+    // — a mutation shared by a whole clade, where `.any()` never short-circuits
+    // and so walks every piece before the loop walks every piece again.
+    let needs_data = f1.pieces.iter().any(|p| !cache.contains(&p.cache_key()));
+    // Loaded eagerly when some piece is going to miss, and lazily below as a
+    // fallback, so that no piece is ever skipped for want of sequence data.
+    let mut data: Option<GenomeData> = if needs_data {
+        Some(read_member(rec)?)
     } else {
         None
     };
 
-    let mut variants = Vec::new();
+    // Seed from the Focus 1 variants. The SNPs that the ungapped end extension
+    // of 6.6 step D found are settled at Focus 1 and are not re-derived here,
+    // so starting from an empty list would throw every one of them away —
+    // 6.6 D says "mismatches inside the kept part are SNPs".
+    let mut variants = f1.variants.clone();
     let mut not_called: Vec<(u32, u64, u64)> = Vec::new();
+    // Cache accounting that cannot move with the thread count. Counting a hit
+    // per successful lookup is racy: two workers that reach a mutation shared
+    // by their two members at the same moment both miss, both resolve it, and
+    // only one wins the insert, so the total depends on the schedule — measured
+    // as 30 or 31 for the same 6-genome input run twice at 8 threads, and 24
+    // against 31 across thread counts. What *is* schedule-independent is that
+    // each distinct piece key is won exactly once, so count resolutions and
+    // wins and report the difference. At one thread that is exactly the number
+    // of lookups that hit; at any thread count it is the number of piece
+    // resolutions the cache made redundant, which is the benefit section 11
+    // reports. With the cache off, `insert` wins every time and this is 0.
+    let mut resolutions = 0u64;
+    let mut first_computations = 0u64;
     for p in &f1.pieces {
         let key = p.cache_key();
+        resolutions += 1;
         let result = match cache.cached(&key) {
-            Some((vs, ns, failed)) => {
-                counters.cache_hits += 1;
-                DiffResult {
-                    variants: vs,
-                    n_positions: ns,
-                    align_failed: failed,
-                    used_dp: false,
-                }
-            }
+            Some((vs, ns, failed)) => DiffResult {
+                variants: vs,
+                n_positions: ns,
+                align_failed: failed,
+                used_dp: false,
+            },
             None => {
-                let alt = match &data {
-                    Some(d) => match d.contigs.get(p.gcontig as usize) {
-                        Some(c) => p.alt(&c.seq),
-                        None => continue,
-                    },
+                if data.is_none() {
+                    data = Some(read_member(rec)?);
+                }
+                let d = data.as_ref().expect("just loaded");
+                let alt = match d.contigs.get(p.gcontig as usize) {
+                    Some(c) => p.alt(&c.seq),
+                    // Cannot happen: the piece came from this same genome's
+                    // Focus 1 pass, so the contig index is in range. This is a
+                    // last resort, not a way to swallow a read error.
                     None => continue,
                 };
                 let ref_slice = &pivot.contig_seq(p.pcontig)[p.ps as usize..p.pe as usize];
-                counters.bases_aligned += ref_slice.len().max(alt.len()) as u64;
                 let r = crate::variant::diff(ref_slice, &alt, &dp);
-                if r.used_dp {
-                    counters.alignments_run += 1;
+                // Charge the alignment to whoever populated the slot, not to
+                // every worker that missed it. These two counters therefore
+                // mean "distinct pieces aligned", deliberately, so that they
+                // are identical at any thread count (section 0 rule 3).
+                if cache.insert(key, r.clone()) {
+                    first_computations += 1;
+                    counters.bases_aligned += ref_slice.len().max(alt.len()) as u64;
+                    if r.used_dp {
+                        counters.alignments_run += 1;
+                    }
                 }
-                cache.insert(key, r.clone());
                 r
             }
         };
@@ -966,6 +1085,9 @@ fn resolve_focus1(
             not_called.push((p.pcontig, p.ps + npos as u64, p.ps + npos as u64 + 1));
         }
     }
+    counters.cache_hits = resolutions.saturating_sub(first_computations);
+    // The union of the end-extension SNPs and the resolved pieces is sorted and
+    // de-duplicated, so a position found by both routes is emitted once.
     variants.sort_by(|a, b| {
         (a.pivot_contig, a.pivot_start, a.pivot_end, a.kind as u8)
             .cmp(&(b.pivot_contig, b.pivot_start, b.pivot_end, b.kind as u8))
@@ -976,10 +1098,26 @@ fn resolve_focus1(
 
     let mut focus1 = f1.clone();
     focus1.not_called.extend(not_called);
-    let novel_bp = focus1.novel_bp;
+    // `novel_bp` is recomputed here rather than inherited from the Focus 1
+    // clone: at Focus 1 no insertion had been resolved yet, so its
+    // inserted-bp term was zero by construction, while 6.8 counts member bases
+    // that are unplaced OR inserted. Inheriting it made `genomes.tsv` omit
+    // every inserted base.
+    let unplaced_bp: u64 = focus1
+        .unplaced
+        .iter()
+        .map(|&(_, s, e)| e.saturating_sub(s))
+        .sum();
+    let inserted_bp: u64 = variants
+        .iter()
+        .filter(|v| v.kind == crate::variant::VariantKind::Insertion)
+        .map(|v| v.alt_allele.len() as u64)
+        .sum();
+    let novel_bp = unplaced_bp + inserted_bp;
+    focus1.novel_bp = novel_bp;
     let cov = coverage(pivot, &focus1, &variants);
 
-    MemberComparison {
+    Ok(MemberComparison {
         genome_id: rec.id,
         novel_bp,
         focus1,
@@ -987,7 +1125,7 @@ fn resolve_focus1(
         duplicated: cov.duplicated,
         variants,
         counters,
-    }
+    })
 }
 
 fn sub_matrix(m: &DistanceMatrix, reps: &[usize]) -> DistanceMatrix {
@@ -1014,6 +1152,9 @@ fn sub_matrix(m: &DistanceMatrix, reps: &[usize]) -> DistanceMatrix {
 
 fn apply_cluster_result(results: &mut RunResults, cluster: &Cluster, res: &ClusterResult) {
     results.counters.merge(&res.counters);
+    // Members dropped at Focus 2 because their FASTA could not be read have to
+    // show up in `run.json`, not only in the transient warning stream.
+    results.notes.extend(res.notes.iter().cloned());
     results
         .cluster_trees
         .insert(cluster.id, res.subs_tree.clone());
@@ -1055,7 +1196,14 @@ pub fn build_full_tree(results: &RunResults) -> Tree {
         };
         let pivot_name = &results.names[cluster.pivot as usize];
         if let Some(sub) = results.cluster_trees.get(&id) {
-            graft(&mut full, pivot_name, sub.clone());
+            // Never graft an empty subtree. `Tree::default()` has no leaves, and
+            // grafting it would replace the backbone leaf with nothing and
+            // delete that genome from `tree.nwk`. A singleton cluster now gets
+            // a real one-leaf tree from `refine_one_cluster`, so this is the
+            // belt-and-braces half of the same fix.
+            if sub.leaf_count() > 0 {
+                graft(&mut full, pivot_name, sub.clone());
+            }
         }
     }
     full
@@ -1090,6 +1238,107 @@ mod tests {
             .collect();
         assert_eq!(median_length(&recs), 5);
         assert_eq!(median_length(&[]), 0);
+    }
+
+    #[test]
+    fn median_length_averages_the_two_middle_values_of_an_even_count() {
+        // 6.1's small-genome rule turns on "under 500 kb", so a two-genome run
+        // straddling the threshold has to be judged on the real median.
+        let recs: Vec<GenomeRecord> = [499_998u64, 500_001]
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| {
+                let mut r = GenomeRecord::new(
+                    i as u32,
+                    format!("g{i}"),
+                    PathBuf::from("x"),
+                    Default::default(),
+                    vec![],
+                );
+                r.stats.length = l;
+                r
+            })
+            .collect();
+        assert_eq!(median_length(&recs), 499_999);
+        assert!(
+            Parameters::default()
+                .apply_small_genome_rule(median_length(&recs))
+                .is_some(),
+            "the true median is under 500 kb, so the rule must fire"
+        );
+        // At or above the threshold the rule must stay quiet: rounding the
+        // average down may not invent a small-genome run.
+        assert_eq!(median_length(&recs[..1]), 499_998);
+        let big: Vec<GenomeRecord> = [500_000u64, 500_001]
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| {
+                let mut r = GenomeRecord::new(
+                    i as u32,
+                    format!("g{i}"),
+                    PathBuf::from("x"),
+                    Default::default(),
+                    vec![],
+                );
+                r.stats.length = l;
+                r
+            })
+            .collect();
+        assert_eq!(median_length(&big), 500_000);
+        assert!(Parameters::default()
+            .apply_small_genome_rule(500_000)
+            .is_none());
+    }
+
+    #[test]
+    fn prioritize_puts_the_selected_cluster_first_and_loses_nothing() {
+        // Cluster ids are deliberately NOT equal to their positions in the
+        // vector. The previous implementation inserted the position it had
+        // found instead of the cluster index it had just removed, which passes
+        // unnoticed whenever ids happen to equal indices — so this test uses
+        // ids 7, 3, 9 where that cannot hold.
+        let clusters = vec![
+            Cluster {
+                id: 7,
+                pivot: 0,
+                members: vec![0],
+            },
+            Cluster {
+                id: 3,
+                pivot: 1,
+                members: vec![1],
+            },
+            Cluster {
+                id: 9,
+                pivot: 2,
+                members: vec![2],
+            },
+        ];
+        // Work order as `refine_clusters` builds it: indices into `clusters`.
+        let mut order = vec![0usize, 1, 2];
+
+        prioritize(&mut order, &clusters, &[9]);
+        assert_eq!(clusters[order[0]].id, 9, "the selected cluster jumps first");
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2], "no cluster lost or duplicated");
+
+        // A fresh batch of requests lands at the front in the order it was
+        // made, and nothing is lost.
+        prioritize(&mut order, &clusters, &[9, 3]);
+        assert_eq!(clusters[order[0]].id, 9);
+        assert_eq!(clusters[order[1]].id, 3);
+        assert_eq!(clusters[order[2]].id, 7, "the unselected cluster stays");
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2]);
+
+        // An id that is not in this clustering changes nothing.
+        let before = order.clone();
+        prioritize(&mut order, &clusters, &[42]);
+        assert_eq!(order, before);
+        prioritize(&mut order, &clusters, &[]);
+        assert_eq!(order, before);
     }
 
     #[test]
@@ -1217,5 +1466,179 @@ mod tests {
         let (sink, _rx) = event_bus();
         let (_tx, cmd_rx) = unbounded::<Command>();
         assert!(run(cfg, sink, cmd_rx).is_err());
+    }
+
+    /// A pivot, a member that differs from it in the middle, and a Focus 1
+    /// comparison of the two, for the `resolve_focus1` tests below.
+    fn focus1_with_pieces() -> (PivotIndex, GenomeData, Focus1, Parameters) {
+        let params = Parameters {
+            k: 21,
+            densities: [64, 16, 4],
+            ..Default::default()
+        };
+        // Deterministic pseudo-random and N-free. The k-mers have to be unique
+        // enough for the pivot's anchor map to keep them — it drops repeated
+        // hashes (6.5) — otherwise no shared point, and so no piece, would ever
+        // arise and the tests below would prove nothing.
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut base: Vec<u8> = Vec::with_capacity(4000);
+        for _ in 0..4000 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            base.push(b"ACGT"[((x >> 33) % 4) as usize]);
+        }
+        let pivot_data = GenomeData {
+            name: "pivot".into(),
+            contigs: vec![crate::fasta::Contig {
+                name: "c0".into(),
+                seq: base.clone(),
+            }],
+        };
+        let pivot = PivotIndex::new("pivot", &pivot_data, &params);
+        // The member differs over a stretch in the middle, so that stretch becomes
+        // a difference piece rather than a matched block.
+        let mut member = base;
+        for i in 1800..1860 {
+            let c = crate::seq::code(member[i]);
+            member[i] = b"ACGT"[(c + 1) as usize % 4];
+        }
+        let member_data = GenomeData {
+            name: "member".into(),
+            contigs: vec![crate::fasta::Contig {
+                name: "c0".into(),
+                seq: member,
+            }],
+        };
+        let cache = PieceCache::new(true);
+        let cmp = compare_member(&pivot, &member_data, 1, &params, &cache, false);
+        (pivot, member_data, cmp.focus1, params)
+    }
+
+    #[test]
+    fn a_member_that_cannot_be_read_at_focus_2_is_an_error_naming_the_file() {
+        // The Focus 2 pass used to swallow the read error with `.ok()` and then
+        // skip every piece, which produced a member with zero variants and no
+        // warning at all — indistinguishable from a genome identical to its
+        // pivot in `genomes.tsv`, in `cluster_<id>.dist.tsv` and in the tree.
+        let (pivot, _member, f1, params) = focus1_with_pieces();
+        assert!(
+            !f1.pieces.is_empty(),
+            "the test needs at least one difference piece"
+        );
+        let missing = GenomeRecord::new(
+            1,
+            "member".into(),
+            PathBuf::from("/nonexistent/mtato-focus2-member.fasta"),
+            Default::default(),
+            vec![],
+        );
+        let cache = PieceCache::new(true);
+        let err = resolve_focus1(&pivot, &missing, &f1, &params, &cache).unwrap_err();
+        assert!(err.contains("reading"), "{err}");
+        assert!(
+            err.contains("/nonexistent/mtato-focus2-member.fasta"),
+            "the message must name the file: {err}"
+        );
+    }
+
+    #[test]
+    fn a_fully_cached_member_is_not_read_from_disk_at_focus_2() {
+        // 6.10: "a member whose difference pieces are all in the piece cache
+        // does not need to be re-read for Focus 2". Warm the cache, then point
+        // the record at a file that does not exist: the resolution must still
+        // succeed, which is only possible if no read was attempted.
+        let (pivot, member_data, f1, params) = focus1_with_pieces();
+        let cache = PieceCache::new(true);
+        let dp = DiffParams::from(&params);
+        let seq = &member_data.contigs[0].seq;
+        for p in &f1.pieces {
+            let alt = p.alt(seq);
+            let ref_slice = &pivot.contig_seq(p.pcontig)[p.ps as usize..p.pe as usize];
+            cache.insert(
+                p.cache_key(),
+                crate::variant::diff(ref_slice, &alt, &dp),
+            );
+        }
+        assert_eq!(cache.len(), f1.pieces.len(), "every piece is warm");
+
+        let gone = GenomeRecord::new(
+            1,
+            "member".into(),
+            PathBuf::from("/nonexistent/mtato-focus2-cached.fasta"),
+            Default::default(),
+            vec![],
+        );
+        let cmp = resolve_focus1(&pivot, &gone, &f1, &params, &cache)
+            .expect("a fully cached member needs no read");
+        assert_eq!(
+            cmp.counters.cache_hits as usize,
+            f1.pieces.len(),
+            "every piece was served from the cache"
+        );
+        assert_eq!(cmp.counters.bases_aligned, 0, "nothing was aligned");
+        assert_eq!(cmp.counters.alignments_run, 0);
+        assert!(
+            !cmp.variants.is_empty(),
+            "the cached variants still have to be reported"
+        );
+    }
+
+    #[test]
+    fn cache_hits_are_derived_so_they_do_not_depend_on_the_schedule() {
+        // Half of one member's pieces are already warm. The hit count must be
+        // exactly the number of resolutions that did not have to be the first
+        // computation of their key, and the alignment work must be charged only
+        // for the ones that were — which is what makes both numbers identical
+        // at any thread count.
+        let (pivot, member_data, f1, params) = focus1_with_pieces();
+        let dir = std::env::temp_dir().join(format!("mtato-focus2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("member.fasta");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, ">c0").unwrap();
+            let seq = &member_data.contigs[0].seq;
+            for chunk in seq.chunks(60) {
+                writeln!(f, "{}", std::str::from_utf8(chunk).unwrap()).unwrap();
+            }
+        }
+        let rec = GenomeRecord::new(1, "member".into(), path, Default::default(), vec![]);
+
+        let cache = PieceCache::new(true);
+        let dp = DiffParams::from(&params);
+        let seq = &member_data.contigs[0].seq;
+        let half = f1.pieces.len() / 2;
+        for p in &f1.pieces[..half] {
+            let alt = p.alt(seq);
+            let r = &pivot.contig_seq(p.pcontig)[p.ps as usize..p.pe as usize];
+            cache.insert(p.cache_key(), crate::variant::diff(r, &alt, &dp));
+        }
+        // What a strictly sequential resolution would hit: a piece hits when its
+        // key was already warm or was computed earlier in this same walk.
+        let mut seen: HashSet<_> = f1.pieces[..half].iter().map(|p| p.cache_key()).collect();
+        let mut expected = 0u64;
+        for p in &f1.pieces {
+            if !seen.insert(p.cache_key()) {
+                expected += 1;
+            }
+        }
+
+        let cmp = resolve_focus1(&pivot, &rec, &f1, &params, &cache).unwrap();
+        assert_eq!(cmp.counters.cache_hits, expected, "hits are the redundancies");
+        assert!(
+            cmp.counters.bases_aligned > 0,
+            "the cold pieces were aligned"
+        );
+
+        // Everything is warm now, so a second pass hits on every piece, aligns
+        // nothing, and must give the same answer.
+        let again = resolve_focus1(&pivot, &rec, &f1, &params, &cache).unwrap();
+        assert_eq!(again.counters.cache_hits, f1.pieces.len() as u64);
+        assert_eq!(again.counters.bases_aligned, 0);
+        assert_eq!(again.counters.alignments_run, 0);
+        assert_eq!(again.variants, cmp.variants, "the answer does not change");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

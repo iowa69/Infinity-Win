@@ -375,7 +375,16 @@ pub fn distance_matrix(
             indels[j][i] = d.indels;
             comparable[i][j] = d.comparable;
             comparable[j][i] = d.comparable;
-            let dv = d.dist.unwrap_or(0.0);
+            // `dist` is `None` when nothing is comparable, and neighbour
+            // joining still has to be given a number. Zero would assert "these
+            // two are identical", inventing a measurement out of the absence of
+            // one (section 0 rule 8) and pulling unrelated genomes together in
+            // the tree. 1.0 is the largest distance the sketch metric of 6.4
+            // can produce, so an incomparable pair is placed as far apart as
+            // the scale allows rather than as close as it can be.
+            // `cluster_<id>.dist.tsv` is unaffected: it tests `comparable`
+            // itself and writes `NA`.
+            let dv = d.dist.unwrap_or(1.0);
             dist[i][j] = dv;
             dist[j][i] = dv;
             let e = focus1_estimate(profiles[i], profiles[j]);
@@ -531,6 +540,7 @@ mod tests {
                 unplaced: Vec::new(),
                 covered: Vec::new(),
                 not_called: Vec::new(),
+                variants: Vec::new(),
                 novel_bp: 0,
                 counters: Default::default(),
             },

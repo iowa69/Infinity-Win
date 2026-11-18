@@ -161,6 +161,15 @@ pub fn marked_unit(focus: u8) -> String {
     format!("{}{}", approx_mark(is_approximate_focus(focus)), unit_label(focus))
 }
 
+/// An empty allele is written as a dash, as the output files do.
+pub fn or_dash(s: &str) -> &str {
+    if s.is_empty() {
+        "-"
+    } else {
+        s
+    }
+}
+
 /// Byte counts, for the memory budget parameter.
 pub fn bytes(n: u64) -> String {
     if n == 0 {
@@ -271,5 +280,11 @@ mod tests {
         assert_eq!(bytes(0), "0 B");
         assert_eq!(bytes(512), "512 B");
         assert_eq!(bytes(1 << 30), "1.00 GiB");
+    }
+
+    #[test]
+    fn an_empty_allele_is_a_dash() {
+        assert_eq!(or_dash(""), "-");
+        assert_eq!(or_dash("ACGT"), "ACGT");
     }
 }

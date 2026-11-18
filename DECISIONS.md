@@ -329,6 +329,15 @@ cannot hide a genome.
 
 ## D16. `--no-block-skip` is not fully result-neutral
 
+> **CORRECTED.** This entry originally claimed the *variants* were identical and
+> only the coverage bookkeeping differed. That was measured on simulated T3 data
+> only. The real-data benchmark matrix found it is **false on real assemblies**:
+> `--no-block-skip` changes the variant *list*, not just coverage — on the
+> *Salmonella* trio 13 rows appear only in the baseline, on the *S. aureus* CC set
+> 121 versus 254 rows, and on the 32-genome NCBI PD cluster one row in each
+> direction. The claim below is retained only for the simulated case it was
+> measured on. See D23.
+
 **What.** Section 11 says each switch removes a part of the idea "while leaving
 results identical". With `--no-block-skip` the **variants are identical** — this
 is asserted by `property_6b_block_skip_keeps_variants_identical` — but the
@@ -577,3 +586,73 @@ re-measured; the marker is on that entry.
 - **A9 (6.9).** `focus1_snp_lower_bound` implements "at least half, rounded up"
   exactly, and is called nowhere outside its own unit test. The estimate it bounds
   is correct; the bound is never surfaced to a user.
+
+---
+
+## D23. Property 6 fails on real assemblies, and the experiment's verdict is negative
+
+Two findings from the real-data benchmark matrix (18 cells: 6 configurations × 3
+datasets, all completed). Both contradict claims made earlier in this file, and
+both are recorded here rather than folded into the entries they correct.
+
+### Property 6 is violated by `--flat` on real data
+
+Section 10.2 property 6 requires flat mode, hierarchical mode and every cache
+switch to give identical variants, distances and trees. On the *S. aureus*
+clonal-complex dataset, `--flat` produces **identical distances but a different
+variant list** (3 rows against 2). `--no-piece-cache` and `--no-profile-grouping`
+are exactly neutral on all three real datasets. `--no-block-skip` is not neutral
+anywhere (see the correction on D16).
+
+The automated property-6 test passes because it runs on **simulated** data, where
+blocks are clean and the hierarchical descent and the flat leaf-block walk find
+the same matched set. Real assemblies have repeats, uneven coverage and contig
+junctions, and that is where the two modes diverge. This is a genuine defect, not a
+measurement artefact: it means the nested levels — one of the three things section
+3 claims as new — change the answer on real input. It is classified `DEFECT` in
+`REPORT.md` and is not fixed.
+
+Note the interaction with F1 in D22: end-extension variants were being discarded
+entirely, and head/tail blocks are precisely where flat and hierarchical mode
+differ most. **This finding must be re-measured after F1 lands**, and may resolve
+or may worsen.
+
+### The experiment's verdict is that no part of the idea pays, at these scales
+
+Section 11's rule: a part of the idea pays if turning it off makes time-to-exact or
+peak memory at least 20% worse on at least two of the three datasets. Measured on
+the three real datasets available:
+
+- `--single-cluster` (cluster-first) is 6.7× slower and uses 18× more memory on the
+  *S. aureus* set, but is **faster** on the other two datasets, so it reaches only
+  1 of 3 and does not pass.
+- No other switch reaches 2 of 3.
+
+**Verdict: 0 of 5 parts pay** by the outline's own rule at these dataset sizes.
+`REPORT.md` states this plainly, as section 11 requires ("report every result,
+including the ones where it does not pay") and as section 2's anti-goals demand
+("a benchmark that only reports the cases where the idea wins" would be a failure).
+
+Two caveats that must travel with this number, and neither is an excuse:
+
+1. The datasets are small — 3, 32 and 15 genomes. The optimizations the switches
+   remove (block skipping, the piece cache, profile grouping, cluster-first) are
+   designed to pay at thousands of genomes. On 1,000 × 5 Mb simulated genomes the
+   piece cache did report a very high hit rate, but **that figure is not usable**:
+   `cache_hits` was double-counted and thread-count dependent (D19), so the true
+   rate is unknown until it is re-measured. At 3–32 genomes there is in any case
+   almost nothing to amortise, so a null verdict here is the expected result of an
+   under-powered test, not evidence against the idea. Section 11 asks for
+   simulated datasets scaled to 100, 1,000 and 5,000 genomes; **that scaling has not
+   been run**, and the verdict should not be quoted without it.
+2. All matrix numbers were produced by a binary that predates the F1/F5/F3 fixes
+   of D22, which change variant lists and therefore distances. `REPORT.md` must be
+   regenerated after those fixes land.
+
+### What did work
+
+The accuracy-over-time curve — the "key figure" of section 11, and the measurement
+the owner called the point of the exercise — reproduces the intended effect on real
+data: normalised Robinson-Foulds distance against the reference IQ-TREE tree falls
+**1.00 → 0.71 → 0.38 → 0.10** as the run progresses. The photo does come into
+focus, and it can be measured doing so.

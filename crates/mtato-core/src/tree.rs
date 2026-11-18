@@ -452,10 +452,9 @@ fn get(d: &[Vec<f64>], i: usize, j: usize) -> f64 {
 }
 
 fn set(d: &mut [Vec<f64>], i: usize, j: usize, v: f64) {
-    if i < d.len()
-        && j < d[i].len() {
-            d[i][j] = v;
-        }
+    if i < d.len() && j < d[i].len() {
+        d[i][j] = v;
+    }
     if j < d.len() && i < d[j].len() {
         d[j][i] = v;
     }
