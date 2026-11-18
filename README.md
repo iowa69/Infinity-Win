@@ -328,6 +328,13 @@ units.
 
 ## The desktop program
 
+Start it from a terminal to come up ready:
+
+```sh
+Infinity-Win --run -o results/ genomes_folder/ more_genomes/   # load and start
+Infinity-Win --open results/                                    # explore a finished run
+```
+
 One window, four panels: genomes on the left, the tree in the middle, parameters
 and live counters on the right, and the map along the bottom.
 

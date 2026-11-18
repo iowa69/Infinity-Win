@@ -45,6 +45,8 @@ pub struct InfinityApp {
     pub(crate) inputs: Vec<PathBuf>,
     pub(crate) input_text: String,
     pub(crate) outdir_text: String,
+    /// What the command line asked for, done once on the first frame.
+    pub(crate) startup: Startup,
     pub(crate) open_text: String,
     pub(crate) export_text: String,
 
@@ -187,6 +189,7 @@ impl InfinityApp {
         let mut app = Self {
             model: UiModel::new(Source::Empty),
             outdir_text,
+            startup: Startup::default(),
             export_text,
             open_text: String::new(),
             prefs: loaded,
@@ -850,6 +853,93 @@ impl InfinityApp {
     }
 }
 
+/// Command-line requests: open a results folder, or load genomes (and
+/// optionally start the run) so that the window comes up ready.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Startup {
+    pub open: Option<String>,
+    pub inputs: Vec<PathBuf>,
+    pub out: Option<String>,
+    pub run: bool,
+}
+
+impl Startup {
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut s = Startup::default();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--open" => {
+                    s.open = Some(it.next().ok_or("--open needs a folder")?.clone());
+                }
+                "--out" | "-o" => {
+                    s.out = Some(it.next().ok_or("--out needs a folder")?.clone());
+                }
+                "--run" => s.run = true,
+                x if x.starts_with('-') => return Err(format!("unknown option {x}")),
+                x => s.inputs.push(PathBuf::from(x)),
+            }
+        }
+        if s.open.is_some() && !s.inputs.is_empty() {
+            return Err("give either --open or genome paths, not both".to_string());
+        }
+        if s.run && s.inputs.is_empty() {
+            return Err("--run needs genome files or folders".to_string());
+        }
+        Ok(s)
+    }
+}
+
+impl InfinityApp {
+    fn apply_startup(&mut self, ctx: &Context) {
+        if self.startup == Startup::default() {
+            return;
+        }
+        let s = std::mem::take(&mut self.startup);
+        if let Some(dir) = s.open {
+            self.open_folder(&dir, ctx);
+            return;
+        }
+        for p in &s.inputs {
+            self.add_input_path(p);
+        }
+        if let Some(o) = s.out {
+            self.outdir_text = o;
+        }
+        if s.run {
+            self.start_run(ctx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::Startup;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn command_lines_parse() {
+        assert_eq!(Startup::parse(&[]).unwrap(), Startup::default());
+        let s = Startup::parse(&v(&["--run", "-o", "out", "a", "b"])).unwrap();
+        assert!(s.run);
+        assert_eq!(s.out.as_deref(), Some("out"));
+        assert_eq!(s.inputs.len(), 2);
+        assert_eq!(
+            Startup::parse(&v(&["--open", "x"]))
+                .unwrap()
+                .open
+                .as_deref(),
+            Some("x")
+        );
+        assert!(Startup::parse(&v(&["--run"])).is_err());
+        assert!(Startup::parse(&v(&["--open", "x", "a"])).is_err());
+        assert!(Startup::parse(&v(&["--bogus"])).is_err());
+    }
+}
+
 impl eframe::App for InfinityApp {
     /// Everything that is not drawing: draining the event stream, collecting
     /// finished work, and rebuilding the tree layout.
@@ -858,6 +948,7 @@ impl eframe::App for InfinityApp {
     /// hidden, so a long run keeps being folded into the model even when the
     /// user has minimised the window.
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.apply_startup(ctx);
         if !self.theme_installed {
             crate::theme::install(ctx);
             ctx.set_theme(crate::theme::preference(&self.prefs.theme));

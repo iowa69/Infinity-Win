@@ -77,19 +77,26 @@ mod tree_panel;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [] => {}
-        // A headless smoke test of the whole reading path: fold a finished
-        // output folder and report what the window would have shown. No display
-        // is needed, so it also runs in CI and over ssh.
-        [flag, path] if flag == "--check" => {
+    // A headless smoke test of the whole reading path: fold a finished output
+    // folder and report what the window would have shown. No display is
+    // needed, so it also runs in CI and over ssh.
+    if let [flag, path] = args.as_slice() {
+        if flag == "--check" {
             std::process::exit(check_folder(std::path::PathBuf::from(path)));
         }
-        _ => {
-            eprintln!("usage: Infinity-Win [--check <output-folder>]");
+    }
+    let startup = match app::Startup::parse(&args) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Infinity-Win: {e}");
+            eprintln!(
+                "usage: Infinity-Win [--check <results folder>]\n       \
+                 Infinity-Win --open <results folder>\n       \
+                 Infinity-Win [--out <results folder>] [--run] <genome files or folders...>"
+            );
             std::process::exit(2);
         }
-    }
+    };
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -104,7 +111,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Infinity-Win",
         options,
-        Box::new(|_cc| Ok(Box::new(app::InfinityApp::new()))),
+        Box::new(move |_cc| {
+            let mut a = app::InfinityApp::new();
+            a.startup = startup;
+            Ok(Box::new(a))
+        }),
     )
 }
 
