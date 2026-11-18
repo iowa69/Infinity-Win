@@ -522,19 +522,43 @@ pub fn shared_points(
 ) -> Vec<SharedPoint> {
     let k = params.k as u64;
 
-    // Boundary anchors of matched blocks, so the lookup below is O(1) rather
-    // than a scan of every block for every anchor.
-    let mut boundary: HashMap<u64, &MatchedBlock> = HashMap::with_capacity(matched.len() * 2);
-    for m in matched {
-        boundary.entry(m.gs).or_insert(m);
-        if m.ge >= k {
-            boundary.entry(m.ge - k).or_insert(m);
-        }
-    }
-
     let mut raw: Vec<SharedPoint> = Vec::with_capacity(anchors.len());
+    // Every anchor *contained* in a matched block takes its position from that
+    // block, not only the ones sitting at a block's two ends.
+    //
+    // This is what makes flat and hierarchical mode agree (property 6, section
+    // 10.2). A leaf block is delimited by consecutive level-3 anchors, so in flat
+    // mode "contained" and "at a boundary" are the same set. In hierarchical mode
+    // a matched coarse block spans many finer anchors; if only its two ends were
+    // mapped, every interior anchor fell through to the pivot's anchor map, which
+    // deliberately omits repeated k-mers (6.5). Flat mode resolved those repeats
+    // from its leaf blocks and hierarchical mode did not, so the two modes got
+    // different shared points, therefore different piece boundaries, therefore
+    // different variants. Mapping by containment removes the asymmetry for free:
+    // the position is pure arithmetic on the block, so nothing extra is hashed or
+    // read, and the coarse-block match still skips the comparison.
+    //
+    // `matched` is sorted by member start and neighbouring blocks overlap by
+    // exactly k, so one forward cursor finds the first containing block for each
+    // anchor in amortised linear time. Taking the *first* containing block
+    // reproduces the previous first-wins tie-break for an anchor shared by two
+    // adjacent blocks, so flat mode's output is unchanged.
+    let mut bi = 0usize;
     for a in anchors {
-        if let Some(m) = boundary.get(&a.pos) {
+        let a_end = a.pos + k;
+        while bi < matched.len() && matched[bi].ge <= a.pos {
+            bi += 1;
+        }
+        let mut j = bi;
+        let mut containing: Option<&MatchedBlock> = None;
+        while j < matched.len() && matched[j].gs <= a.pos {
+            if a_end <= matched[j].ge {
+                containing = Some(&matched[j]);
+                break;
+            }
+            j += 1;
+        }
+        if let Some(m) = containing {
             raw.push(SharedPoint {
                 gpos: a.pos,
                 ppos: m.map_anchor(a.pos, k),
