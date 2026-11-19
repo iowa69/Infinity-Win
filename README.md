@@ -122,9 +122,9 @@ identity) before clicking Run, or with `--cluster-dist` on the command line.
 
 | file | what it is |
 |---|---|
-| `results.xlsx` | Excel workbook: settings, genomes, clusters, one SNP matrix per cluster, variants |
+| `results.xlsx` | Excel workbook: a **Summary** sheet (clusters, closest pairs, possible problems), SNP groups, one **colour-scaled SNP matrix** per cluster ordered like the tree, genomes, variants, settings |
 | `cluster_<id>.snp_matrix.tsv` | square SNP distance matrix of one cluster |
-| `tree.nwk`, `tree.svg` | the full tree with branch lengths in SNPs, as Newick and as a picture |
+| `tree.nwk`, `tree.svg` | the full tree with branch lengths in SNPs, as Newick and as a publication-style picture (SNPs at the tips, SNP groups shaded) |
 | `snp_clusters.tsv` | each genome's SNP cluster at every SNP threshold |
 | `cluster_<id>.vcf`, `cluster_<id>.core_snps.fasta` | SNPs as VCF, and the core SNP alignment for IQ-TREE or Gubbins |
 
