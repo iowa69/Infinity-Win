@@ -1,8 +1,8 @@
 //! Turning a tree into positions on screen (section 8, "Tree panel").
 //!
-//! egui has no tree widget, so the rectangular layout, the collapsed-cluster
-//! triangles, the scale bar and the 300 ms move animation are all computed
-//! here. Nothing in this module touches `egui::Ui` or a `Painter`: it maps data
+//! egui has no tree widget, so the rectangular layout, the size of the
+//! collapsed-cluster wedges, the scale bar and the 300 ms move animation are
+//! all computed here (the drawing itself is [`crate::pubtree`]). Nothing in this module touches `egui::Ui` or a `Painter`: it maps data
 //! to data, which is what makes the geometry testable without a window.
 //!
 //! # Units
@@ -32,7 +32,7 @@ use crate::fmt;
 /// One leaf row, in layout units.
 pub const ROW: f64 = 1.0;
 /// Horizontal layout extent of the backbone region.
-pub const BACKBONE_W: f64 = 1.0;
+pub const BACKBONE_W: f64 = 0.6;
 /// Horizontal layout extent of one expanded cluster subtree.
 pub const CLUSTER_W: f64 = 0.7;
 /// How far right a collapsed cluster's triangle reaches, in layout units.
@@ -177,10 +177,6 @@ impl Region {
             0.0
         }
     }
-
-    pub fn contains_x(&self, x: f64) -> bool {
-        x >= self.x0 - 1e-9 && x <= self.x0 + self.width + 1e-9
-    }
 }
 
 /// One laid-out node.
@@ -236,15 +232,6 @@ pub struct TreeLayout {
 }
 
 impl TreeLayout {
-    /// The region a layout x falls in, preferring a cluster over the backbone
-    /// (a cluster region starts at a backbone x, so the two overlap there).
-    pub fn region_at(&self, x: f64) -> Option<&Region> {
-        self.regions
-            .iter()
-            .find(|r| r.cluster.is_some() && r.contains_x(x))
-            .or_else(|| self.regions.first())
-    }
-
     /// The node a leaf name resolves to, for "search box to find a genome".
     pub fn find(&self, name: &str) -> Option<usize> {
         self.by_name.get(name).copied()
@@ -537,16 +524,6 @@ pub fn collapsed_half_rows(members: usize) -> f64 {
     (0.25 + m.ln() * 0.05).clamp(0.28, 0.46)
 }
 
-/// Corners of a collapsed-cluster triangle in layout space: the apex at the
-/// node, the base to the right.
-pub fn triangle(x: f64, y: f64, half_rows: f64) -> [(f64, f64); 3] {
-    [
-        (x, y),
-        (x + COLLAPSED_SPREAD, y - half_rows),
-        (x + COLLAPSED_SPREAD, y + half_rows),
-    ]
-}
-
 // ---------------------------------------------------------------------------
 // Animation
 // ---------------------------------------------------------------------------
@@ -639,7 +616,12 @@ pub fn scale_bar(region: &Region, target: f64) -> Option<ScaleBar> {
             "{}{} {}",
             fmt::approx_mark(region.approximate || fmt::is_approximate_focus(region.focus)),
             fmt::snps(value),
-            region.unit
+            // "1 SNP", not "1 SNPs".
+            if (value - 1.0).abs() < 1e-9 {
+                region.unit.trim_end_matches('s')
+            } else {
+                region.unit
+            }
         ),
     })
 }
@@ -812,29 +794,12 @@ mod tests {
     }
 
     #[test]
-    fn region_lookup_prefers_the_cluster_over_the_backbone() {
-        let l = layout(&sample());
-        let c = l.regions[1].clone();
-        assert_eq!(
-            l.region_at(c.x0 + CLUSTER_W * 0.5).unwrap().cluster,
-            Some(1)
-        );
-        // On the backbone, left of every cluster.
-        assert_eq!(l.region_at(-0.1).unwrap().cluster, None);
-    }
-
-    #[test]
     fn collapsed_triangles_grow_with_the_member_count_but_stay_apart() {
         assert!(collapsed_half_rows(2) < collapsed_half_rows(500));
         for m in [1usize, 2, 10, 41, 88, 1000, 100_000] {
             assert!(collapsed_half_rows(m) < 0.5, "{m} members overflow the row");
             assert!(collapsed_half_rows(m) > 0.2);
         }
-        let t = triangle(1.0, 2.0, 0.4);
-        assert_eq!(t[0], (1.0, 2.0));
-        assert!((t[1].0 - t[2].0).abs() < 1e-12);
-        assert!(t[1].1 < t[2].1);
-        assert!((t[1].0 - 1.0 - COLLAPSED_SPREAD).abs() < 1e-12);
     }
 
     #[test]
@@ -877,6 +842,7 @@ mod tests {
             ..r
         };
         assert_eq!(scale_bar(&exact, 0.3).unwrap().label, "2 SNPs");
+        assert_eq!(scale_bar(&exact, 0.1).unwrap().label, "1 SNP");
     }
 
     /// Two opened exact clusters, one ten times wider than the other.
@@ -1027,13 +993,14 @@ mod tests {
         let parent = lb.nodes[y].parent.unwrap();
         assert!((start[y].0 - start[parent].0).abs() < 1e-9);
         assert!((start[y].1 - start[parent].1).abs() < 1e-9);
-        // "x" kept its identity, so it starts where it was.
+        // "x" kept its identity, so it starts where it was: the deepest tip
+        // of the old tree, at the full backbone width.
         let x = lb
             .nodes
             .iter()
             .position(|n| n.kind.name() == Some("x"))
             .unwrap();
-        assert!((start[x].0 - 1.0).abs() < 1e-9);
+        assert!((start[x].0 - BACKBONE_W).abs() < 1e-9);
     }
 
     #[test]

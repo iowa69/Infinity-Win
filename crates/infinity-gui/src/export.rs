@@ -25,7 +25,6 @@ use infinity_core::engine::RunResults;
 use infinity_core::tree::{graft, to_newick, Tree};
 
 use crate::fmt;
-use crate::layout::TreeLayout;
 use crate::pairwise::{self, MemberProfile};
 use crate::state::UiModel;
 use crate::svg::SvgOptions;
@@ -45,6 +44,7 @@ pub enum Item {
     Genomes,
     Distances,
     Variants,
+    SnpGroups,
     Svg,
     Png,
     Excel,
@@ -63,7 +63,8 @@ impl Item {
             Item::Genomes => "Genomes (TSV)",
             Item::Distances => "Distance matrices (TSV)",
             Item::Variants => "Variants (TSV)",
-            Item::Svg => "Tree picture (SVG, vector)",
+            Item::SnpGroups => "SNP groups at the slider's threshold (CSV)",
+            Item::Svg => "Tree picture (SVG, vector, on white)",
             Item::Png => "Tree picture (PNG, as on screen)",
             Item::Excel => "Excel workbook (from the run folder)",
             Item::SnpMatrices => "Square SNP matrices (from the run folder)",
@@ -82,6 +83,7 @@ impl Item {
             Item::Genomes => "genomes",
             Item::Distances => "distances",
             Item::Variants => "variants",
+            Item::SnpGroups => "SNP groups",
             Item::Svg => "SVG",
             Item::Png => "PNG",
             Item::Excel => "Excel",
@@ -118,6 +120,7 @@ impl Item {
                     Item::Genomes,
                     Item::Distances,
                     Item::Variants,
+                    Item::SnpGroups,
                 ],
             ),
             (
@@ -154,10 +157,13 @@ pub struct ExportCtx<'a> {
     /// The run's own output folder: where the engine-written files are copied
     /// from. `None` when no run or opened folder is behind the model.
     pub run_dir: Option<&'a Path>,
-    /// The tree exactly as laid out on screen, for the SVG. Without one the SVG
-    /// draws the whole tree with every cluster opened.
-    pub layout: Option<&'a TreeLayout>,
+    /// The tree exactly as the panel shows it (opened clusters, selection,
+    /// SNP groups), for the SVG. Without one the SVG draws the whole tree
+    /// with every cluster opened.
+    pub figure: Option<&'a crate::pubtree::Figure>,
     pub svg: SvgOptions,
+    /// The SNP groups at the slider's threshold, when they are switched on.
+    pub groups: Option<&'a crate::groups::GroupSet>,
 }
 
 impl<'a> ExportCtx<'a> {
@@ -167,8 +173,9 @@ impl<'a> ExportCtx<'a> {
             model,
             results,
             run_dir: None,
-            layout: None,
+            figure: None,
             svg: SvgOptions::default(),
+            groups: None,
         }
     }
 }
@@ -225,7 +232,9 @@ pub fn write_all_with(dir: &Path, ctx: &ExportCtx<'_>) -> Report {
     for item in Item::files() {
         match write_item(item, dir, ctx, &mut report.notes) {
             Ok(paths) => report.written.extend(paths),
-            Err(e) if !item.run_files().is_empty() => report.notes.push(e),
+            Err(e) if !item.run_files().is_empty() || item == Item::SnpGroups => {
+                report.notes.push(e)
+            }
             Err(e) => report.errors.push(format!("{}: {e}", item.label())),
         }
     }
@@ -264,18 +273,40 @@ pub fn write_item(
         }
         Item::Svg => {
             let owned;
-            let l = match ctx.layout {
-                Some(l) => l,
+            let f = match ctx.figure {
+                Some(f) => f,
                 None => {
                     let t = crate::annotate::full_display_tree(model).ok_or_else(|| {
                         "no tree yet: the backbone has not been built".to_string()
                     })?;
-                    owned = crate::layout::layout(&t);
+                    owned = crate::pubtree::Figure {
+                        layout: crate::layout::layout(&t),
+                        marks: crate::pubtree::marks_from_model(model),
+                    };
                     &owned
                 }
             };
             let p = dir.join("tree.svg");
-            write_text(&p, &crate::svg::render(l, model, &ctx.svg))?;
+            write_text(&p, &crate::svg::render(f, &ctx.svg))?;
+            out.push(p);
+        }
+        Item::SnpGroups => {
+            let set = ctx
+                .groups
+                .filter(|s| !s.covered.is_empty())
+                .ok_or_else(|| {
+                    "SNP groups: none yet (they need an exact cluster, and SNP groups switched on \
+                 in the tree header)"
+                        .to_string()
+                })?;
+            let p = dir.join(format!("snp_groups_le{}.csv", set.threshold));
+            let text = crate::groups::csv(set, |g| {
+                model
+                    .genome(g)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| format!("genome {g}"))
+            });
+            write_text(&p, &text)?;
             out.push(p);
         }
         Item::Clusters => {

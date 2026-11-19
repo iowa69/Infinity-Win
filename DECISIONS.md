@@ -40,23 +40,30 @@ rewired twice. The owner's instruction outranks the outline's ordering.
 
 ---
 
-## D3. `eframe`/`egui` 0.37, and no `rfd` file dialog
+## D3. `eframe`/`egui` 0.37, and `rfd` with the portal backend only
 
 **What.** The outline suggests `eframe`/`egui` and `rfd` (section 12). Versions
-were verified against crates.io and are 0.37, not the older series. `rfd` is not
-used at all.
+were verified against crates.io and are 0.37, not the older series. `rfd` is
+used for the "Add files…" and "Add folder…" dialogs, pinned to `=0.17.2` with
+`default-features = false, features = ["xdg-portal"]`.
 
 **Why.** Section 0 rule 7 says to check that each suggested library exists and is
 maintained before depending on it; `rfd`'s GTK backend needs system `-dev`
 packages and `pkg-config` at build time, which the build machine does not have
 and which section 12 explicitly wants to avoid ("prefer pure-Rust dependencies
-so that the Windows build needs no extra toolchain"). Its `xdg-portal` backend
-would pull in a large async stack for one dialog.
+so that the Windows build needs no extra toolchain"). The first version of the
+program therefore had no dialog at all. Since 0.17, `rfd`'s `xdg-portal` backend
+no longer pulls in an async stack: it opens `libdbus` at run time (`dlopen`) and
+asks the desktop's own file chooser over xdg-desktop-portal, falling back to
+`zenity`. It adds two small crates (`rfd`, `pollster`), needs nothing at build
+time, and on Windows uses the Win32 common dialog with no extra dependency. The
+owner found adding genomes without a dialog too hard, which settled it.
 
-**Affects.** Genome folders are chosen by drag-and-drop onto the window or by
-typing a path, plus a remembered-folders list. For an input of a thousand FASTA
-files this is what a user actually wants; a file picker is worse. Section 8's
-"[Add genomes]" button opens that path panel instead of a native dialog.
+**Affects.** The toolbar, the File menu and the empty genome list offer "Add
+files…" and "Add folder…". The dialog runs off the UI thread (`dialogs.rs`), so
+the window keeps drawing while it is open. Drag-and-drop and typing a path stay,
+plus the remembered-folders list; each input is listed with the number of
+genomes it holds.
 
 ---
 

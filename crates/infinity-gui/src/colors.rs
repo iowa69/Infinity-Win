@@ -1,16 +1,17 @@
 //! Colours and line styles: the visual vocabulary of focus levels, clusters and
 //! variant kinds (section 8).
 //!
-//! Focus must always be distinguishable, because a Focus 0 branch length and a
-//! Focus 2 branch length are different kinds of number and rule 8 of section 0
-//! forbids letting one pass for the other. The three styles therefore differ in
-//! *three* ways at once — colour, weight and dashing — so that they survive a
-//! greyscale printout and a colour-blind reader alike.
+//! Focus must always be distinguishable, because a Focus 0 number and a
+//! Focus 2 number are different kinds of number and rule 8 of section 0 forbids
+//! letting one pass for the other. The three styles differ in colour, weight
+//! and dashing; the genome list and the pairwise readout take their colours
+//! from here. The tree itself is drawn as a publication figure
+//! ([`crate::pubtree`]): exact branches in ink, estimates in grey, every
+//! estimated number with `≈`.
 //!
-//! `Color32` and `Stroke` are plain data, so this module is testable without a
-//! window.
+//! `Color32` is plain data, so this module is testable without a window.
 
-use egui::{Color32, Stroke};
+use egui::Color32;
 use infinity_core::variant::VariantKind;
 
 use crate::fmt;
@@ -85,12 +86,6 @@ pub fn focus_color(focus: u8, dark: bool) -> Color32 {
     focus_style(focus, dark).color
 }
 
-impl FocusStyle {
-    pub fn stroke(&self) -> Stroke {
-        Stroke::new(self.width, self.color)
-    }
-}
-
 /// Convert HSV to an opaque RGB colour. `h` is wrapped into `[0, 1)`.
 pub fn hsv(h: f32, s: f32, v: f32) -> Color32 {
     let h = (h - h.floor()).clamp(0.0, 1.0);
@@ -158,10 +153,6 @@ pub fn variant_color(kind: VariantKind) -> Color32 {
         VariantKind::Complex => Color32::from_rgb(150, 60, 190),
     }
 }
-
-/// The search-hit marker in the tree. (Selection uses the theme accent, so
-/// the list, the tree and the map highlight a selected genome alike.)
-pub const HOVERED: Color32 = Color32::from_rgb(250, 200, 60);
 
 #[cfg(test)]
 mod tests {

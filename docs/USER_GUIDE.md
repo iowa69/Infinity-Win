@@ -80,20 +80,32 @@ are lower than SKA2's; use `raw_snps` there.
 ## Screenshots
 
 **During a run.** 180 simulated genomes in 6 clusters. Two clusters are already
-exact ("sharp"); the other four still show their sketch estimate (dotted,
-"blurry ≈"). Distances are drawn in SNPs, with an approximate scale between
-clusters.
+exact; the others still show their sketch estimate (grey branches, numbers with
+`≈`). Distances are drawn in SNPs, with an approximate scale between clusters.
 
 ![Infinity-Win during a run](screenshots/live-run.png)
 
-**Finished.** Two clusters opened into their exact SNP trees with a scale bar in
-SNPs, two genomes selected (17 SNPs and 7 indels apart, shown above the tree),
-and the map of one cluster: each row is a genome against the cluster's pivot,
-red ticks are SNPs and blue ticks are insertions and deletions. The Run panel on
-the right exports trees (Newick, NEXUS for FigTree, iTOL), tables, the Excel
-workbook, SNP matrices, the VCF, the SNP alignment and pictures (SVG, PNG).
+**Finished.** One cluster opened into its exact SNP tree, the others collapsed
+into wedges. After every name, the SNPs on that genome's own branch (`+3`); the
+shaded bands are SNP groups at 5 SNPs; two genomes are selected (their distance
+is shown above the tree), and the map below shows them against the cluster's
+pivot: red ticks are SNPs, blue ticks insertions and deletions. The Run panel on
+the right lists the SNP groups and exports trees (Newick, NEXUS for FigTree,
+iTOL), tables, the SNP groups, the Excel workbook, SNP matrices, the VCF, the
+SNP alignment and pictures (SVG, PNG).
 
 ![Infinity-Win after a run](screenshots/finished-run.png)
+
+**SNP groups.** One cluster on its own (the **Cluster** button), with the slider
+at 5 SNPs: every shaded band is a group of genomes linked by chains of at most 5
+SNPs.
+
+![SNP groups at 5 SNPs](screenshots/snp-groups.png)
+
+**The tree window.** The whole tree as a figure on white, with the same SNP
+numbers, groups, scale bar and legend; save it as PNG or SVG.
+
+![The tree window](screenshots/tree-window.png)
 
 **Settings.** How far to refine (Sketch, Blocks or Exact SNPs), the cluster
 distance as % identity, whether to sharpen the distances between clusters, the
@@ -340,11 +352,67 @@ Infinity-Win --open results/                                    # explore a fini
 One window, four panels: genomes on the left, the tree in the middle, parameters
 and live counters on the right, and the map along the bottom.
 
+### Adding genomes
+
+- **＋ Add files…** opens the system's file dialog for one or more FASTA files
+  (`.fasta`, `.fa`, `.fna`, `.fas`, also gzipped). **＋ Add folder…** picks one or
+  more folders: every FASTA file directly inside a folder is one genome. Both
+  are in the toolbar, in the File menu, and as large buttons in the empty genome
+  list. The dialog runs beside the window, which keeps drawing while it is open.
+- **Drag and drop** files and folders anywhere on the window, or **type a path**
+  in the Inputs drawer and press Enter.
+- The **Inputs** drawer lists every file and folder with the number of genomes it
+  holds (a folder with none is flagged); remove one with its ✕, or all with
+  *Clear all*.
+
+On Linux the dialog is the desktop's own (through xdg-desktop-portal, falling
+back to `zenity`); see `DECISIONS.md` D3.
+
+### Reading the tree
+
+- **Branch length = SNPs**, with a scale bar under the tree. Dark branches are
+  exact SNP counts inside a cluster; grey branches are estimates: the distances
+  between clusters, or a cluster still being refined (its numbers carry `≈`).
+- **After every name, the SNPs on that genome's own branch**: `isolate_12  +3`
+  means three SNPs that its closest relatives in the tree do not share; `+0`
+  means none of its own. *View → SNPs at the tips* turns them off, *View → SNP
+  counts on internal branches* adds the counts on inner branches (where at least
+  one SNP falls).
+- **Collapsed clusters** are wedges labelled `c4 · 30 genomes · exact`; click
+  one to open it. Opened clusters are named by a bracket on the right.
+- The **legend** under the tree lists only what is drawn. **How to read** in the
+  tree header explains the picture in a few lines.
+- The tree is drawn on white like a figure; *View → White background* turns
+  that off to follow the window's theme. Aligned tip labels (with faint leader
+  lines) and a cluster colour strip are optional, also in *View*.
+
+### SNP groups: the slider
+
+The second line of the tree header sets the **SNP threshold**: a switch, a
+slider from 0 to 100 SNPs (the left part of the track goes 0–20 one SNP at a
+time), a number box, and 5 / 10 / 20 one click away. Default: on, 5 SNPs.
+
+Within each exact cluster, genomes linked by chains of at most that many SNPs
+(single linkage, as the engine's own `snp_clusters.tsv`) form a group. Every
+group of two or more genomes is shaded behind its tips and labelled
+`G3 · 4 genomes ≤5 SNPs`; groups are numbered down the tree. They follow the
+slider live. The Run panel lists them (click one to select its genomes,
+Ctrl-click to add them), and **Export groups (CSV)** writes every genome with its
+group at the current threshold (`snp_groups_le5.csv`). The tree window and the
+SVG export show the same shading.
+
+The SNP distances are the exact, filtered pairwise SNPs of the cluster: from the
+run itself, or, for clusters of more than 500 genomes and for opened folders,
+from `cluster_<id>.snp_matrix.tsv` in the output folder. Groups appear as soon
+as a cluster reaches Focus 2.
+
+### While it runs
+
 - **Live.** The window never blocks while computing. Every stage streams events,
-  and the tree redraws as focus improves: Focus 0 branches are dashed and pale,
-  Focus 1 solid and thin with an `≈` marker, Focus 2 solid and dark. Nodes move
-  smoothly to their new places when a cluster is refined.
-- **Clusters start collapsed** as a triangle with the member count. Click to open.
+  and the tree redraws as focus improves: estimated branches are grey, exact
+  ones dark, and every estimated number carries `≈`. Nodes move smoothly to their
+  new places when a cluster is refined.
+- **Clusters start collapsed** as a wedge with the member count. Click to open.
   Clicking a cluster also moves it to the front of the refinement queue, so you
   can look at the cluster you care about first.
 - **The cluster-distance slider takes effect immediately.** It re-clusters from
@@ -357,14 +425,10 @@ and live counters on the right, and the map along the bottom.
   a region that failed at level 1 is shown as a wide pale box that narrows as
   levels 2 and 3 are checked — the zoom made visible.
 - **Select two leaves** to see their pairwise distance, SNP count and focus.
-- **Export** the tree as Newick or PNG, plus the distance matrices, variants and
-  clusters.
+- **Export** the tree as Newick, SVG (a white figure) or PNG, plus the distance
+  matrices, variants, clusters and SNP groups.
 - **Open a finished run** from its output folder and browse it without
   recomputing.
-
-Genome folders are added by dragging them onto the window or by typing a path,
-with a list of recently used folders. A native file-picker dialog is deliberately
-not used; see `DECISIONS.md` D3.
 
 ---
 

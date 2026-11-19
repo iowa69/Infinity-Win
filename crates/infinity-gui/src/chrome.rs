@@ -1,12 +1,13 @@
 //! The window's chrome: the toolbar along the top and the status bar along the
 //! bottom (section 8).
 //!
-//! The toolbar is one line: the menus, the three things that must be reachable
-//! at any moment (genomes, run, stop), the cluster distance (the one parameter
-//! section 8 requires to act immediately, shown with its % identity), and on
-//! the right the Settings window and the side-panel toggle. Every other
-//! parameter lives in Settings. Below it, the "Genomes" drawer holds the input
-//! paths and the output folder: everything a run needs, in one place.
+//! The toolbar is one line: the menus, the things that must be reachable at
+//! any moment (Add files…, Add folder…, the Inputs drawer, Run, Stop), the
+//! cluster distance (the one parameter section 8 requires to act immediately,
+//! shown with its % identity), and on the right the Settings window and the
+//! side-panel toggle. Every other parameter lives in Settings. Below it, the
+//! Inputs drawer lists every file and folder with the genomes it holds, plus a
+//! typed path and the output folder: everything a run needs, in one place.
 
 use eframe::egui;
 use egui::RichText;
@@ -44,17 +45,18 @@ pub fn toolbar(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 menus(ui, app, &mut open_now, &mut export_now);
                 ui.separator();
 
+                add_buttons(ui, app);
                 let n = app.inputs.len();
                 let label = if n == 0 {
-                    "＋ Genomes".to_string()
+                    "Inputs ▾".to_string()
                 } else {
-                    format!("＋ Genomes ({n})")
+                    format!("Inputs ({}) ▾", fmt::count(app.input_genome_total() as u64))
                 };
                 if ui
                     .selectable_label(app.show_inputs, label)
                     .on_hover_text(
-                        "Add genome files or folders: type a path or drop them on the window, \
-                         and choose where results go.",
+                        "The genome files and folders of the next run, how many genomes each \
+                         holds, and where the results go.",
                     )
                     .clicked()
                 {
@@ -167,6 +169,29 @@ pub fn toolbar(ui: &mut egui::Ui, app: &mut InfinityApp) {
     }
 }
 
+/// The "Add files…" and "Add folder…" buttons: native dialogs, opened off the
+/// UI thread (see [`crate::dialogs`]).
+pub(crate) fn add_buttons(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    use crate::dialogs::PickKind;
+    let busy = app.pending_pick.is_some();
+    if ui
+        .add_enabled(!busy, egui::Button::new("＋ Add files…"))
+        .on_hover_text("choose FASTA files (.fasta, .fa, .fna, .fas, also .gz)")
+        .on_disabled_hover_text("a file dialog is open")
+        .clicked()
+    {
+        app.request_pick(PickKind::Files);
+    }
+    if ui
+        .add_enabled(!busy, egui::Button::new("＋ Add folder…"))
+        .on_hover_text("choose folders: every FASTA file directly inside each is a genome")
+        .on_disabled_hover_text("a file dialog is open")
+        .clicked()
+    {
+        app.request_pick(PickKind::Folders);
+    }
+}
+
 /// What an export menu entry asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportAction {
@@ -183,6 +208,15 @@ fn menus(
     export_now: &mut Option<ExportAction>,
 ) {
     ui.menu_button("File", |ui| {
+        if ui.button("Add genome files…").clicked() {
+            app.request_pick(crate::dialogs::PickKind::Files);
+            ui.close();
+        }
+        if ui.button("Add a folder of genomes…").clicked() {
+            app.request_pick(crate::dialogs::PickKind::Folders);
+            ui.close();
+        }
+        ui.separator();
         ui.label("Open a finished output folder:");
         ui.horizontal(|ui| {
             let resp = ui.add(
@@ -250,7 +284,7 @@ fn menus(
     ui.menu_button("View", |ui| {
         ui.checkbox(&mut app.show_side, "Run panel");
         ui.checkbox(&mut app.show_notes, "Warnings and notes");
-        ui.checkbox(&mut app.tree.show_legend, "Tree legend");
+        ui.checkbox(&mut app.tree.opts.legend, "Tree legend");
         ui.separator();
         ui.label(RichText::new("Theme").small());
         let mut theme_name = if app.prefs.theme.is_empty() {
@@ -289,10 +323,10 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
     ui.horizontal_wrapped(|ui| {
         let resp = ui.add(
             egui::TextEdit::singleline(&mut app.input_text)
-                .desired_width(300.0)
-                .hint_text("a .fa / .fasta / .fna file, or a folder of them"),
+                .desired_width(260.0)
+                .hint_text("or type a file or folder path"),
         );
-        let mut add = ui.button("Add").clicked();
+        let mut add = ui.button("Add path").clicked();
         add |= resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
         if add {
             let text = app.input_text.trim().to_string();
@@ -310,10 +344,6 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
                     app.status = format!("{} does not exist", path.display());
                 }
             }
-        }
-        if !app.inputs.is_empty() && ui.button("Clear").clicked() {
-            app.inputs.clear();
-            *params_changed = true;
         }
         ui.label(
             RichText::new("or drop files and folders on the window")
@@ -351,29 +381,83 @@ fn input_area(ui: &mut egui::Ui, app: &mut InfinityApp, params_changed: &mut boo
         });
     }
 
-    if !app.inputs.is_empty() {
+    if app.inputs.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("No genomes in the list yet.")
+                    .small()
+                    .color(p.text_weak),
+            );
+            add_buttons(ui, app);
+        });
+    } else {
         let mut remove: Option<usize> = None;
-        // Shrinks to its rows: a fixed height left a band of empty space
-        // between the input area and the panels when only one path was listed.
+        let mut clear = false;
+        // One line per file or folder, with what it holds. Shrinks to its rows:
+        // a fixed height left a band of empty space when one path was listed.
+        let entries: Vec<(std::path::PathBuf, Option<usize>)> = app
+            .inputs
+            .clone()
+            .into_iter()
+            .map(|path| {
+                let n = app.input_count(&path);
+                (path, n)
+            })
+            .collect();
         egui::ScrollArea::vertical()
-            .max_height(66.0)
+            .max_height(96.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                for (i, path) in app.inputs.iter().enumerate() {
+                for (i, (path, n)) in entries.iter().enumerate() {
                     ui.horizontal(|ui| {
+                        let what = if path.is_dir() { "folder" } else { "file" };
                         if ui
                             .small_button("✕")
-                            .on_hover_text("remove from the list")
+                            .on_hover_text(format!("remove this {what} from the list"))
                             .clicked()
                         {
                             remove = Some(i);
                         }
+                        let icon = if path.is_dir() { "🗀" } else { "🗋" };
+                        ui.label(RichText::new(icon).color(p.text_weak));
                         ui.label(RichText::new(path.display().to_string()).color(p.text));
+                        let colour = match n {
+                            Some(0) | None => p.warn,
+                            _ => p.text_weak,
+                        };
+                        ui.label(
+                            RichText::new(crate::dialogs::count_text(*n))
+                                .small()
+                                .color(colour),
+                        );
                     });
                 }
             });
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} item(s) · {} in total",
+                    entries.len(),
+                    crate::dialogs::count_text(Some(app.input_genome_total()))
+                ))
+                .small()
+                .color(p.text_weak),
+            );
+            if ui
+                .small_button("Clear all")
+                .on_hover_text("empty the list")
+                .clicked()
+            {
+                clear = true;
+            }
+        });
         if let Some(i) = remove {
             app.remove_input(i);
+            *params_changed = true;
+        }
+        if clear {
+            app.inputs.clear();
+            app.input_counts.clear();
             *params_changed = true;
         }
     }

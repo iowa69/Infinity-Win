@@ -12,7 +12,7 @@
 //! 3. **Focus is never ambiguous.** Every number that is an estimate is drawn
 //!    with the "≈" marker and in the colour of its focus level.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,6 +44,13 @@ pub struct InfinityApp {
 
     // --- inputs -----------------------------------------------------------
     pub(crate) inputs: Vec<PathBuf>,
+    /// How many genomes each input holds, counted once when it is added.
+    pub(crate) input_counts: HashMap<PathBuf, Option<usize>>,
+    /// A native file dialog asked for by a button, opened by [`Self::ui`]
+    /// (which has the window handle the dialog is parented to).
+    pub(crate) pick_request: Option<crate::dialogs::PickKind>,
+    /// The native file dialog that is open now, if any.
+    pub(crate) pending_pick: Option<crate::dialogs::PendingPick>,
     pub(crate) input_text: String,
     pub(crate) outdir_text: String,
     /// What the command line asked for, done once on the first frame.
@@ -119,6 +126,8 @@ pub struct InfinityApp {
     pub(crate) show_tree_window: bool,
     /// What the main window and the tree window share.
     pub(crate) tree_window: crate::tree_window::SharedRef,
+    /// The SNP groups at the slider's threshold, kept current.
+    pub(crate) groups: crate::groups::GroupCache,
 }
 
 /// Pan, zoom and decoration state of the tree panel.
@@ -130,7 +139,6 @@ pub struct TreeView {
     pub px_per_unit: f32,
     /// Pan offset in pixels.
     pub offset: egui::Vec2,
-    pub show_legend: bool,
     pub search: String,
     /// Set when the view must be refitted to the tree, consumed by the panel.
     pub needs_fit: bool,
@@ -145,12 +153,16 @@ pub struct TreeView {
     pub centre: Option<(f64, f64)>,
     /// The whole picture, or the selected cluster on its own.
     pub mode: TreeMode,
-    /// SNP counts written on the branches.
-    pub branch_labels: bool,
-    /// Tip labels lined up in one column, with dotted leaders to the tips.
-    pub aligned_tips: bool,
-    /// A strip of cluster colour next to every tip label.
-    pub color_strip: bool,
+    /// Tip SNP numbers, branch labels, brackets, legend, aligned tips,
+    /// colour strip, group shading.
+    pub opts: crate::pubtree::PubOptions,
+    /// Draw the tree on white, like the figure, whatever the theme.
+    pub paper: bool,
+    /// SNP groups: on or off, and the N of "linked by ≤ N SNPs".
+    pub groups_on: bool,
+    pub group_n: u32,
+    /// The "How to read this tree" panel is open.
+    pub show_help: bool,
 }
 
 /// What the tree panel shows.
@@ -168,7 +180,6 @@ impl Default for TreeView {
             px_per_row: 16.0,
             px_per_unit: 420.0,
             offset: egui::Vec2::ZERO,
-            show_legend: true,
             search: String::new(),
             needs_fit: true,
             user_moved: false,
@@ -176,9 +187,11 @@ impl Default for TreeView {
             zoom_request: None,
             centre: None,
             mode: TreeMode::All,
-            branch_labels: false,
-            aligned_tips: false,
-            color_strip: true,
+            opts: crate::pubtree::PubOptions::default(),
+            paper: true,
+            groups_on: true,
+            group_n: 5,
+            show_help: false,
         }
     }
 }
@@ -211,6 +224,9 @@ impl InfinityApp {
             open_text: String::new(),
             prefs: loaded,
             inputs: Vec::new(),
+            input_counts: HashMap::new(),
+            pick_request: None,
+            pending_pick: None,
             input_text: String::new(),
             run_handle: None,
             results: None,
@@ -249,6 +265,7 @@ impl InfinityApp {
             restart_pending: false,
             show_tree_window: false,
             tree_window: crate::tree_window::new_shared(),
+            groups: crate::groups::GroupCache::default(),
         };
         app.validate_params();
         app
@@ -559,10 +576,15 @@ impl InfinityApp {
         self.save_prefs();
         let mut notes = Vec::new();
         let run_dir = self.run_dir();
+        let figure = self.tree_layout.as_ref().map(|l| crate::pubtree::Figure {
+            layout: l.clone(),
+            marks: self.marks(l, false),
+        });
         let ctx = export::ExportCtx {
             run_dir: run_dir.as_deref(),
-            layout: self.tree_layout.as_ref(),
+            figure: figure.as_ref(),
             svg: self.svg_options(),
+            groups: self.tree.groups_on.then_some(&self.groups.set),
             ..export::ExportCtx::new(&self.model, self.results.as_ref())
         };
         let report = match item {
@@ -628,24 +650,92 @@ impl InfinityApp {
         }
     }
 
-    /// The SVG looks like the tree panel: same theme, same decorations, a row
-    /// height that is readable whatever the zoom on screen.
+    /// The SVG is the figure of what the tree panel shows: the same clusters
+    /// opened, the same decorations, on white, at a row height that is
+    /// readable whatever the zoom on screen.
     pub(crate) fn svg_options(&self) -> crate::svg::SvgOptions {
-        let dark = self.dark;
         let width = self
             .tree_rect
-            .map(|(r, _)| (r.width() * 0.68).max(480.0))
-            .unwrap_or(760.0);
+            .map(|(r, _)| (r.width() * 0.6).clamp(420.0, 900.0))
+            .unwrap_or(720.0);
         crate::svg::SvgOptions {
-            dark,
-            legend: self.tree.show_legend,
-            branch_labels: self.tree.branch_labels,
-            aligned_tips: self.tree.aligned_tips,
-            color_strip: self.tree.color_strip,
+            opts: self.tree_opts(),
             tree_width: width,
-            row_px: self.tree.px_per_row.clamp(14.0, 24.0),
-            selected_cluster: self.selected_cluster,
+            row_px: self.tree.px_per_row.clamp(14.0, 20.0),
         }
+    }
+
+    /// The tree panel's decorations, with the group shading following the
+    /// SNP-groups switch.
+    pub(crate) fn tree_opts(&self) -> crate::pubtree::PubOptions {
+        crate::pubtree::PubOptions {
+            groups: self.tree.groups_on,
+            ..self.tree.opts
+        }
+    }
+
+    /// Everything a picture of the tree marks besides its shape: cluster
+    /// colours, selection, the SNP groups, the search hit.
+    pub(crate) fn marks(&self, l: &TreeLayout, with_search: bool) -> crate::pubtree::Marks {
+        let mut m = crate::pubtree::marks_from_model(&self.model);
+        m.selection = self.selection.ids().iter().copied().collect();
+        for &i in &l.leaves {
+            if let layout::NodeKind::ClusterCollapsed { id, .. } = &l.nodes[i].kind {
+                let n = self
+                    .model
+                    .cluster(*id)
+                    .map(|c| c.members.iter().filter(|g| m.selection.contains(g)).count())
+                    .unwrap_or(0);
+                if n > 0 {
+                    m.selected_in.insert(*id, n);
+                }
+            }
+        }
+        if self.tree.groups_on {
+            m.groups = self
+                .groups
+                .set
+                .groups
+                .iter()
+                .map(|g| crate::pubtree::GroupBand {
+                    number: g.number,
+                    members: g.members.clone(),
+                })
+                .collect();
+            m.group_threshold = self.groups.set.threshold;
+        }
+        if with_search {
+            m.search_hit = self.tree.search_hit;
+        }
+        m
+    }
+
+    /// Select the genomes of SNP group `index` (Ctrl adds them instead).
+    pub(crate) fn select_group(&mut self, index: usize, additive: bool) {
+        let Some(g) = self.groups.set.groups.get(index) else {
+            return;
+        };
+        let (ids, cluster, number) = (g.members.clone(), g.cluster, g.number);
+        if !additive {
+            self.selection.clear();
+        }
+        self.selection.extend(ids.iter().copied());
+        self.set_cluster(cluster, false);
+        self.status = format!(
+            "G{number} selected: {} genomes linked by ≤{} SNPs",
+            ids.len(),
+            self.groups.set.threshold
+        );
+    }
+
+    /// Keep the SNP groups current (cheap when nothing changed).
+    pub(crate) fn refresh_groups(&mut self) {
+        if !self.tree.groups_on {
+            return;
+        }
+        let dir = self.run_dir();
+        self.groups
+            .refresh(&self.model, dir.as_deref(), self.tree.group_n);
     }
 
     /// Ask for a screenshot and write the tree panel to `path` when it arrives.
@@ -964,14 +1054,94 @@ impl InfinityApp {
             return false;
         }
         self.inputs.push(path.clone());
+        self.input_counts
+            .insert(path.clone(), crate::dialogs::count_genomes(path));
         self.remember_input(&path.display().to_string());
         true
     }
 
     pub(crate) fn remove_input(&mut self, i: usize) {
         if i < self.inputs.len() {
-            self.inputs.remove(i);
+            let p = self.inputs.remove(i);
+            self.input_counts.remove(&p);
         }
+    }
+
+    /// Genomes an input holds; counted on first use when it was put in the
+    /// list some other way (the command line, a test).
+    pub(crate) fn input_count(&mut self, path: &std::path::Path) -> Option<usize> {
+        *self
+            .input_counts
+            .entry(path.to_path_buf())
+            .or_insert_with(|| crate::dialogs::count_genomes(path))
+    }
+
+    /// Ask for a native file dialog; [`Self::ui`] opens it on the next frame.
+    pub(crate) fn request_pick(&mut self, kind: crate::dialogs::PickKind) {
+        if self.pending_pick.is_none() {
+            self.pick_request = Some(kind);
+        }
+    }
+
+    /// Open a dialog asked for by a button, parented to the main window.
+    fn open_requested_pick(&mut self, ctx: &Context, frame: Option<&eframe::Frame>) {
+        let Some(kind) = self.pick_request.take() else {
+            return;
+        };
+        if self.pending_pick.is_some() {
+            return;
+        }
+        let dir = crate::dialogs::start_dir(&self.prefs.recent_inputs);
+        match crate::dialogs::start(kind, frame, dir.as_deref(), ctx.clone()) {
+            Ok(p) => {
+                self.pending_pick = Some(p);
+                self.status = format!("{} …", kind.title());
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
+    /// Collect what a closed dialog picked.
+    fn poll_pick(&mut self) {
+        let Some((kind, paths)) = self
+            .pending_pick
+            .as_ref()
+            .and_then(|p| p.take().map(|v| (p.kind, v)))
+        else {
+            return;
+        };
+        self.pending_pick = None;
+        if paths.is_empty() {
+            self.status = format!("{}: nothing chosen", kind.title());
+            return;
+        }
+        let mut added = 0usize;
+        let mut genomes = 0usize;
+        for p in &paths {
+            if self.add_input_path(p) {
+                added += 1;
+                genomes += self.input_count(p).unwrap_or(0);
+            }
+        }
+        self.show_inputs = true;
+        self.status = if added == 0 {
+            "already in the list".to_string()
+        } else {
+            format!(
+                "added {added} item(s) with {} — {} in the list",
+                crate::dialogs::count_text(Some(genomes)),
+                crate::dialogs::count_text(Some(self.input_genome_total()))
+            )
+        };
+        self.save_prefs();
+    }
+
+    /// Genomes in all inputs together, as far as they could be counted.
+    pub(crate) fn input_genome_total(&self) -> usize {
+        self.inputs
+            .iter()
+            .filter_map(|p| self.input_counts.get(p).copied().flatten())
+            .sum()
     }
 }
 
@@ -1100,9 +1270,11 @@ impl eframe::App for InfinityApp {
         self.poll_restart(ctx);
         self.poll_open();
         self.poll_png();
+        self.poll_pick();
         self.handle_dropped_files(ctx);
         self.refresh_layout(now);
         self.step_animation(now);
+        self.refresh_groups();
 
         // Repaint policy: immediately when events are still queued or the tree
         // is moving, on a heartbeat while a run is going (the relay thread is
@@ -1114,7 +1286,7 @@ impl eframe::App for InfinityApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Panels are shown in the order that carves the window up the way the
         // mock-up of section 8 lays it out: the full-width bars first, then the
         // two sides, then the map across what is left, and the tree in the
@@ -1151,6 +1323,7 @@ impl eframe::App for InfinityApp {
         crate::settings_panel::show(&ctx, self);
         crate::outlier_dialog::show(&ctx, self);
         crate::tree_window::show(&ctx, self);
+        self.open_requested_pick(&ctx, Some(frame));
     }
 }
 
