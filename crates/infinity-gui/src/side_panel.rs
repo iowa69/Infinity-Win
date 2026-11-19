@@ -41,6 +41,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     input_warnings(ui, app);
+                    snp_groups(ui, app);
                     counters(ui, app);
                     summary(ui, app);
                     notes(ui, app);
@@ -133,6 +134,101 @@ fn input_warnings(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 .small()
                 .color(p.accent),
         );
+    }
+}
+
+/// The SNP groups at the tree header's threshold: one line per group, a
+/// click selects its genomes, and the CSV export.
+fn snp_groups(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    if !app.tree.groups_on || app.model.genome_count() == 0 {
+        return;
+    }
+    let p = theme::palette(ui);
+    let set = app.groups.set.clone();
+    theme::section(ui, &format!("SNP groups (≤{} SNPs)", set.threshold));
+    if set.covered.is_empty() {
+        theme::hint(
+            ui,
+            "Groups appear as soon as a cluster has exact SNP distances (Focus 2).",
+        );
+        return;
+    }
+    if set.groups.is_empty() {
+        theme::hint(
+            ui,
+            &format!(
+                "No two genomes are within {} SNPs of each other.",
+                set.threshold
+            ),
+        );
+    }
+    let mut pick: Option<(usize, bool)> = None;
+    let ink = crate::pubtree::Ink::screen(&p);
+    egui::ScrollArea::vertical()
+        .id_salt("groups-scroll")
+        .max_height(180.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (i, g) in set.groups.iter().enumerate() {
+                let selected = g.members.iter().all(|m| app.selection.contains(*m));
+                ui.horizontal(|ui| {
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(r, 3, crate::pubtree::group_hue(g.number));
+                    let text = format!(
+                        "G{} · c{} · {} genomes",
+                        g.number,
+                        g.cluster,
+                        g.members.len()
+                    );
+                    let resp = ui
+                        .selectable_label(selected, RichText::new(text).color(ink.text))
+                        .on_hover_text(format!(
+                            "{}
+widest pair {} SNPs apart · click to select, Ctrl-click to add",
+                            g.members
+                                .iter()
+                                .take(12)
+                                .filter_map(|m| app.model.genome(*m).map(|r| r.name.clone()))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            fmt::snps(g.diameter)
+                        ));
+                    if resp.clicked() {
+                        let toggle = ui.input(|i| i.modifiers.command);
+                        pick = Some((i, toggle));
+                    }
+                });
+            }
+        });
+    let alone: usize = set.covered.values().map(Vec::len).sum::<usize>() - set.grouped_genomes();
+    theme::hint(
+        ui,
+        &format!(
+            "{} genomes in {} groups, {alone} on their own{}",
+            set.grouped_genomes(),
+            set.groups.len(),
+            if set.missing.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; {} exact cluster(s) have no SNP matrix to group by",
+                    set.missing.len()
+                )
+            }
+        ),
+    );
+    if ui
+        .small_button("Export groups (CSV)")
+        .on_hover_text("every genome with its group at this threshold, to the export folder")
+        .clicked()
+    {
+        let ctx = ui.ctx().clone();
+        app.run_export(ExportAction::Item(Item::SnpGroups), &ctx);
+    }
+    if let Some((i, toggle)) = pick {
+        app.select_group(i, toggle);
     }
 }
 

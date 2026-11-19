@@ -10,7 +10,7 @@
 //! `Color32` and `Stroke` are plain data, so this module is testable without a
 //! window.
 
-use egui::{Color32, Stroke};
+use egui::Color32;
 use infinity_core::variant::VariantKind;
 
 use crate::fmt;
@@ -85,12 +85,6 @@ pub fn focus_color(focus: u8, dark: bool) -> Color32 {
     focus_style(focus, dark).color
 }
 
-impl FocusStyle {
-    pub fn stroke(&self) -> Stroke {
-        Stroke::new(self.width, self.color)
-    }
-}
-
 /// Convert HSV to an opaque RGB colour. `h` is wrapped into `[0, 1)`.
 pub fn hsv(h: f32, s: f32, v: f32) -> Color32 {
     let h = (h - h.floor()).clamp(0.0, 1.0);
@@ -158,10 +152,6 @@ pub fn variant_color(kind: VariantKind) -> Color32 {
         VariantKind::Complex => Color32::from_rgb(150, 60, 190),
     }
 }
-
-/// The search-hit marker in the tree. (Selection uses the theme accent, so
-/// the list, the tree and the map highlight a selected genome alike.)
-pub const HOVERED: Color32 = Color32::from_rgb(250, 200, 60);
 
 #[cfg(test)]
 mod tests {

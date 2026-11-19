@@ -177,8 +177,11 @@ pub struct UiModel {
     /// contamination, an incomplete assembly), in the engine's order.
     pub outliers: Vec<OutlierInfo>,
     /// Cluster id to the engine's distance matrix for it (`ClusterDetail`),
-    /// which the multi-genome selection summary reads.
+    /// which the multi-genome selection summary and the SNP groups read.
     pub details: HashMap<u32, ClusterDetailInfo>,
+    /// Bumped whenever `details` changes, so the SNP groups know to
+    /// recompute without the tree having to relayout.
+    pub detail_version: u64,
 
     /// Cluster distance threshold in force, as last reported by the engine.
     pub threshold: f64,
@@ -354,6 +357,7 @@ impl UiModel {
                     .map_or(true, |old| old.focus <= d.focus || old.names != d.names);
                 if keep {
                     self.details.insert(d.cluster, *d);
+                    self.detail_version += 1;
                 }
             }
             // Focus 1 maps and per-variant filters are written to the output
@@ -534,6 +538,7 @@ impl UiModel {
         // re-clustering only the ones whose cluster kept its members stay.
         let clusters = &self.clusters;
         let index = &self.cluster_index;
+        self.detail_version += 1;
         self.details.retain(|cid, d| {
             index.get(cid).is_some_and(|&ci| {
                 let mut a: Vec<&str> = clusters[ci]

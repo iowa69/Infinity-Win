@@ -132,7 +132,6 @@ impl Selection {
     }
 
     /// Select many at once, keeping what is selected already.
-    #[cfg(test)]
     pub fn extend(&mut self, ids: impl IntoIterator<Item = u32>) {
         for id in ids {
             self.add(id);

@@ -1,33 +1,35 @@
-//! The tree window: a second native window with the whole tree in publication
-//! style (white page, black branches, leaves coloured by cluster, brackets,
-//! scale bars, legend, selection), whatever the theme of the main window.
+//! The tree window: a second native window with the whole tree as a
+//! publication figure (white page, one line width, SNPs at the tips, SNP
+//! groups shaded, scale bar and legend), whatever the theme of the main
+//! window.
 //!
 //! It is an egui *deferred* viewport: it repaints on its own, so a big tree in
 //! it never slows the main window, and closing it leaves the main window as it
 //! was. The two talk through [`Shared`]: the main window puts a [`Figure`]
-//! there whenever the model or the selection changes, and picks up the clicks
-//! the tree window collected (a click on a leaf selects, with the same
-//! modifiers as everywhere else).
+//! there whenever the model, the selection or the SNP groups change, and picks
+//! up what the tree window collected (clicks on leaves select, with the same
+//! modifiers as everywhere else; the SNP-group threshold can be changed here
+//! too).
 //!
 //! Saving: SVG is written from the same primitives the window paints
 //! ([`crate::pubtree`] and [`crate::svg::from_scene`]); PNG is a screenshot of
 //! this window's canvas.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Vec2};
 
 use crate::app::InfinityApp;
-use crate::pubtree::{self, ClusterBrief, Figure, Geometry, HAlign, Hit, Prim, PubOptions};
+use crate::pubtree::{self, Figure, Geometry, Hit, Ink, PubOptions};
 use crate::selection::ClickMods;
 
 /// Row height and tree width of the saved SVG.
 const SVG_ROW_PX: f32 = 16.0;
-const SVG_TREE_W: f32 = 720.0;
-const MARGIN: f32 = 14.0;
+const SVG_TREE_W: f32 = 640.0;
+const MARGIN: f32 = 16.0;
 
 pub fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("infinity-tree-window")
@@ -60,7 +62,7 @@ pub struct Shared {
     pub open: bool,
     pub figure: Option<Figure>,
     /// What the figure was built from, to rebuild it only on a change.
-    pub built_from: Option<(u64, u64, u64)>,
+    pub built_from: Option<(u64, u64, u64, u64)>,
     pub view: PubView,
     pub opts: PubOptions,
     /// Every cluster opened (the full tree), or the clusters opened in the
@@ -68,8 +70,14 @@ pub struct Shared {
     pub all_open: bool,
     /// Clicks on leaves, for the main window to apply.
     pub clicks: Vec<(u32, ClickMods)>,
-    /// Clicks on clusters (brackets, triangles): make it the map's cluster.
+    /// Clicks on clusters (brackets, wedges): make it the map's cluster.
     pub cluster_clicks: Vec<u32>,
+    /// Clicks on a SNP group's label: select its genomes.
+    pub group_clicks: Vec<(usize, bool)>,
+    /// The SNP-group switch and threshold as the main window has them; a
+    /// change made here is sent back through `groups_request`.
+    pub groups: (bool, u32),
+    pub groups_request: Option<(bool, u32)>,
     /// Where pictures are saved: the main window's export folder.
     pub export_dir: String,
     pub status: String,
@@ -86,6 +94,7 @@ pub type SharedRef = Arc<Mutex<Shared>>;
 pub fn new_shared() -> SharedRef {
     Arc::new(Mutex::new(Shared {
         all_open: true,
+        groups: (true, 5),
         ..Default::default()
     }))
 }
@@ -113,43 +122,8 @@ pub fn build_figure(app: &InfinityApp, all_open: bool) -> Option<Figure> {
     };
     let display = app.model.display_tree(&open)?;
     let layout = crate::layout::layout(&display);
-    let mut genome_cluster = HashMap::new();
-    let mut clusters = BTreeMap::new();
-    for c in &app.model.clusters {
-        clusters.insert(
-            c.id,
-            ClusterBrief {
-                size: c.size(),
-                focus: c.focus,
-                approximate: c.approximate,
-            },
-        );
-        for &g in &c.members {
-            genome_cluster.insert(g, c.id);
-        }
-    }
-    let selection: HashSet<u32> = app.selection.ids().iter().copied().collect();
-    let mut selected_in: HashMap<u32, usize> = HashMap::new();
-    // Only collapsed clusters need a count; an opened one shows its leaves.
-    for &i in &layout.leaves {
-        if let crate::layout::NodeKind::ClusterCollapsed { id, .. } = &layout.nodes[i].kind {
-            let n = app
-                .model
-                .cluster(*id)
-                .map(|c| c.members.iter().filter(|g| selection.contains(g)).count())
-                .unwrap_or(0);
-            if n > 0 {
-                selected_in.insert(*id, n);
-            }
-        }
-    }
-    Some(Figure {
-        layout,
-        genome_cluster,
-        clusters,
-        selection,
-        selected_in,
-    })
+    let marks = app.marks(&layout, false);
+    Some(Figure { layout, marks })
 }
 
 /// Open the tree window (the header button). Calling it again while it is
@@ -176,11 +150,13 @@ pub fn show(ctx: &egui::Context, app: &mut InfinityApp) {
         return;
     }
     let shared = Arc::clone(&app.tree_window);
-    let (clicks, cluster_clicks, open, all_open) = {
+    let (clicks, cluster_clicks, group_clicks, request, open, all_open) = {
         let mut s = lock(&shared);
         (
             std::mem::take(&mut s.clicks),
             std::mem::take(&mut s.cluster_clicks),
+            std::mem::take(&mut s.group_clicks),
+            s.groups_request.take(),
             s.open,
             s.all_open,
         )
@@ -202,8 +178,27 @@ pub fn show(ctx: &egui::Context, app: &mut InfinityApp) {
     for c in cluster_clicks {
         app.set_cluster(c, true);
     }
+    for (g, additive) in group_clicks {
+        app.select_group(g, additive);
+    }
+    if let Some((on, n)) = request {
+        app.tree.groups_on = on;
+        app.tree.group_n = n;
+        app.refresh_groups();
+    }
 
     // Rebuild the figure only when what it shows changed.
+    let groups_sig = if app.tree.groups_on {
+        signature(
+            app.groups
+                .set
+                .groups
+                .iter()
+                .flat_map(|g| g.members.iter().copied().chain([u32::MAX])),
+        ) ^ u64::from(app.groups.set.threshold)
+    } else {
+        0
+    };
     let key = (
         app.model.version,
         signature(app.selection.ids().iter().copied()),
@@ -212,8 +207,14 @@ pub fn show(ctx: &egui::Context, app: &mut InfinityApp) {
         } else {
             app.expanded_signature()
         },
+        groups_sig,
     );
     let stale = lock(&shared).built_from != Some(key);
+    {
+        let mut s = lock(&shared);
+        s.groups = (app.tree.groups_on, app.tree.group_n);
+        s.opts.groups = app.tree.groups_on;
+    }
     if stale {
         let fig = build_figure(app, all_open);
         let mut s = lock(&shared);
@@ -236,7 +237,7 @@ pub fn show(ctx: &egui::Context, app: &mut InfinityApp) {
             infinity_core::VERSION,
             app.model.genome_count()
         ))
-        .with_inner_size([980.0, 860.0])
+        .with_inner_size([1040.0, 880.0])
         .with_min_inner_size([480.0, 360.0]);
     let child = Arc::clone(&shared);
     ctx.show_viewport_deferred(viewport_id(), builder, move |ui, _class| {
@@ -282,8 +283,14 @@ fn export_path(s: &Shared, file: &str) -> PathBuf {
 
 /// Write the whole figure as SVG, at a readable row height.
 pub fn save_svg(fig: &Figure, opts: &PubOptions, path: &std::path::Path) -> Result<(), String> {
-    let (prims, size) = pubtree::whole_scene(fig, opts, SVG_ROW_PX, SVG_TREE_W);
-    let svg = crate::svg::from_scene(&prims, size);
+    let svg = crate::svg::render(
+        fig,
+        &crate::svg::SvgOptions {
+            opts: *opts,
+            tree_width: SVG_TREE_W,
+            row_px: SVG_ROW_PX,
+        },
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -316,9 +323,28 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Shared) {
                     s.built_from = None;
                     ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                 }
-                ui.checkbox(&mut s.opts.branch_labels, "SNP counts on branches");
-                ui.checkbox(&mut s.opts.cluster_brackets, "Cluster brackets");
-                ui.checkbox(&mut s.opts.legend, "Legend");
+                ui.menu_button("Show ▾", |ui| {
+                    ui.checkbox(&mut s.opts.tip_snps, "SNPs at the tips (+n)");
+                    ui.checkbox(&mut s.opts.branch_labels, "SNP counts on internal branches");
+                    ui.checkbox(&mut s.opts.cluster_brackets, "Cluster brackets");
+                    ui.checkbox(&mut s.opts.aligned_tips, "Aligned tip labels");
+                    ui.checkbox(&mut s.opts.color_strip, "Cluster colour strip");
+                    ui.checkbox(&mut s.opts.legend, "Scale bar legend");
+                });
+                ui.separator();
+                let (mut on, mut n) = s.groups;
+                let changed_on = ui
+                    .checkbox(&mut on, "SNP groups ≤")
+                    .on_hover_text("shade genomes linked by chains of at most this many SNPs")
+                    .changed();
+                let changed_n = ui
+                    .add(egui::DragValue::new(&mut n).range(0..=100).suffix(" SNPs"))
+                    .changed();
+                if changed_on || changed_n {
+                    s.groups = (on, n);
+                    s.groups_request = Some((on, n));
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                }
                 ui.separator();
                 if ui
                     .button("Save PNG")
@@ -345,8 +371,8 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Shared) {
             });
             let hint = if s.status.is_empty() {
                 format!(
-                    "export folder: {} · drag to pan, scroll to zoom, click a leaf to select \
-                     (Ctrl, Shift as in the main window)",
+                    "export folder: {} · drag to pan, scroll to zoom, click a name to select \
+                     (Ctrl, Shift as in the main window), click a group label to select the group",
                     if s.export_dir.is_empty() { "." } else { &s.export_dir }
                 )
             } else {
@@ -354,30 +380,6 @@ fn toolbar(ui: &mut egui::Ui, s: &mut Shared) {
             };
             ui.label(egui::RichText::new(hint).small().color(Color32::from_gray(90)));
         });
-}
-
-/// Room to keep right of the deepest tip when fitting: the widest label (if
-/// labels show at this row height) and the cluster brackets.
-fn label_room(fig: &Figure, opts: &PubOptions, px_per_row: f32) -> f32 {
-    let labels = if px_per_row >= pubtree::MIN_ROW_FOR_LABELS {
-        let size = pubtree::label_size(px_per_row);
-        fig.layout
-            .leaves
-            .iter()
-            .map(|&i| match &fig.layout.nodes[i].kind {
-                crate::layout::NodeKind::Genome { name, .. } => name.chars().count() + 2,
-                crate::layout::NodeKind::ClusterCollapsed { .. } => 30,
-                _ => 0,
-            })
-            .max()
-            .unwrap_or(0) as f32
-            * size
-            * 0.56
-            + 12.0
-    } else {
-        8.0
-    };
-    labels + if opts.cluster_brackets { 80.0 } else { 0.0 } + 10.0
 }
 
 fn zoom(v: &mut PubView, f: f32) {
@@ -394,32 +396,47 @@ fn canvas(ui: &mut egui::Ui, s: &mut Shared) {
             let ppp = ui.ctx().pixels_per_point();
             s.canvas = Some((rect, ppp));
             let painter = ui.painter().with_clip_rect(rect);
-            painter.rect_filled(rect, 0, pubtree::PAPER);
+            let ink = Ink::PAPER;
+            painter.rect_filled(rect, 0, ink.paper);
             let Some(fig) = s.figure.as_ref() else {
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "No tree yet: it appears as soon as the genomes are clustered.",
                     egui::FontId::proportional(15.0),
-                    pubtree::INK_MID,
+                    ink.text_weak,
                 );
                 return;
             };
-            let legend_h = if s.opts.legend {
-                pubtree::legend(fig, Pos2::ZERO).1.y + 10.0
-            } else {
-                0.0
-            };
-            let bars_h = pubtree::scale_bars_height(fig);
+            let l = &fig.layout;
 
             // --- view: fit, pan, zoom ---------------------------------------
+            let base = rect.min + Vec2::new(MARGIN, MARGIN);
+            let geometry = |v: &PubView| Geometry {
+                origin: base + v.offset + Vec2::new(0.0, v.px_per_row * 0.5),
+                px_per_row: v.px_per_row,
+                px_per_unit: v.px_per_unit,
+                clip: rect,
+            };
+            let footer_h = |v: &PubView| {
+                let g = geometry(v);
+                let used = pubtree::Used {
+                    exact: true,
+                    estimate: true,
+                    groups: s.opts.groups,
+                    selection: !fig.marks.selection.is_empty(),
+                    wedges: true,
+                    tip_snps: s.opts.tip_snps,
+                };
+                pubtree::footer_height(l, &fig.marks, &g, &used, s.opts.legend, rect.width())
+            };
             if s.view.needs_fit {
-                let h = (rect.height() - 2.0 * MARGIN - legend_h - bars_h).max(40.0);
-                let ppr = (h / fig.layout.rows.max(1.0) as f32).clamp(0.3, 28.0);
-                let w = (rect.width() - 2.0 * MARGIN - label_room(fig, &s.opts, ppr))
-                    .max(rect.width() * 0.3);
+                let h = (rect.height() - 2.0 * MARGIN - footer_h(&s.view)).max(40.0);
+                let ppr = (h / l.rows.max(1.0) as f32).clamp(0.3, 22.0);
+                let room = pubtree::label_room(l, &fig.marks, &s.opts, ppr);
+                let w = (rect.width() - 2.0 * MARGIN - room).max(rect.width() * 0.3);
                 s.view.px_per_row = ppr;
-                s.view.px_per_unit = (w / fig.layout.x_max.max(1e-6) as f32).clamp(5.0, 60_000.0);
+                s.view.px_per_unit = (w / l.x_max.max(1e-6) as f32).clamp(5.0, 60_000.0);
                 s.view.offset = Vec2::ZERO;
                 s.view.needs_fit = false;
             }
@@ -428,11 +445,10 @@ fn canvas(ui: &mut egui::Ui, s: &mut Shared) {
             }
             let pointer = resp.hover_pos();
             let scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
-            let base = rect.min + Vec2::new(MARGIN, MARGIN + legend_h);
             if scroll.y.abs() > 0.01 {
                 let anchor = pointer.unwrap_or(rect.center());
                 let f = (scroll.y * 0.004).exp();
-                let o = base + s.view.offset;
+                let o = geometry(&s.view).origin;
                 let lx = (anchor.x - o.x) / s.view.px_per_unit;
                 let ly = (anchor.y - o.y) / s.view.px_per_row;
                 zoom(&mut s.view, f);
@@ -440,47 +456,30 @@ fn canvas(ui: &mut egui::Ui, s: &mut Shared) {
                     anchor.x - lx * s.view.px_per_unit,
                     anchor.y - ly * s.view.px_per_row,
                 );
-                s.view.offset = o2 - base;
+                s.view.offset = o2 - base - Vec2::new(0.0, s.view.px_per_row * 0.5);
             }
             if scroll.x.abs() > 0.01 {
                 s.view.offset.x += scroll.x;
             }
-            let g = Geometry {
-                origin: base + s.view.offset + Vec2::new(0.0, s.view.px_per_row * 0.5),
-                px_per_row: s.view.px_per_row,
-                px_per_unit: s.view.px_per_unit,
-                clip: rect,
-            };
+            let g = geometry(&s.view);
 
             // --- draw --------------------------------------------------------
-            let (prims, hits) = pubtree::scene(fig, &g, &s.opts);
-            paint(&painter, &prims);
-            let bars = pubtree::scale_bars(
-                fig,
-                &g,
-                Pos2::new(rect.left() + MARGIN, rect.bottom() - MARGIN - 4.0),
+            let sc = pubtree::scene(l, &fig.marks, &g, &s.opts, &ink, None);
+            pubtree::paint(&painter, &sc.prims);
+            let fh =
+                pubtree::footer_height(l, &fig.marks, &g, &sc.used, s.opts.legend, rect.width());
+            let area = Rect::from_min_max(
+                Pos2::new(rect.left(), rect.bottom() - fh - 4.0),
+                rect.right_bottom(),
             );
-            // The bars sit on a white strip so branches never run through them.
-            if !bars.is_empty() {
-                let strip = Rect::from_min_max(
-                    Pos2::new(rect.left(), rect.bottom() - bars_h - MARGIN),
-                    rect.right_bottom(),
-                );
-                painter.rect_filled(
-                    strip,
-                    0,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 230),
-                );
-                paint(&painter, &bars);
-            }
-            if s.opts.legend {
-                let (lp, _) = pubtree::legend(fig, rect.min + Vec2::splat(MARGIN * 0.6));
-                paint(&painter, &lp);
-            }
+            let footer =
+                pubtree::footer(l, &fig.marks, &g, &sc.used, s.opts.legend, &ink, area, true);
+            pubtree::paint(&painter, &footer);
 
             // --- clicks ------------------------------------------------------
-            let hit = pointer.and_then(|p| {
-                hits.iter()
+            let hit = pointer.filter(|p| !area.contains(*p)).and_then(|p| {
+                sc.hits
+                    .iter()
                     .rev()
                     .find(|(_, r)| r.contains(p))
                     .map(|(h, _)| *h)
@@ -495,8 +494,12 @@ fn canvas(ui: &mut egui::Ui, s: &mut Shared) {
                         s.clicks.push((id, mods));
                         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                     }
-                    Some(Hit::Cluster(id)) => {
+                    Some(Hit::Cluster(id)) | Some(Hit::Badge(id)) => {
                         s.cluster_clicks.push(id);
+                        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                    }
+                    Some(Hit::Group(i)) => {
+                        s.group_clicks.push((i, mods.toggle));
                         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                     }
                     _ => {}
@@ -523,68 +526,6 @@ fn canvas(ui: &mut egui::Ui, s: &mut Shared) {
         });
 }
 
-/// Paint the primitives with egui. The SVG writer reads the same list.
-pub fn paint(painter: &egui::Painter, prims: &[Prim]) {
-    for p in prims {
-        match p {
-            Prim::Line {
-                a,
-                b,
-                width,
-                color,
-                dash,
-            } => match dash {
-                None => {
-                    painter.line_segment([*a, *b], Stroke::new(*width, *color));
-                }
-                Some(d) => {
-                    painter.extend(egui::Shape::dashed_line(
-                        &[*a, *b],
-                        Stroke::new(*width, *color),
-                        *d,
-                        *d,
-                    ));
-                }
-            },
-            Prim::Circle { c, r, fill, stroke } => {
-                painter.circle_filled(*c, *r, *fill);
-                if let Some((w, col)) = stroke {
-                    painter.circle_stroke(*c, *r + w * 0.5 + 0.6, Stroke::new(*w, *col));
-                }
-            }
-            Prim::Rect { r, fill, rounding } => {
-                painter.rect_filled(*r, *rounding, *fill);
-            }
-            Prim::Poly { pts, fill, stroke } => {
-                painter.add(egui::Shape::convex_polygon(
-                    pts.clone(),
-                    *fill,
-                    Stroke::new(stroke.0, stroke.1),
-                ));
-            }
-            Prim::Text {
-                pos,
-                align,
-                text,
-                size,
-                color,
-                bold,
-            } => {
-                let anchor = match align {
-                    HAlign::Left => egui::Align2::LEFT_CENTER,
-                    HAlign::Center => egui::Align2::CENTER_CENTER,
-                };
-                let font = egui::FontId::proportional(*size);
-                painter.text(*pos, anchor, text, font.clone(), *color);
-                if *bold {
-                    // No bold face is loaded: a second pass, half a pixel over.
-                    painter.text(*pos + Vec2::new(0.55, 0.0), anchor, text, font, *color);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,12 +547,13 @@ mod tests {
         let svg = std::fs::read_to_string(&path).unwrap();
         assert!(svg.starts_with("<svg xmlns"));
         assert!(svg.contains(r##"fill="#ffffff""##), "white page");
-        assert!(svg.contains(">g1</text>"));
+        assert!(svg.contains(">g1<tspan"));
         assert!(
-            svg.contains(r#"font-weight="bold">g1</text>"#),
+            svg.contains(r#"font-weight="bold">g1<tspan"#),
             "g1 is selected"
         );
-        assert!(svg.contains("between clusters, estimate"));
+        assert!(svg.contains("SNPs between clusters"));
+        assert!(svg.contains("G1 · 2 genomes"));
         assert!(svg.trim_end().ends_with("</svg>"));
         std::fs::remove_dir_all(&dir).ok();
     }

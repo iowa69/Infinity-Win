@@ -1,40 +1,34 @@
-//! The tree panel (section 8): a rectangular tree drawn with `egui::Painter`,
-//! with pan and zoom, a scale bar, collapsed clusters that open on click, focus
-//! styling, a legend, hover numbers and a search box.
+//! The tree panel (section 8): the tree as a clean rectangular phylogram, with
+//! pan and zoom, the SNPs of each genome's own branch after its name, SNP
+//! groups shaded at a threshold the user slides, collapsed clusters that open
+//! on click, a scale bar and a legend of what is on screen, hover numbers and
+//! a search box.
 //!
-//! egui has no tree widget, so the geometry comes from [`crate::layout`] and this
-//! file only turns layout coordinates into pixels and pixels back into hits. The
-//! transform is a small pure type ([`View`]) so that the mapping can be tested
-//! without a window.
-//!
-//! The canvas is drawn in one read-only pass over the model; clicks are collected
-//! and applied afterwards, so drawing never has to fight the borrow checker.
+//! The picture itself is built by [`crate::pubtree`], the same builder the
+//! tree window and the SVG export use; this file turns the pan and zoom into a
+//! [`Geometry`], paints the scene, and turns the scene's click targets back
+//! into selections. The transform is a small pure type ([`View`]) so that the
+//! mapping can be tested without a window.
 
 use eframe::egui;
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
-use std::collections::HashMap;
-
-use crate::app::{InfinityApp, TreeMode, TreeView};
-use crate::layout::{self, NodeKind, TreeLayout};
+use crate::app::{InfinityApp, TreeMode};
+use crate::layout::{NodeKind, TreeLayout};
 use crate::pairwise::PairSource;
-use crate::selection::{ClickMods, Selection};
+use crate::pubtree::{self, Geometry, Hit, Ink};
+use crate::selection::ClickMods;
 use crate::state::UiModel;
-use crate::{colors, fmt, theme};
+use crate::{colors, fmt, groups, theme};
 
-/// Fraction of the panel width kept free for leaf labels when fitting.
-const LABEL_FRACTION: f32 = 0.32;
-const MARGIN: f32 = 10.0;
+const MARGIN: f32 = 12.0;
 const MIN_PX_PER_ROW: f32 = 0.35;
 const MAX_PX_PER_ROW: f32 = 240.0;
 const MIN_PX_PER_UNIT: f32 = 8.0;
 const MAX_PX_PER_UNIT: f32 = 40_000.0;
-/// Below this row height labels would overlap, so they are dropped.
-const MIN_ROW_FOR_LABELS: f32 = 7.0;
-/// Below this row height the "≈" markers on Focus 1 branches are dropped, so a
-/// zoomed-out tree does not turn into a field of glyphs. The legend still says
-/// what Focus 1 means.
-const MIN_ROW_FOR_APPROX: f32 = 12.0;
+/// Rows are never fitted taller than this: a three-genome tree should not
+/// fill the panel with 200-pixel rows.
+const MAX_FIT_ROW: f32 = 24.0;
 
 /// Layout coordinates to screen coordinates and back.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,20 +64,20 @@ impl View {
         v.origin += pointer - now;
         v
     }
-}
 
-/// What the pointer is over.
-#[derive(Debug, Clone, PartialEq)]
-enum Hover {
-    Genome(u32),
-    Cluster(u32),
-    /// The "n selected" badge on a collapsed cluster: clicking opens it.
-    SelectedBadge(u32),
+    fn geometry(&self, clip: Rect) -> Geometry {
+        Geometry {
+            origin: self.origin,
+            px_per_row: self.px_per_row,
+            px_per_unit: self.px_per_unit,
+            clip,
+        }
+    }
 }
 
 /// The genome ids in the tree's row order, for a Shift-click range. A
 /// collapsed cluster stands for all of its members, in the order the cluster
-/// lists them, so a range drawn across a triangle includes what it hides.
+/// lists them, so a range drawn across a wedge includes what it hides.
 pub(crate) fn row_order(l: &TreeLayout, model: &UiModel) -> Vec<u32> {
     let mut out = Vec::with_capacity(l.leaves.len());
     for &i in &l.leaves {
@@ -100,20 +94,11 @@ pub(crate) fn row_order(l: &TreeLayout, model: &UiModel) -> Vec<u32> {
     out
 }
 
-/// How many selected genomes each cluster holds.
-fn selected_per_cluster(model: &UiModel, sel: &Selection) -> HashMap<u32, usize> {
-    let mut out = HashMap::new();
-    for &g in sel.ids() {
-        if let Some(c) = model.cluster_of(g) {
-            *out.entry(c).or_insert(0) += 1;
-        }
-    }
-    out
-}
-
 pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
     header(ui, app);
     canvas(ui, app);
+    let ctx = ui.ctx().clone();
+    help_window(&ctx, app);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,11 +117,10 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         let sel = app.selected_cluster;
         let label = match sel.and_then(|c| app.model.cluster(c)) {
             Some(c) => format!(
-                "c{} · {} genomes · {}{}",
+                "c{} · {} genomes · {}",
                 c.id,
                 c.size(),
-                fmt::focus_word(c.focus),
-                if c.approximate { " ≈" } else { "" }
+                state_word(c.focus, c.approximate)
             ),
             None => format!("{} clusters", app.model.cluster_count()),
         };
@@ -150,11 +134,10 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
                         .cluster(id)
                         .map(|c| {
                             format!(
-                                "cluster {} — {} genomes, {}{}",
+                                "cluster {} — {} genomes, {}",
                                 c.id,
                                 c.size(),
-                                fmt::focus_word(c.focus),
-                                if c.approximate { " ≈" } else { "" }
+                                state_word(c.focus, c.approximate)
                             )
                         })
                         .unwrap_or_default();
@@ -221,10 +204,17 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
             fit_now = true;
         }
         ui.menu_button("View ▾", |ui| {
-            ui.checkbox(&mut app.tree.show_legend, "Legend");
-            ui.checkbox(&mut app.tree.branch_labels, "SNP counts on branches");
-            ui.checkbox(&mut app.tree.aligned_tips, "Aligned tip labels");
-            ui.checkbox(&mut app.tree.color_strip, "Cluster colour strip");
+            let o = &mut app.tree.opts;
+            ui.checkbox(&mut o.tip_snps, "SNPs at the tips (+n)")
+                .on_hover_text("after each name, the SNPs on that genome's own branch");
+            ui.checkbox(&mut o.branch_labels, "SNP counts on internal branches");
+            ui.checkbox(&mut o.cluster_brackets, "Cluster brackets");
+            ui.checkbox(&mut o.aligned_tips, "Aligned tip labels");
+            ui.checkbox(&mut o.color_strip, "Cluster colour strip");
+            ui.checkbox(&mut o.legend, "Legend");
+            ui.separator();
+            ui.checkbox(&mut app.tree.paper, "White background")
+                .on_hover_text("draw the tree on white, like the exported figure");
         });
         if ui
             .button("⛶ Tree window")
@@ -236,11 +226,19 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
         {
             open_window = true;
         }
+        if ui
+            .selectable_label(app.tree.show_help, "？ How to read")
+            .on_hover_text("what the branches, numbers and shaded groups mean")
+            .clicked()
+        {
+            app.tree.show_help = !app.tree.show_help;
+        }
     });
     if open_window {
         let ctx = ui.ctx().clone();
         crate::tree_window::open(app, &ctx);
     }
+    group_controls(ui, app);
     // The pairwise readout gets a line of its own: it is the longest thing in
     // the header and the one that changes most.
     let mut open_hidden = false;
@@ -252,7 +250,7 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
             let p = theme::palette(ui);
             if ui
                 .small_button(
-                    egui::RichText::new(format!(
+                    RichText::new(format!(
                         "⤢ show {n} selected in {} collapsed cluster{}",
                         hidden.len(),
                         if hidden.len() == 1 { "" } else { "s" }
@@ -286,6 +284,87 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     }
 }
 
+/// "exact" or "≈ estimate".
+fn state_word(focus: u8, approximate: bool) -> &'static str {
+    if focus >= fmt::FOCUS_EXACT && !approximate {
+        "exact"
+    } else {
+        "≈ estimate"
+    }
+}
+
+/// The SNP-threshold row: on/off, a slider that is fine at the low end, a
+/// number box, quick picks, and what it found.
+fn group_controls(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    let p = theme::palette(ui);
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        changed |= ui
+            .checkbox(&mut app.tree.groups_on, "SNP groups")
+            .on_hover_text(
+                "Shade the genomes linked by chains of at most this many SNPs \
+                 (single linkage), within each exact cluster.",
+            )
+            .changed();
+        ui.add_enabled_ui(app.tree.groups_on, |ui| {
+            ui.label(RichText::new("≤").color(p.text_weak));
+            let mut t = groups::snps_to_slider(app.tree.group_n);
+            ui.spacing_mut().slider_width = 150.0;
+            if ui
+                .add(egui::Slider::new(&mut t, 0.0..=1.0).show_value(false))
+                .on_hover_text(
+                    "0–20 SNPs one by one on the left part of the track, up to 100 on the right",
+                )
+                .changed()
+            {
+                app.tree.group_n = groups::slider_to_snps(t);
+                changed = true;
+            }
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut app.tree.group_n)
+                        .range(0..=100)
+                        .suffix(" SNPs"),
+                )
+                .changed();
+            for q in [5u32, 10, 20] {
+                if ui
+                    .selectable_label(app.tree.group_n == q, q.to_string())
+                    .on_hover_text(format!("{q} SNPs"))
+                    .clicked()
+                {
+                    app.tree.group_n = q;
+                    changed = true;
+                }
+            }
+        });
+        if changed {
+            app.refresh_groups();
+        }
+        if app.tree.groups_on {
+            let s = &app.groups.set;
+            let text = if s.covered.is_empty() {
+                if app.model.exact_clusters() == 0 || app.model.genome_count() == 0 {
+                    "groups appear when a cluster becomes exact".to_string()
+                } else {
+                    "no SNP matrix for the exact clusters yet".to_string()
+                }
+            } else if s.groups.is_empty() {
+                format!("no two genomes within {} SNPs", s.threshold)
+            } else {
+                format!(
+                    "{} group{} · {} genomes",
+                    s.groups.len(),
+                    if s.groups.len() == 1 { "" } else { "s" },
+                    s.grouped_genomes()
+                )
+            };
+            ui.label(RichText::new(text).small().color(p.text_weak))
+                .on_hover_text("the list is in the Run panel; click a group label to select it");
+        }
+    });
+}
+
 /// The pairwise readout of section 8: distance, SNP count and focus of the two
 /// selected leaves.
 fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
@@ -311,7 +390,7 @@ fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
                 }
             );
             ui.label(
-                egui::RichText::new(format!(
+                RichText::new(format!(
                     "{na} × {nb}:  {nums} | d = {} | {}",
                     p.dist_text(),
                     fmt::focus_label(p.focus, p.approximate)
@@ -340,7 +419,7 @@ fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
             } else {
                 theme::palette(ui).text
             };
-            ui.label(egui::RichText::new(s.text()).small().color(colour))
+            ui.label(RichText::new(s.text()).small().color(colour))
                 .on_hover_text(
                     "SNP distances are counted only between genomes of the same cluster; \
                      select exactly two for their full pairwise numbers.",
@@ -349,6 +428,77 @@ fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
         None => {
             theme::hint(ui, app.pair_hint());
         }
+    }
+}
+
+/// The "How to read this tree" panel.
+fn help_window(ctx: &egui::Context, app: &mut InfinityApp) {
+    if !app.tree.show_help {
+        return;
+    }
+    let n = app.tree.group_n;
+    let mut open = true;
+    egui::Window::new("How to read this tree")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(400.0)
+        .anchor(Align2::RIGHT_TOP, Vec2::new(-280.0, 120.0))
+        .show(ctx, |ui| {
+            let p = theme::palette(ui);
+            let item = |ui: &mut egui::Ui, head: &str, body: String| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(head).strong().color(p.text_strong));
+                    ui.label(RichText::new(body).color(p.text));
+                });
+                ui.add_space(3.0);
+            };
+            item(
+                ui,
+                "Branch length = SNPs.",
+                "The further right a genome sits, the more SNPs separate it from the others; \
+                 the scale bar at the bottom gives the length of 1, 2, 5 or 10 SNPs."
+                    .into(),
+            );
+            item(
+                ui,
+                "+n after a name",
+                "is the number of SNPs on that genome's own branch: differences it has that its \
+                 closest relatives in the tree do not. +0 means none of its own."
+                    .into(),
+            );
+            item(
+                ui,
+                "Shaded groups (G1, G2 …)",
+                format!(
+                    "are genomes linked by chains of at most {n} SNPs (single linkage), counted \
+                     from the exact pairwise SNP matrix. Move the slider to see what groups at \
+                     5, 10 or 20 SNPs; click a group's label to select its genomes."
+                ),
+            );
+            item(
+                ui,
+                "Dark branches",
+                "are exact SNP counts inside a cluster. Grey branches are estimates: the \
+                 distances between clusters, or a cluster still being refined (≈)."
+                    .into(),
+            );
+            item(
+                ui,
+                "Triangles",
+                "are collapsed clusters: click one to open it. A bracket on the right names \
+                 each opened cluster."
+                    .into(),
+            );
+            ui.add_space(2.0);
+            theme::hint(
+                ui,
+                "SNPs are counted only in the core genome every member of a cluster shares, \
+                 after the SNP rules (Settings → SNP rules).",
+            );
+        });
+    if !open {
+        app.tree.show_help = false;
     }
 }
 
@@ -377,54 +527,24 @@ fn centre_on(app: &mut InfinityApp, genome: u32) {
 // Canvas
 // ---------------------------------------------------------------------------
 
-/// Everything the drawing pass needs, gathered once so that the draw functions
-/// stay small.
-struct Draw<'a> {
-    painter: egui::Painter,
-    view: View,
-    rect: Rect,
-    dark: bool,
-    weak: Color32,
-    strong: Color32,
-    text: Color32,
-    model: &'a UiModel,
-    selection: &'a Selection,
-    /// Selected genomes per cluster, for the badges on collapsed clusters.
-    selected_in: HashMap<u32, usize>,
-    /// The selection colour: the theme accent, as in the genome list.
-    accent: Color32,
-    search_hit: Option<u32>,
-    /// Node positions in layout coordinates, parallel to `TreeLayout::nodes`,
-    /// mid-animation when the tree is moving.
-    positions: &'a [(f64, f64)],
-    /// Branch labels, aligned tips, colour strip.
-    opts: &'a TreeView,
-    selected_cluster: Option<u32>,
-}
-
-impl Draw<'_> {
-    /// Screen x of the aligned tip-label column: just right of the deepest tip.
-    fn tip_column(&self, l: &TreeLayout) -> f32 {
-        self.view.screen((l.x_max, 0.0)).x + 10.0
-    }
-}
-
 fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let rect = remaining_rect(ui);
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     app.tree_rect = Some((rect, ui.ctx().pixels_per_point()));
-    let dark = ui.visuals().dark_mode;
     let pal = theme::palette(ui);
-    // The canvas is the darkest (or lightest) surface of the window, framed by
-    // a hairline: the "stage" the tree is drawn on.
-    let bg = pal.canvas;
-    let border = Stroke::new(1.0, pal.border);
-    let weak = pal.text_weak;
-    let strong = pal.text_strong;
-    let text_col = pal.text;
+    let ink = if app.tree.paper {
+        Ink::PAPER
+    } else {
+        Ink::screen(&pal)
+    };
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 6, bg);
-    painter.rect_stroke(rect, 6, border, egui::StrokeKind::Inside);
+    painter.rect_filled(rect, 6, ink.paper);
+    painter.rect_stroke(
+        rect,
+        6,
+        Stroke::new(1.0, pal.border),
+        egui::StrokeKind::Inside,
+    );
 
     // Pointer state is read once, up front: `Response` is consumed by the
     // tooltip call at the end of the frame.
@@ -438,12 +558,29 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mods = ui.ctx().input(|i| ClickMods::from_modifiers(&i.modifiers));
     let scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
 
+    // Taken out for the frame (and put back below) rather than cloned: the
+    // layout of a thousand genomes is not small.
+    let Some(l) = app.tree_layout.take() else {
+        hint(
+            &painter,
+            rect,
+            if app.model.genome_count() == 0 {
+                "No genomes yet.\nAdd files or a folder, then press Run."
+            } else if app.model.backbone.is_none() {
+                "Scanning genomes …\nThe first tree appears as soon as clustering is done."
+            } else {
+                "No tree to draw."
+            },
+            ink.text_weak,
+        );
+        return;
+    };
+    let opts = app.tree_opts();
+    let marks = app.marks(&l, true);
+
     // --- interaction first, so this frame draws the result ------------------
-    let fit_to = app.tree_layout.as_ref().map(|l| (l.rows, l.x_max));
     if app.tree.needs_fit && !app.tree.user_moved {
-        if let Some((rows, x_max)) = fit_to {
-            fit_view(app, rect, rows, x_max);
-        }
+        fit_view(app, rect, &l, &marks, &opts);
         app.tree.needs_fit = false;
     }
     if let Some(d) = dragged_by {
@@ -475,115 +612,73 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
         app.tree.user_moved = true;
     }
 
-    if app.tree_layout.is_none() {
-        hint(
+    // --- draw ----------------------------------------------------------------
+    let g = current_view(app, rect).geometry(rect.shrink(1.0));
+    let positions = (app.positions.len() == l.nodes.len()).then_some(app.positions.as_slice());
+    let sc = pubtree::scene(&l, &marks, &g, &opts, &ink, positions);
+    pubtree::paint(&painter, &sc.prims);
+    let fh = pubtree::footer_height(&l, &marks, &g, &sc.used, opts.legend, rect.width());
+    let footer = Rect::from_min_max(
+        Pos2::new(rect.left() + 1.0, rect.bottom() - fh - 4.0),
+        Pos2::new(rect.right() - 1.0, rect.bottom() - 2.0),
+    );
+    if fh > 0.0 {
+        pubtree::paint(
             &painter,
-            rect,
-            if app.model.genome_count() == 0 {
-                "No genomes yet.\nAdd a file or a folder above and press Run."
-            } else if app.model.backbone.is_none() {
-                "Scanning genomes …\nThe blurry tree appears as soon as clustering is done."
-            } else {
-                "No tree to draw."
-            },
-            dark,
+            &pubtree::footer(&l, &marks, &g, &sc.used, opts.legend, &ink, footer, true),
         );
-        return;
     }
 
-    let view = current_view(app, rect);
-
-    // --- read-only drawing pass --------------------------------------------
-    let hits: Vec<(Hover, Rect)>;
-    let mut hover: Option<Hover> = None;
-    let mut tooltip: Vec<String> = Vec::new();
-    {
-        let l = app.tree_layout.as_ref().expect("checked above");
-        let d = Draw {
-            painter: painter.clone(),
-            view,
-            rect,
-            dark,
-            weak,
-            strong,
-            text: text_col,
-            model: &app.model,
-            selection: &app.selection,
-            selected_in: selected_per_cluster(&app.model, &app.selection),
-            accent: pal.accent,
-            search_hit: app.tree.search_hit,
-            positions: &app.positions,
-            opts: &app.tree,
-            selected_cluster: app.selected_cluster,
-        };
-        draw_edges(&d, l);
-        if d.opts.branch_labels {
-            draw_branch_labels(&d, l);
-        }
-        hits = draw_nodes(&d, l);
-        if let Some(p) = pointer {
-            hover = hits
+    // --- hover, tooltip, click -------------------------------------------------
+    let hover = pointer
+        .filter(|p| fh <= 0.0 || !footer.contains(*p))
+        .and_then(|p| {
+            sc.hits
                 .iter()
                 .rev()
                 .find(|(_, r)| r.contains(p))
-                .map(|(h, _)| h.clone());
-        }
-        draw_scale_bars(&d, l, pointer);
-        if let Some(h) = &hover {
-            tooltip = match h {
-                Hover::Genome(id) => genome_tooltip(d.model, *id),
-                Hover::Cluster(id) => cluster_tooltip(d.model, *id),
-                Hover::SelectedBadge(id) => vec![
-                    format!(
-                        "{} selected genome(s) inside cluster {id}",
-                        d.selected_in.get(id).copied().unwrap_or(0)
-                    ),
-                    "click to open the cluster and show them".to_string(),
-                ],
-            };
-        }
-    }
-
-    if app.tree.show_legend {
-        draw_legend(&painter, rect, dark, bg, border);
-    }
-
-    // --- clicks, applied after the read-only pass ---------------------------
-    let mut click: Option<Hover> = None;
+                .map(|(h, _)| *h)
+        });
+    let tooltip: Vec<String> = match hover {
+        Some(Hit::Genome(id)) => genome_tooltip(&app.model, id),
+        Some(Hit::Cluster(id)) => cluster_tooltip(&app.model, id, app.expanded.contains(&id)),
+        Some(Hit::Badge(id)) => vec![
+            format!(
+                "{} selected genome(s) inside cluster {id}",
+                marks.selected_in.get(&id).copied().unwrap_or(0)
+            ),
+            "click to open the cluster and show them".to_string(),
+        ],
+        Some(Hit::Group(i)) => group_tooltip(app, i),
+        None => Vec::new(),
+    };
     if clicked {
-        if let Some(p) = pointer {
-            click = hits
-                .iter()
-                .rev()
-                .find(|(_, r)| r.contains(p))
-                .map(|(h, _)| h.clone());
+        match hover {
+            Some(Hit::Genome(id)) if id != u32::MAX => {
+                let order = row_order(&l, &app.model);
+                app.click_genome(id, mods, &order);
+            }
+            Some(Hit::Cluster(id)) => app.toggle_cluster(id),
+            Some(Hit::Badge(id)) => {
+                app.expanded.insert(id);
+                app.set_cluster(id, true);
+            }
+            Some(Hit::Group(i)) => app.select_group(i, mods.toggle),
+            // A click on empty canvas keeps the selection: a long hand-picked
+            // selection is too easy to lose that way. Escape clears it.
+            _ => {}
         }
-    }
-    match click {
-        Some(Hover::Genome(id)) => {
-            let order = app
-                .tree_layout
-                .as_ref()
-                .map(|l| row_order(l, &app.model))
-                .unwrap_or_default();
-            app.click_genome(id, mods, &order);
-        }
-        Some(Hover::Cluster(id)) => app.toggle_cluster(id),
-        Some(Hover::SelectedBadge(id)) => {
-            app.expanded.insert(id);
-            app.set_cluster(id, true);
-        }
-        // A click on empty canvas keeps the selection: a long hand-picked
-        // selection is too easy to lose that way. Escape clears it.
-        None => {}
     }
     ui.ctx().output_mut(|o| {
         o.cursor_icon = if hover.is_some() {
             egui::CursorIcon::PointingHand
+        } else if resp.dragged() {
+            egui::CursorIcon::Grabbing
         } else {
             egui::CursorIcon::Default
         };
     });
+    app.tree_layout = Some(l);
     if !tooltip.is_empty() {
         resp.on_hover_ui(|ui| {
             for line in tooltip {
@@ -614,23 +709,21 @@ pub(crate) fn remaining_rect(ui: &egui::Ui) -> Rect {
     }
 }
 
-fn hint(painter: &egui::Painter, rect: Rect, msg: &str, dark: bool) {
+fn hint(painter: &egui::Painter, rect: Rect, msg: &str, colour: Color32) {
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         msg,
         FontId::proportional(15.0),
-        if dark {
-            Color32::from_gray(140)
-        } else {
-            Color32::from_gray(110)
-        },
+        colour,
     );
 }
 
+/// The view: the first row's centre sits half a row below the top margin, so
+/// its label is never cut.
 fn current_view(app: &InfinityApp, rect: Rect) -> View {
     View {
-        origin: rect.min + Vec2::splat(MARGIN) + app.tree.offset,
+        origin: rect.min + Vec2::new(MARGIN, MARGIN + app.tree.px_per_row * 0.5) + app.tree.offset,
         px_per_row: app.tree.px_per_row,
         px_per_unit: app.tree.px_per_unit,
     }
@@ -639,479 +732,49 @@ fn current_view(app: &InfinityApp, rect: Rect) -> View {
 /// Store a view back as a pan offset from the panel corner, so that resizing the
 /// window keeps the tree where it was.
 fn apply_view(app: &mut InfinityApp, rect: Rect, v: View) {
-    app.tree.offset = v.origin - rect.min - Vec2::splat(MARGIN);
+    app.tree.offset = v.origin - rect.min - Vec2::new(MARGIN, MARGIN + v.px_per_row * 0.5);
     app.tree.px_per_row = v.px_per_row;
     app.tree.px_per_unit = v.px_per_unit;
 }
 
-/// Fit the whole tree into the panel: the rows fill the height, and the
-/// horizontal extent leaves [`LABEL_FRACTION`] of the width free for the labels.
-fn fit_view(app: &mut InfinityApp, rect: Rect, rows: f64, x_max: f64) {
-    let h = (rect.height() - 2.0 * MARGIN).max(10.0);
-    let w = ((rect.width() - 2.0 * MARGIN) * (1.0 - LABEL_FRACTION)).max(10.0);
-    app.tree.px_per_row = (h / rows.max(1.0) as f32).clamp(MIN_PX_PER_ROW, MAX_PX_PER_ROW);
-    app.tree.px_per_unit = (w / x_max.max(1e-6) as f32).clamp(MIN_PX_PER_UNIT, MAX_PX_PER_UNIT);
-    app.tree.offset = Vec2::ZERO;
-}
-
-// ---------------------------------------------------------------------------
-// Drawing
-// ---------------------------------------------------------------------------
-
-fn draw_edges(d: &Draw<'_>, l: &TreeLayout) {
-    let positions = d.positions;
-    for n in &l.nodes {
-        let Some(&p) = n.parent.and_then(|p| positions.get(p)) else {
-            continue;
-        };
-        let Some(&c) = positions.get(n.idx) else {
-            continue;
-        };
-        let style = colors::focus_style(n.edge_focus, d.dark);
-        let child = d.view.screen(c);
-        let parent = d.view.screen(p);
-        // Cull branches that are entirely off screen: a thousand-genome tree
-        // shows a few dozen rows at a time.
-        if (child.y < d.rect.top() - 2.0 && parent.y < d.rect.top() - 2.0)
-            || (child.y > d.rect.bottom() + 2.0 && parent.y > d.rect.bottom() + 2.0)
-        {
-            continue;
-        }
-        // A rectangular tree: the branch runs horizontally at the child's height.
-        segment(&d.painter, Pos2::new(parent.x, child.y), child, &style);
-    }
-    for n in &l.nodes {
-        if n.leaf_count < 2 {
-            continue;
-        }
-        let Some(&c) = positions.get(n.idx) else {
-            continue;
-        };
-        let top = d.view.screen((c.0, n.row_min));
-        let bottom = d.view.screen((c.0, n.row_max));
-        if bottom.y < d.rect.top() - 2.0 || top.y > d.rect.bottom() + 2.0 {
-            continue;
-        }
-        let style = colors::focus_style(n.focus, d.dark);
-        segment(&d.painter, top, bottom, &style);
-    }
-}
-
-/// One branch: dashed at Focus 0, solid above it (section 8).
-fn segment(painter: &egui::Painter, a: Pos2, b: Pos2, style: &colors::FocusStyle) {
-    if !style.dashed {
-        painter.line_segment([a, b], style.stroke());
-        return;
-    }
-    let delta = b - a;
-    let len = delta.length();
-    if len < 0.5 {
-        return;
-    }
-    let step = style.dash.max(1.0);
-    let unit = delta / len;
-    let mut t = 0.0f32;
-    while t < len {
-        let end = (t + step).min(len);
-        painter.line_segment([a + unit * t, a + unit * end], style.stroke());
-        t = end + step;
-    }
-}
-
-fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
-    let mut hits: Vec<(Hover, Rect)> = Vec::new();
-    let label_font = FontId::proportional((d.view.px_per_row * 0.72).clamp(8.5, 14.0));
-    let small_font = FontId::proportional((d.view.px_per_row * 0.62).clamp(8.0, 12.0));
-    let show_labels = d.view.px_per_row >= MIN_ROW_FOR_LABELS;
-    let show_approx = d.view.px_per_row >= MIN_ROW_FOR_APPROX;
-    let weak = d.weak;
-    let strong = d.strong;
-    let text_col = d.text;
-
-    for n in &l.nodes {
-        let Some(&p) = d.positions.get(n.idx) else {
-            continue;
-        };
-        let s = d.view.screen(p);
-        let y = s.y;
-        if y < d.rect.top() - 20.0 || y > d.rect.bottom() + 20.0 {
-            continue;
-        }
-        match &n.kind {
-            NodeKind::Genome { id, name } => {
-                let selected = d.selection.contains(*id);
-                if selected {
-                    // A band across the whole row, with a solid tick at the
-                    // left edge: visible at any zoom, even with no labels.
-                    let h = d.view.px_per_row.max(2.0);
-                    let band = Rect::from_min_size(
-                        Pos2::new(d.rect.left(), y - h * 0.5),
-                        Vec2::new(d.rect.width(), h),
-                    );
-                    d.painter.rect_filled(band, 0, colors::wash(d.accent, 52));
-                    d.painter.rect_filled(
-                        Rect::from_min_size(band.min, Vec2::new(3.0, h)),
-                        0,
-                        d.accent,
-                    );
-                }
-                if !show_labels {
-                    d.painter
-                        .circle_filled(s, 1.0, colors::focus_color(n.focus, d.dark));
-                    if selected {
-                        d.painter.circle_filled(s, 2.4, d.accent);
-                    }
-                    hits.push((
-                        Hover::Genome(*id),
-                        Rect::from_center_size(s, Vec2::splat(6.0)),
-                    ));
-                    continue;
-                }
-                let colour = d
-                    .model
-                    .genome(*id)
-                    .and_then(|g| g.cluster)
-                    .map(|c| colors::cluster_color(c, d.dark))
-                    .unwrap_or(weak);
-                d.painter
-                    .circle_filled(s, if selected { 3.0 } else { 2.0 }, colour);
-                if selected {
-                    d.painter.circle_stroke(s, 4.6, Stroke::new(1.6, d.accent));
-                }
-                if Some(*id) == d.search_hit {
-                    d.painter
-                        .circle_stroke(s, 5.0, Stroke::new(1.4, colors::HOVERED));
-                }
-                // The marker travels with the name, so an approximate branch is
-                // never readable as an exact one (section 0 rule 8).
-                let text = if n.approximate {
-                    format!("≈ {name}")
-                } else {
-                    name.clone()
-                };
-                // Aligned tips start in one column, joined to the tip by a
-                // dotted leader; otherwise the label sits at the tip.
-                let mut lx = if d.opts.aligned_tips {
-                    let col = d.tip_column(l);
-                    if col - s.x > 8.0 {
-                        dotted(&d.painter, s.x + 4.0, col - 3.0, y, colors::wash(weak, 110));
-                    }
-                    col
-                } else {
-                    s.x + 5.0
-                };
-                if d.opts.color_strip {
-                    let h = (d.view.px_per_row * 0.86).max(2.0);
-                    let strip = Rect::from_min_size(Pos2::new(lx, y - h / 2.0), Vec2::new(7.0, h));
-                    d.painter.rect_filled(strip, 1, colour);
-                    lx += 11.0;
-                }
-                let tr = d.painter.text(
-                    Pos2::new(lx, y),
-                    Align2::LEFT_CENTER,
-                    text.clone(),
-                    label_font.clone(),
-                    if selected { strong } else { text_col },
-                );
-                if selected {
-                    // Drawn a second time, half a pixel over: a bold label
-                    // without a second font, and an underline in the accent.
-                    d.painter.text(
-                        Pos2::new(lx + 0.6, y),
-                        Align2::LEFT_CENTER,
-                        text,
-                        label_font.clone(),
-                        strong,
-                    );
-                    d.painter.line_segment(
-                        [
-                            Pos2::new(tr.left(), tr.bottom() - 0.5),
-                            Pos2::new(tr.right(), tr.bottom() - 0.5),
-                        ],
-                        Stroke::new(1.2, d.accent),
-                    );
-                }
-                hits.push((
-                    Hover::Genome(*id),
-                    Rect::from_min_max(s - Vec2::splat(3.0), tr.max + Vec2::new(2.0, 3.0)),
-                ));
-            }
-            NodeKind::ClusterCollapsed { id, members, .. } => {
-                // The triangle geometry lives in `layout`, where it is tested.
-                let pts = layout::triangle(p.0, p.1, layout::collapsed_half_rows(*members));
-                let tri = [
-                    d.view.screen(pts[0]),
-                    d.view.screen(pts[1]),
-                    d.view.screen(pts[2]),
-                ];
-                let base_x = tri[1].x;
-                let colour = colors::cluster_color(*id, d.dark);
-                let inside = d.selected_in.get(id).copied().unwrap_or(0);
-                if inside > 0 {
-                    let h = d.view.px_per_row.max(2.0);
-                    let band = Rect::from_min_size(
-                        Pos2::new(d.rect.left(), y - h * 0.5),
-                        Vec2::new(d.rect.width(), h),
-                    );
-                    d.painter.rect_filled(band, 0, colors::wash(d.accent, 30));
-                    d.painter.rect_filled(
-                        Rect::from_min_size(band.min, Vec2::new(3.0, h)),
-                        0,
-                        d.accent,
-                    );
-                }
-                d.painter.add(egui::Shape::convex_polygon(
-                    tri.to_vec(),
-                    colors::wash(colour, 110),
-                    Stroke::new(
-                        if inside > 0 { 2.0 } else { 1.2 },
-                        if inside > 0 { d.accent } else { colour },
-                    ),
-                ));
-                let (focus, approx) = d
-                    .model
-                    .cluster(*id)
-                    .map(|c| (c.focus, c.approximate))
-                    .unwrap_or((n.focus, n.approximate));
-                let tri_rect = Rect::from_points(&tri[..]);
-                if show_labels {
-                    let label = format!(
-                        "c{id} ({members} genomes) {}{}",
-                        fmt::focus_word(focus),
-                        if approx { " ≈" } else { "" }
-                    );
-                    let tr = d.painter.text(
-                        Pos2::new(base_x + 5.0, y),
-                        Align2::LEFT_CENTER,
-                        label,
-                        label_font.clone(),
-                        colour,
-                    );
-                    hits.push((Hover::Cluster(*id), tri_rect.union(tr)));
-                    if inside > 0 {
-                        let badge = selected_badge(
-                            &d.painter,
-                            Pos2::new(tr.right() + 6.0, y),
-                            inside,
-                            small_font.clone(),
-                            d.accent,
-                            d.dark,
-                        );
-                        hits.push((Hover::SelectedBadge(*id), badge));
-                    }
-                } else {
-                    hits.push((Hover::Cluster(*id), tri_rect));
-                    if inside > 0 {
-                        d.painter
-                            .circle_filled(Pos2::new(base_x + 4.0, y), 2.6, d.accent);
-                    }
-                }
-            }
-            NodeKind::ClusterRoot { id, members, focus } => {
-                let colour = colors::cluster_color(*id, d.dark);
-                d.painter.circle_filled(s, 3.0, colour);
-                d.painter
-                    .circle_stroke(s, 4.6, Stroke::new(1.0, colors::wash(colour, 150)));
-                if show_labels {
-                    let label = format!(
-                        "c{id} · {members} genomes · {}{}",
-                        fmt::focus_word(*focus),
-                        if n.approximate { " ≈" } else { "" }
-                    );
-                    let tr = d.painter.text(
-                        Pos2::new(s.x + 7.0, y - d.view.px_per_row * 0.75),
-                        Align2::LEFT_CENTER,
-                        label,
-                        small_font.clone(),
-                        colour,
-                    );
-                    hits.push((Hover::Cluster(*id), tr.expand(2.0)));
-                } else {
-                    hits.push((
-                        Hover::Cluster(*id),
-                        Rect::from_center_size(s, Vec2::splat(8.0)),
-                    ));
-                }
-            }
-            NodeKind::Internal | NodeKind::Root => {
-                if show_approx && n.approximate && n.focus == fmt::FOCUS_BLOCKS && n.leaf_count > 1
-                {
-                    d.painter.text(
-                        Pos2::new(s.x + 3.0, y - d.view.px_per_row * 0.45),
-                        Align2::LEFT_BOTTOM,
-                        "≈",
-                        small_font.clone(),
-                        colors::focus_color(fmt::FOCUS_BLOCKS, d.dark),
-                    );
-                }
-            }
-        }
-    }
-    hits
-}
-
-/// The scale bars of section 8 ("|-----| 5 SNPs"), in SNPs. One for the
-/// opened cluster the pointer is over (or the selected one, or the first one),
-/// and one for the backbone between clusters, whose SNPs are estimates and say
-/// so. Each bar is drawn in its region's focus colour.
-fn draw_scale_bars(d: &Draw<'_>, l: &TreeLayout, pointer: Option<Pos2>) {
-    let mut bars: Vec<(&layout::Region, &str)> = Vec::new();
-    let under_pointer = pointer
-        .map(|p| d.view.layout(p).0)
-        .and_then(|lx| l.region_at(lx))
-        .filter(|r| r.cluster.is_some());
-    let cluster_region = under_pointer
-        .or_else(|| {
-            l.regions
-                .iter()
-                .find(|r| r.cluster.is_some() && r.cluster == d.selected_cluster)
-        })
-        .or_else(|| l.regions.iter().find(|r| r.cluster.is_some()));
-    if let Some(r) = cluster_region {
-        bars.push((r, "in cluster"));
-    }
-    if let Some(bb) = l.regions.first().filter(|r| r.raw_max > 0.0) {
-        bars.push((bb, "between clusters"));
-    }
-    let mut y = d.rect.bottom() - MARGIN - 10.0;
-    for (region, what) in bars {
-        let Some(bar) = layout::scale_bar(region, 0.18) else {
-            continue;
-        };
-        let px = bar.layout_width as f32 * d.view.px_per_unit;
-        if !px.is_finite() || px <= 4.0 {
-            continue;
-        }
-        let x0 = d.rect.left() + MARGIN;
-        let style = colors::focus_style(region.focus, d.dark);
-        let stroke = Stroke::new(1.6, style.color);
-        segment(&d.painter, Pos2::new(x0, y), Pos2::new(x0 + px, y), &style);
-        d.painter
-            .line_segment([Pos2::new(x0, y - 4.0), Pos2::new(x0, y + 4.0)], stroke);
-        d.painter.line_segment(
-            [Pos2::new(x0 + px, y - 4.0), Pos2::new(x0 + px, y + 4.0)],
-            stroke,
-        );
-        let label = match region.cluster {
-            Some(c) => format!("{}  ({what} c{c})", bar.label),
-            None => format!("{}  ({what})", bar.label),
-        };
-        d.painter.text(
-            Pos2::new(x0 + px + 6.0, y),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(11.0),
-            stroke.color,
-        );
-        y -= 18.0;
-    }
-}
-
-/// SNP counts written above the branches, where there is room for them. The
-/// "≈" marker travels with every estimated count.
-fn draw_branch_labels(d: &Draw<'_>, l: &TreeLayout) {
-    if d.view.px_per_row < 11.0 {
-        return;
-    }
-    let font = FontId::proportional((d.view.px_per_row * 0.55).clamp(8.5, 11.0));
-    let char_w = font.size * 0.56;
-    for n in &l.nodes {
-        if n.len <= 0.0 || matches!(n.kind, NodeKind::Root) {
-            continue;
-        }
-        let (Some(&c), Some(&p)) = (
-            d.positions.get(n.idx),
-            n.parent.and_then(|p| d.positions.get(p)),
-        ) else {
-            continue;
-        };
-        let child = d.view.screen(c);
-        let parent = d.view.screen(p);
-        if child.y < d.rect.top() || child.y > d.rect.bottom() {
-            continue;
-        }
-        let text = format!(
-            "{}{}",
-            if n.edge_approximate { "≈" } else { "" },
-            fmt::snps(n.len)
-        );
-        let w = text.chars().count() as f32 * char_w;
-        if child.x - parent.x < w + 6.0 {
-            continue;
-        }
-        d.painter.text(
-            Pos2::new((parent.x + child.x) / 2.0, child.y - 1.5),
-            Align2::CENTER_BOTTOM,
-            text,
-            font.clone(),
-            colors::wash(colors::focus_color(n.edge_focus, d.dark), 210),
-        );
-    }
-}
-
-/// The "3 selected ⤢" pill drawn after a collapsed cluster's label. Returns
-/// its rectangle, which is a click target that opens the cluster.
-fn selected_badge(
-    painter: &egui::Painter,
-    left_centre: Pos2,
-    n: usize,
-    font: FontId,
-    accent: Color32,
-    dark: bool,
-) -> Rect {
-    let text = format!("{n} selected ⤢");
-    let on = if dark {
-        Color32::from_rgb(8, 20, 24)
-    } else {
-        Color32::WHITE
+/// Fit the whole tree into the panel: the rows fill the height above the
+/// footer, and the tree leaves exactly the room its labels, group labels and
+/// cluster brackets need on the right.
+fn fit_view(
+    app: &mut InfinityApp,
+    rect: Rect,
+    l: &TreeLayout,
+    marks: &pubtree::Marks,
+    opts: &pubtree::PubOptions,
+) {
+    let guess = View {
+        origin: rect.min,
+        px_per_row: app.tree.px_per_row,
+        px_per_unit: app.tree.px_per_unit,
     };
-    let galley = painter.layout_no_wrap(text, font, on);
-    let size = galley.size() + Vec2::new(10.0, 2.0);
-    let rect = Rect::from_min_size(Pos2::new(left_centre.x, left_centre.y - size.y / 2.0), size);
-    painter.rect_filled(rect, size.y / 2.0, accent);
-    painter.galley(rect.min + Vec2::new(5.0, 1.0), galley, on);
-    rect
-}
-
-/// A dotted horizontal leader from a tip to its aligned label.
-fn dotted(painter: &egui::Painter, x0: f32, x1: f32, y: f32, colour: Color32) {
-    painter.extend(egui::Shape::dashed_line(
-        &[Pos2::new(x0, y), Pos2::new(x1, y)],
-        Stroke::new(0.8, colour),
-        1.2,
-        2.8,
-    ));
-}
-
-fn draw_legend(painter: &egui::Painter, rect: Rect, dark: bool, bg: Color32, border: Stroke) {
-    let box_rect = Rect::from_min_size(rect.left_top() + Vec2::splat(8.0), Vec2::new(214.0, 62.0));
-    // Half way between the canvas and a panel, slightly see-through, so the
-    // legend reads as floating above the tree rather than as part of it.
-    let fill = theme::mix(bg, theme::palette_for(dark).panel, 0.6);
-    painter.rect_filled(box_rect, 6, theme::with_alpha(fill, 225));
-    painter.rect_stroke(box_rect, 6, border, egui::StrokeKind::Inside);
-    let font = FontId::proportional(11.0);
-    for (i, text) in [
-        "Focus 0 — sketch only, ≈ SNPs",
-        "Focus 1 — blocks compared, ≈ SNPs",
-        "Focus 2 — exact SNPs",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let y = box_rect.top() + 14.0 + i as f32 * 17.0;
-        let style = colors::focus_style(i as u8, dark);
-        let a = Pos2::new(box_rect.left() + 10.0, y);
-        let b = Pos2::new(box_rect.left() + 40.0, y);
-        segment(painter, a, b, &style);
-        painter.text(
-            Pos2::new(box_rect.left() + 46.0, y),
-            Align2::LEFT_CENTER,
-            *text,
-            font.clone(),
-            style.color,
-        );
-    }
+    let used = pubtree::Used {
+        exact: true,
+        estimate: true,
+        groups: opts.groups && !marks.groups.is_empty(),
+        selection: !marks.selection.is_empty(),
+        wedges: true,
+        tip_snps: opts.tip_snps,
+    };
+    let footer = pubtree::footer_height(
+        l,
+        marks,
+        &guess.geometry(rect),
+        &used,
+        opts.legend,
+        rect.width(),
+    );
+    let h = (rect.height() - 2.0 * MARGIN - footer - 4.0).max(10.0);
+    let ppr = (h / l.rows.max(1.0) as f32).clamp(MIN_PX_PER_ROW, MAX_FIT_ROW);
+    let room = pubtree::label_room(l, marks, opts, ppr);
+    let w = (rect.width() - 2.0 * MARGIN - room).max(rect.width() * 0.35);
+    app.tree.px_per_row = ppr;
+    app.tree.px_per_unit = (w / l.x_max.max(1e-6) as f32).clamp(MIN_PX_PER_UNIT, MAX_PX_PER_UNIT);
+    app.tree.offset = Vec2::ZERO;
 }
 
 fn genome_tooltip(model: &UiModel, id: u32) -> Vec<String> {
@@ -1140,10 +803,10 @@ fn genome_tooltip(model: &UiModel, id: u32) -> Vec<String> {
         Some(n) => {
             let m = fmt::approx_mark(g.approximate);
             out.push(format!(
-                "{m}diff pieces {} | SNPs {} | indels {}",
-                fmt::count(n.diff_pieces),
+                "against the pivot: {m}SNPs {} | indels {} | diff pieces {}",
                 fmt::count(n.snps),
-                fmt::count(n.indels)
+                fmt::count(n.indels),
+                fmt::count(n.diff_pieces)
             ));
             out.push(format!(
                 "uncovered {} | novel {}",
@@ -1157,26 +820,55 @@ fn genome_tooltip(model: &UiModel, id: u32) -> Vec<String> {
     out
 }
 
-fn cluster_tooltip(model: &UiModel, id: u32) -> Vec<String> {
+fn cluster_tooltip(model: &UiModel, id: u32, opened: bool) -> Vec<String> {
     let Some(c) = model.cluster(id) else {
         return vec!["unknown cluster".to_string()];
     };
     vec![
         format!("cluster {} — pivot {}", c.id, c.pivot_name),
-        format!("{} genomes", c.size()),
-        fmt::focus_label(c.focus, c.approximate),
+        format!(
+            "{} genomes · {}",
+            c.size(),
+            fmt::focus_label(c.focus, c.approximate)
+        ),
         format!(
             "branch lengths in {} (from {})",
             fmt::marked_unit(c.focus),
             fmt::source_unit(c.focus)
         ),
-        "click to open or close, and to refine this cluster next".to_string(),
+        if opened {
+            "click to close it".to_string()
+        } else {
+            "click to open it (and to refine it next)".to_string()
+        },
+    ]
+}
+
+fn group_tooltip(app: &InfinityApp, i: usize) -> Vec<String> {
+    let set = &app.groups.set;
+    let Some(g) = set.groups.get(i) else {
+        return Vec::new();
+    };
+    vec![
+        format!(
+            "G{} — {} genomes in cluster {}",
+            g.number,
+            g.members.len(),
+            g.cluster
+        ),
+        format!(
+            "linked by chains of ≤{} SNPs; the widest pair is {} SNPs apart",
+            set.threshold,
+            fmt::snps(g.diameter)
+        ),
+        "click to select them · Ctrl-click to add them".to_string(),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::Selection;
 
     fn view() -> View {
         View {
@@ -1255,7 +947,7 @@ mod tests {
             }),
         );
         let open: std::collections::HashSet<u32> = [1u32].into_iter().collect();
-        let l = layout::layout(&m.display_tree(&open).unwrap());
+        let l = crate::layout::layout(&m.display_tree(&open).unwrap());
         let order = row_order(&l, &m);
         assert_eq!(order.len(), 5, "{order:?}");
         // The collapsed cluster 0 contributes its members as one block, and
@@ -1263,28 +955,29 @@ mod tests {
         let pos0 = order.iter().position(|&g| g == 0).unwrap();
         assert_eq!(&order[pos0..pos0 + 3], &[0, 1, 2]);
         assert!(order.contains(&3) && order.contains(&4));
-
         let mut sel = Selection::default();
         sel.extend([1, 2, 4]);
-        let per = selected_per_cluster(&m, &sel);
-        assert_eq!(per.get(&0), Some(&2));
-        assert_eq!(per.get(&1), Some(&1));
+        assert_eq!(sel.len(), 3);
     }
 
     #[test]
     fn a_view_round_trips_through_the_pan_offset() {
         let rect = Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(400.0, 300.0));
-        let tree = crate::app::TreeView {
-            offset: Vec2::new(13.0, -7.0),
-            ..Default::default()
-        };
-        let v = View {
-            origin: rect.min + Vec2::splat(MARGIN) + tree.offset,
-            px_per_row: tree.px_per_row,
-            px_per_unit: tree.px_per_unit,
-        };
-        // Storing it back must give exactly the same offset.
-        let offset = v.origin - rect.min - Vec2::splat(MARGIN);
-        assert_eq!(offset, tree.offset);
+        let mut app = InfinityApp::default();
+        app.tree.offset = Vec2::new(13.0, -7.0);
+        let v = current_view(&app, rect);
+        // Storing it back must give exactly the same offset, also after a zoom.
+        apply_view(&mut app, rect, v);
+        assert_eq!(app.tree.offset, Vec2::new(13.0, -7.0));
+        let z = v.zoomed_about(Pos2::new(200.0, 100.0), 1.7);
+        apply_view(&mut app, rect, z);
+        assert_eq!(current_view(&app, rect), z);
+    }
+
+    #[test]
+    fn cluster_states_read_as_words() {
+        assert_eq!(state_word(2, false), "exact");
+        assert_eq!(state_word(2, true), "≈ estimate");
+        assert_eq!(state_word(0, true), "≈ estimate");
     }
 }

@@ -283,7 +283,7 @@ fn menus(
     ui.menu_button("View", |ui| {
         ui.checkbox(&mut app.show_side, "Run panel");
         ui.checkbox(&mut app.show_notes, "Warnings and notes");
-        ui.checkbox(&mut app.tree.show_legend, "Tree legend");
+        ui.checkbox(&mut app.tree.opts.legend, "Tree legend");
         ui.separator();
         ui.label(RichText::new("Theme").small());
         let mut theme_name = if app.prefs.theme.is_empty() {

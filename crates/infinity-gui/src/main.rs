@@ -22,7 +22,8 @@
 //! | [`export`] | the files of section 9, written from the UI model or copied from the run |
 //! | [`annotate`] | the annotated tree for FigTree (NEXUS) and iTOL datasets |
 //! | [`svg`] | the tree view as a vector picture |
-//! | [`pubtree`] | the publication-style figure of the tree window, as primitives |
+//! | [`pubtree`] | the tree as a publication-style figure, as primitives (all three views) |
+//! | [`groups`] | SNP groups: single linkage at the slider's threshold, per exact cluster |
 //! | [`run`] | starting the engine and waking the interface from its threads |
 //! | [`open`] | reading a finished output folder back through the same fold |
 //! | [`outlier_dialog`] | the divergent-assembly warning and "exclude and restart" |
@@ -66,6 +67,7 @@ mod dialogs;
 mod export;
 mod fmt;
 mod genome_panel;
+mod groups;
 mod layout;
 mod map;
 mod map_panel;
