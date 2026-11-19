@@ -62,12 +62,19 @@ pub fn show(ctx: &egui::Context, app: &mut InfinityApp) {
             ui.horizontal(|ui| {
                 if ui
                     .button("Restore defaults")
-                    .on_hover_text("every setting back to its default; folders are kept")
+                    .on_hover_text(
+                        "every setting back to its default; folders, threads and the excluded \
+                         genomes are kept",
+                    )
                     .clicked()
                 {
+                    // Threads and the excluded genomes are about this machine
+                    // and this data set, not settings: they are kept.
                     let threads = app.prefs.params.threads;
+                    let exclude = std::mem::take(&mut app.prefs.params.exclude);
                     app.prefs.params = infinity_core::params::Parameters::default();
                     app.prefs.params.threads = threads;
+                    app.prefs.params.exclude = exclude;
                     app.prefs.resolution = ResolutionSettings::default();
                     changed = true;
                     dist_changed = true;
@@ -130,6 +137,58 @@ fn run_section(ui: &mut egui::Ui, app: &mut InfinityApp, changed: &mut bool) {
             },
         );
     });
+    exclusion_list(ui, app, changed);
+}
+
+/// The genomes every run leaves out, usually filled from the divergent-assembly
+/// warning: each can be put back, the whole list cleared, or a name added.
+fn exclusion_list(ui: &mut egui::Ui, app: &mut InfinityApp, changed: &mut bool) {
+    let list = &mut app.prefs.params.exclude;
+    ui.add_space(2.0);
+    ui.label(format!("Excluded genomes ({})", list.len()))
+        .on_hover_text(
+            "Genomes left out of every run, by name (the file name without .fasta). Filled by \
+         \"Exclude ticked and restart\" in the divergent-assembly warning; the same as \
+         --exclude on the command line.",
+        );
+    if list.is_empty() {
+        theme::hint(
+            ui,
+            "none: every genome you add is compared. Genomes flagged as divergent (another \
+             species, contamination) can be excluded from the warning.",
+        );
+    } else {
+        let mut remove: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("excluded-scroll")
+            .max_height(110.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, name) in list.iter().enumerate() {
+                        if ui
+                            .small_button(format!("{name}  ✕"))
+                            .on_hover_text("put this genome back into the next run")
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    }
+                });
+            });
+        if let Some(i) = remove {
+            list.remove(i);
+            *changed = true;
+        }
+        if ui
+            .button("Clear the list")
+            .on_hover_text("compare every genome again from the next run on")
+            .clicked()
+        {
+            list.clear();
+            *changed = true;
+        }
+    }
 }
 
 fn resolution_section(

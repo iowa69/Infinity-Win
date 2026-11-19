@@ -40,6 +40,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    input_warnings(ui, app);
                     counters(ui, app);
                     summary(ui, app);
                     notes(ui, app);
@@ -47,6 +48,92 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
                 });
         });
     app.show_side = open;
+}
+
+/// What the user must not miss about the input: divergent assemblies in these
+/// results, and genomes the next run will leave out.
+fn input_warnings(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    let p = theme::palette(ui);
+    let n = app.model.outliers.len();
+    if n > 0 {
+        let mut review = false;
+        egui::Frame::new()
+            .fill(theme::with_alpha(p.warn, 28))
+            .stroke(egui::Stroke::new(1.0, p.warn))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(format!(
+                        "⚠ Results may be compromised by {n} divergent assembl{}",
+                        if n == 1 { "y" } else { "ies" }
+                    ))
+                    .strong()
+                    .color(p.warn),
+                );
+                let names: Vec<&str> = app
+                    .model
+                    .outliers
+                    .iter()
+                    .take(6)
+                    .map(|o| o.name.as_str())
+                    .collect();
+                ui.label(
+                    RichText::new(format!(
+                        "{}{}",
+                        names.join(", "),
+                        if n > 6 {
+                            format!(" and {} more", n - 6)
+                        } else {
+                            String::new()
+                        }
+                    ))
+                    .small()
+                    .color(p.text),
+                );
+                theme::hint(
+                    ui,
+                    if app.outliers_acknowledged {
+                        "You chose to keep them: another species, contamination or an \
+                         incomplete assembly can distort clusters and SNP counts."
+                    } else {
+                        "Another species, contamination or an incomplete assembly can distort \
+                         clusters and SNP counts."
+                    },
+                );
+                if ui
+                    .small_button("Review / exclude …")
+                    .on_hover_text("show the list again, with the option to leave them out")
+                    .clicked()
+                {
+                    review = true;
+                }
+            });
+        if review {
+            app.outlier_dialog = Some(crate::outlier_dialog::OutlierDialog::new(
+                app.model.outliers.clone(),
+            ));
+        }
+    }
+    let excluded = app.prefs.params.exclude.len();
+    if excluded > 0 {
+        ui.label(
+            RichText::new(format!(
+                "{excluded} genome(s) excluded from runs (Settings → Run)"
+            ))
+            .small()
+            .color(p.text_weak),
+        )
+        .on_hover_text(app.prefs.params.exclude.join("\n"));
+    }
+    if app.restart_pending {
+        ui.label(
+            RichText::new("restarting without the excluded genomes …")
+                .small()
+                .color(p.accent),
+        );
+    }
 }
 
 fn counters(ui: &mut egui::Ui, app: &InfinityApp) {

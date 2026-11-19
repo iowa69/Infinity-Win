@@ -23,12 +23,14 @@
 //! | [`svg`] | the tree view as a vector picture |
 //! | [`run`] | starting the engine and waking the interface from its threads |
 //! | [`open`] | reading a finished output folder back through the same fold |
+//! | [`outlier_dialog`] | the divergent-assembly warning and "exclude and restart" |
 //! | [`settings`] | the Resolution and SNP-rule settings, mirrored for the engine |
 //! | [`theme`] | palette, spacing, typography and the shared building blocks |
 //!
 //! The remaining modules are renderers over that model: [`chrome`] (toolbar and
 //! status bar), [`genome_panel`], [`tree_panel`], [`map_panel`],
-//! [`side_panel`] (the Run panel) and [`settings_panel`] (the Settings window).
+//! [`side_panel`] (the Run panel), [`settings_panel`] (the Settings window),
+//! and [`outlier_dialog`].
 //! [`app`] holds them together and owns the repaint policy.
 //!
 //! # Responsiveness
@@ -65,6 +67,7 @@ mod layout;
 mod map;
 mod map_panel;
 mod open;
+mod outlier_dialog;
 mod pairwise;
 mod prefs;
 mod run;

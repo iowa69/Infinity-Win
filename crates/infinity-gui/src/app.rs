@@ -104,6 +104,17 @@ pub struct InfinityApp {
     /// The cluster distance the slider last sent, so dragging it does not queue
     /// a re-clustering per pixel.
     last_dist_sent: f64,
+
+    // --- divergent assemblies ----------------------------------------------
+    /// The warning dialog, while it is open.
+    pub(crate) outlier_dialog: Option<crate::outlier_dialog::OutlierDialog>,
+    /// The dialog was offered for this run already (it opens once per run).
+    pub(crate) outliers_prompted: bool,
+    /// "Continue anyway" was chosen: the Run panel keeps a warning.
+    pub(crate) outliers_acknowledged: bool,
+    /// A run was cancelled to start again without some genomes; it starts as
+    /// soon as the old one has stopped.
+    pub(crate) restart_pending: bool,
 }
 
 /// Pan, zoom and decoration state of the tree panel.
@@ -228,6 +239,10 @@ impl InfinityApp {
             theme_installed: false,
             dark: true,
             last_dist_sent: params.cluster_dist,
+            outlier_dialog: None,
+            outliers_prompted: false,
+            outliers_acknowledged: false,
+            restart_pending: false,
         };
         app.validate_params();
         app
@@ -415,6 +430,9 @@ impl InfinityApp {
                 self.save_prefs();
                 self.model = UiModel::new(Source::Live);
                 self.results = None;
+                self.outlier_dialog = None;
+                self.outliers_prompted = false;
+                self.outliers_acknowledged = false;
                 self.selection.clear();
                 self.expanded.clear();
                 self.selected_cluster = None;
@@ -436,6 +454,47 @@ impl InfinityApp {
             r.cancel();
             self.status =
                 "cancellation requested; the engine stops after the current genome".to_string();
+        }
+    }
+
+    /// Leave `names` out from now on and start the same run again: cancel the
+    /// one that is going, and start the new one as soon as it has stopped
+    /// (both write to the same folder, so they must not overlap).
+    pub(crate) fn exclude_and_restart(&mut self, names: &[String], ctx: &Context) {
+        let added = crate::outlier_dialog::add_exclusions(&mut self.prefs.params.exclude, names);
+        self.save_prefs();
+        if self.running() {
+            self.stop_run();
+            self.restart_pending = true;
+            self.status = format!(
+                "excluding {added} genome(s): restarting as soon as the current run has stopped"
+            );
+            ctx.request_repaint();
+        } else {
+            self.start_run(ctx);
+        }
+    }
+
+    /// Open the divergent-assembly dialog once per live run, as soon as the
+    /// engine reports flagged genomes.
+    fn poll_outliers(&mut self) {
+        if self.outliers_prompted || self.model.outliers.is_empty() {
+            return;
+        }
+        self.outliers_prompted = true;
+        if self.model.source == Source::Live && !self.restart_pending {
+            self.outlier_dialog = Some(crate::outlier_dialog::OutlierDialog::new(
+                self.model.outliers.clone(),
+            ));
+        }
+    }
+
+    /// Start the run a "restart without these genomes" is waiting for, once
+    /// the cancelled one has really stopped.
+    fn poll_restart(&mut self, ctx: &Context) {
+        if self.restart_pending && !self.running() && self.opening.is_none() {
+            self.restart_pending = false;
+            self.start_run(ctx);
         }
     }
 
@@ -686,7 +745,7 @@ impl InfinityApp {
 
     /// A cheap signature of what the tree panel shows: the set of opened
     /// clusters, or, in single-cluster mode, which cluster.
-    fn expanded_signature(&self) -> u64 {
+    pub(crate) fn expanded_signature(&self) -> u64 {
         let mut ids: Vec<u32> = self.expanded.iter().copied().collect();
         ids.sort_unstable();
         let mut h = 0x9E37_79B9_7F4A_7C15u64;
@@ -951,7 +1010,7 @@ impl InfinityApp {
     /// Ctrl+A selects every genome the list shows, Escape clears the
     /// selection; neither while a text field has the keyboard.
     fn selection_keys(&mut self, ctx: &Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || self.outlier_dialog.is_some() {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
@@ -1030,7 +1089,9 @@ impl eframe::App for InfinityApp {
         }
         let now = ctx.input(|i| i.time);
         let more = self.drain_events();
+        self.poll_outliers();
         self.poll_run();
+        self.poll_restart(ctx);
         self.poll_open();
         self.poll_png();
         self.handle_dropped_files(ctx);
@@ -1082,6 +1143,7 @@ impl eframe::App for InfinityApp {
             });
         let ctx = ui.ctx().clone();
         crate::settings_panel::show(&ctx, self);
+        crate::outlier_dialog::show(&ctx, self);
     }
 }
 
@@ -1226,6 +1288,62 @@ mod tests {
         // triangle, so its selected genome is still counted as hidden.
         assert_eq!(app.hidden_selected(), vec![(1, 1)]);
         assert!(app.expanded.contains(&0));
+    }
+
+    fn outliers_event() -> Event {
+        Event::Outliers(vec![infinity_core::events::OutlierInfo {
+            id: 3,
+            name: "g3".into(),
+            length: 1000,
+            gc: 0.65,
+            nearest_dist: 1.0,
+            nearest_name: String::new(),
+            reasons: vec!["no close relative".into()],
+        }])
+    }
+
+    #[test]
+    fn flagged_genomes_open_the_dialog_once_per_live_run() {
+        let mut app = app_with_two_clusters();
+        app.model.source = Source::Live;
+        app.poll_outliers();
+        assert!(app.outlier_dialog.is_none(), "nothing flagged yet");
+        app.model.apply(0.0, outliers_event());
+        app.poll_outliers();
+        let d = app.outlier_dialog.as_ref().expect("the dialog opens");
+        assert_eq!(d.ticked_names(), vec!["g3"]);
+        // Closed ("Continue anyway"), it does not come back by itself.
+        app.outlier_dialog = None;
+        app.outliers_acknowledged = true;
+        app.poll_outliers();
+        assert!(app.outlier_dialog.is_none());
+        // The warning is in the notes, where the Run panel lists it.
+        assert!(app
+            .model
+            .notes
+            .iter()
+            .any(|n| n.text.contains("divergent assembl") && n.text.contains("g3")));
+    }
+
+    #[test]
+    fn an_opened_folder_never_pops_the_dialog() {
+        let mut app = app_with_two_clusters();
+        app.model.source = Source::Folder(PathBuf::from("/results"));
+        app.model.apply(0.0, outliers_event());
+        app.poll_outliers();
+        assert!(app.outlier_dialog.is_none());
+        assert_eq!(app.model.outliers.len(), 1, "but the warning stays");
+    }
+
+    #[test]
+    fn a_restart_waits_for_the_cancelled_run_and_nothing_else() {
+        let mut app = app_with_two_clusters();
+        // Nothing is running, so a pending restart starts at once; with no
+        // genomes to compare it reports that instead of running.
+        app.restart_pending = true;
+        app.poll_restart(&Context::default());
+        assert!(!app.restart_pending);
+        assert!(app.status.contains("nothing to compare") || app.params_error.is_some());
     }
 
     #[test]
