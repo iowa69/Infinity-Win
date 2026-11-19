@@ -397,6 +397,10 @@ struct Kids {
     count: Vec<u32>,
     lo: Vec<f64>,
     hi: Vec<f64>,
+    /// The y range of all the tips below each node, where they are drawn
+    /// now (mid-animation too), for the cluster brackets.
+    tips_lo: Vec<f64>,
+    tips_hi: Vec<f64>,
 }
 
 fn kids(l: &TreeLayout, pos: &dyn Fn(usize) -> (f64, f64)) -> Kids {
@@ -405,6 +409,8 @@ fn kids(l: &TreeLayout, pos: &dyn Fn(usize) -> (f64, f64)) -> Kids {
         count: vec![0; n],
         lo: vec![f64::INFINITY; n],
         hi: vec![f64::NEG_INFINITY; n],
+        tips_lo: vec![f64::INFINITY; n],
+        tips_hi: vec![f64::NEG_INFINITY; n],
     };
     for node in &l.nodes {
         if let Some(p) = node.parent {
@@ -412,6 +418,20 @@ fn kids(l: &TreeLayout, pos: &dyn Fn(usize) -> (f64, f64)) -> Kids {
             k.count[p] += 1;
             k.lo[p] = k.lo[p].min(y);
             k.hi[p] = k.hi[p].max(y);
+        }
+    }
+    // Parents come before children, so one backward pass carries every
+    // tip's position up to all its ancestors.
+    for node in l.nodes.iter().rev() {
+        let i = node.idx;
+        if k.count[i] == 0 {
+            let y = pos(i).1;
+            k.tips_lo[i] = y;
+            k.tips_hi[i] = y;
+        }
+        if let Some(p) = node.parent {
+            k.tips_lo[p] = k.tips_lo[p].min(k.tips_lo[i]);
+            k.tips_hi[p] = k.tips_hi[p].max(k.tips_hi[i]);
         }
     }
     k
@@ -847,7 +867,10 @@ pub fn scene(
         let fs = (row * 0.55).clamp(8.0, 10.5);
         for n in &l.nodes {
             let Some(p) = n.parent else { continue };
-            if k.count[n.idx] == 0 || n.len < 0.5 || matches!(n.kind, NodeKind::ClusterRoot { .. })
+            // Only where at least one SNP falls on the branch.
+            if k.count[n.idx] == 0
+                || n.len < 1.0 - 1e-9
+                || matches!(n.kind, NodeKind::ClusterRoot { .. })
             {
                 continue;
             }
@@ -875,6 +898,20 @@ pub fn scene(
     }
 
     // --- tips, wedges, cluster roots -------------------------------------------
+    // An opened cluster's root is a click target that closes it. Pushed
+    // before the tips, which win where the two overlap (a one-genome
+    // cluster's tip sits on its root).
+    for n in &l.nodes {
+        if let NodeKind::ClusterRoot { id, .. } = &n.kind {
+            let c = px(n.idx);
+            if g.row_visible(c.y, 4.0) {
+                s.hits.push((
+                    Hit::Cluster(*id),
+                    Rect::from_center_size(c, Vec2::splat(9.0)),
+                ));
+            }
+        }
+    }
     for &i in &l.leaves {
         let n = &l.nodes[i];
         let tip = px(i);
@@ -1007,19 +1044,6 @@ pub fn scene(
             _ => {}
         }
     }
-    // An opened cluster's root is a click target that closes it.
-    for n in &l.nodes {
-        if let NodeKind::ClusterRoot { id, .. } = &n.kind {
-            let c = px(n.idx);
-            if g.row_visible(c.y, 4.0) {
-                s.hits.push((
-                    Hit::Cluster(*id),
-                    Rect::from_center_size(c, Vec2::splat(9.0)),
-                ));
-            }
-        }
-    }
-
     // --- cluster brackets ------------------------------------------------------------
     if o.cluster_brackets {
         let bs = bracket_size(row);
@@ -1027,8 +1051,8 @@ pub fn scene(
             let NodeKind::ClusterRoot { id, members, .. } = &n.kind else {
                 continue;
             };
-            let top = g.screen(0.0, n.row_min).y - row * 0.42;
-            let bottom = g.screen(0.0, n.row_max).y + row * 0.42;
+            let top = g.screen(0.0, k.tips_lo[n.idx]).y - row * 0.42;
+            let bottom = g.screen(0.0, k.tips_hi[n.idx]).y + row * 0.42;
             if bottom < g.clip.top() || top > g.clip.bottom() {
                 continue;
             }
@@ -1814,5 +1838,47 @@ mod tests {
             label_room(&f.layout, &f.marks, &bare, 3.0) < 20.0,
             "no labels at 3 px rows"
         );
+    }
+
+    #[test]
+    fn a_one_genome_cluster_shows_its_backbone_branch_and_its_tip_is_clickable() {
+        use crate::state::UiModel;
+        let mut m = UiModel::default();
+        for i in 0..3u32 {
+            m.apply(0.0, crate::state::scan_event(i, &format!("g{i}"), 1000, 1));
+        }
+        m.apply(
+            0.0,
+            crate::state::clustered_event(&[(0, 0, &[0, 1]), (1, 2, &[2])]),
+        );
+        m.apply(
+            0.0,
+            infinity_core::events::Event::BackboneTree {
+                newick: "(g0:0.002,g2:0.003);".into(),
+                pivots: vec!["g0".into(), "g2".into()],
+            },
+        );
+        let open: HashSet<u32> = [1u32].into_iter().collect();
+        let l = layout::layout(&m.display_tree(&open).unwrap());
+        let marks = marks_from_model(&m);
+        let g = Geometry {
+            origin: Pos2::new(10.0, 10.0),
+            px_per_row: 16.0,
+            px_per_unit: 300.0,
+            clip: Rect::from_min_size(Pos2::ZERO, Vec2::new(2000.0, 2000.0)),
+        };
+        let s = scene(&l, &marks, &g, &PubOptions::default(), &Ink::PAPER, None);
+        // The tip's number is the backbone branch it hangs from, an estimate
+        // (0.003 × median length 1000), not a misleading +0.
+        assert!(tails(&s.prims).contains(&("g2".into(), "≈+3".into())));
+        let i = l.find("g2").unwrap();
+        let tip = g.screen(l.nodes[i].x, l.nodes[i].y);
+        let hit = s
+            .hits
+            .iter()
+            .rev()
+            .find(|(_, r)| r.contains(tip))
+            .map(|(h, _)| *h);
+        assert_eq!(hit, Some(Hit::Genome(2)), "the tip, not its cluster root");
     }
 }

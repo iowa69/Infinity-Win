@@ -443,7 +443,8 @@ fn help_window(ctx: &egui::Context, app: &mut InfinityApp) {
         .collapsible(false)
         .resizable(false)
         .default_width(400.0)
-        .anchor(Align2::RIGHT_TOP, Vec2::new(-280.0, 120.0))
+        .pivot(Align2::RIGHT_TOP)
+        .default_pos(ctx.content_rect().right_top() + Vec2::new(-290.0, 110.0))
         .show(ctx, |ui| {
             let p = theme::palette(ui);
             let item = |ui: &mut egui::Ui, head: &str, body: String| {
