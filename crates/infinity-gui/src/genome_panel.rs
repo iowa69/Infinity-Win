@@ -207,14 +207,14 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let total = order.len();
 
     if total == 0 {
-        ui.vertical_centered(|ui| {
-            ui.add_space(24.0);
-            ui.weak(if app.model.genome_count() == 0 {
-                "no genomes yet: add a file or a folder above"
-            } else {
-                "nothing matches the filter"
+        if app.model.genome_count() == 0 {
+            empty_state(ui, app);
+        } else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(24.0);
+                ui.weak("nothing matches the filter");
             });
-        });
+        }
         return;
     }
 
@@ -383,6 +383,62 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
             }
         }
     }
+}
+
+/// What the list shows before any run: the two ways in, as big buttons, and
+/// what is queued for the next run.
+fn empty_state(ui: &mut egui::Ui, app: &mut InfinityApp) {
+    use crate::dialogs::PickKind;
+    let p = theme::palette(ui);
+    let busy = app.pending_pick.is_some();
+    ui.vertical_centered(|ui| {
+        ui.add_space(28.0);
+        ui.label(
+            RichText::new("Add your genomes")
+                .size(15.0)
+                .strong()
+                .color(p.text_strong),
+        );
+        ui.add_space(4.0);
+        theme::hint(ui, "assembled genomes, one FASTA file each");
+        ui.add_space(10.0);
+        let w = (ui.available_width() - 24.0).clamp(120.0, 200.0);
+        if ui
+            .add_enabled(
+                !busy,
+                theme::primary_button("＋ Add files…", &p).min_size(Vec2::new(w, 28.0)),
+            )
+            .on_hover_text("choose FASTA files (.fasta, .fa, .fna, .fas, also .gz)")
+            .clicked()
+        {
+            app.request_pick(PickKind::Files);
+        }
+        ui.add_space(4.0);
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new("＋ Add folder…").min_size(Vec2::new(w, 28.0)),
+            )
+            .on_hover_text("every FASTA file directly inside the folder is one genome")
+            .clicked()
+        {
+            app.request_pick(PickKind::Folders);
+        }
+        ui.add_space(10.0);
+        theme::hint(ui, "or drop files and folders anywhere on the window");
+        if !app.inputs.is_empty() {
+            ui.add_space(14.0);
+            ui.label(
+                RichText::new(format!(
+                    "Ready to run: {} in {} item(s)",
+                    crate::dialogs::count_text(Some(app.input_genome_total())),
+                    app.inputs.len()
+                ))
+                .color(p.accent),
+            );
+            theme::hint(ui, "press ▶ Run in the toolbar");
+        }
+    });
 }
 
 fn pos(x: f32, y: f32) -> egui::Pos2 {

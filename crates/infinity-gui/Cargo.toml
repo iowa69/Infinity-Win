@@ -21,10 +21,14 @@ serde_json = { workspace = true }
 # `eframe`/`egui` is the native Rust GUI of section 4.2: one language, one
 # build, one executable per platform, no runtime to install.
 #
-# Default features only. The GTK-based file-dialog crates (`rfd` with its
-# `gtk3` backend) are deliberately NOT used: they need system `-dev` packages
-# at build time, which breaks the "no extra toolchain" rule of section 12.
-# Genome folders are chosen by drag-and-drop or by typing a path instead, which
-# also suits an input of a thousand files better than a file picker does.
+# Default features only.
 eframe = { version = "0.37", default-features = true }
 egui = "0.37"
+
+# Native "Add files…" / "Add folder…" dialogs. Windows uses the Win32 common
+# dialogs (no extra dependency). On Linux only the xdg-desktop-portal backend
+# is enabled: it asks the desktop's own file chooser over D-Bus, so it needs no
+# GTK and no system `-dev` packages at build time (DECISIONS.md D3). The
+# default `gtk3` and `wayland` features stay off for exactly that reason.
+# Pinned: 0.17.2 (January 2026); 0.18 is less than two weeks old.
+rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }

@@ -12,7 +12,7 @@
 //! 3. **Focus is never ambiguous.** Every number that is an estimate is drawn
 //!    with the "≈" marker and in the colour of its focus level.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,6 +44,13 @@ pub struct InfinityApp {
 
     // --- inputs -----------------------------------------------------------
     pub(crate) inputs: Vec<PathBuf>,
+    /// How many genomes each input holds, counted once when it is added.
+    pub(crate) input_counts: HashMap<PathBuf, Option<usize>>,
+    /// A native file dialog asked for by a button, opened by [`Self::ui`]
+    /// (which has the window handle the dialog is parented to).
+    pub(crate) pick_request: Option<crate::dialogs::PickKind>,
+    /// The native file dialog that is open now, if any.
+    pub(crate) pending_pick: Option<crate::dialogs::PendingPick>,
     pub(crate) input_text: String,
     pub(crate) outdir_text: String,
     /// What the command line asked for, done once on the first frame.
@@ -211,6 +218,9 @@ impl InfinityApp {
             open_text: String::new(),
             prefs: loaded,
             inputs: Vec::new(),
+            input_counts: HashMap::new(),
+            pick_request: None,
+            pending_pick: None,
             input_text: String::new(),
             run_handle: None,
             results: None,
@@ -964,14 +974,94 @@ impl InfinityApp {
             return false;
         }
         self.inputs.push(path.clone());
+        self.input_counts
+            .insert(path.clone(), crate::dialogs::count_genomes(path));
         self.remember_input(&path.display().to_string());
         true
     }
 
     pub(crate) fn remove_input(&mut self, i: usize) {
         if i < self.inputs.len() {
-            self.inputs.remove(i);
+            let p = self.inputs.remove(i);
+            self.input_counts.remove(&p);
         }
+    }
+
+    /// Genomes an input holds; counted on first use when it was put in the
+    /// list some other way (the command line, a test).
+    pub(crate) fn input_count(&mut self, path: &PathBuf) -> Option<usize> {
+        *self
+            .input_counts
+            .entry(path.clone())
+            .or_insert_with(|| crate::dialogs::count_genomes(path))
+    }
+
+    /// Ask for a native file dialog; [`Self::ui`] opens it on the next frame.
+    pub(crate) fn request_pick(&mut self, kind: crate::dialogs::PickKind) {
+        if self.pending_pick.is_none() {
+            self.pick_request = Some(kind);
+        }
+    }
+
+    /// Open a dialog asked for by a button, parented to the main window.
+    fn open_requested_pick(&mut self, ctx: &Context, frame: Option<&eframe::Frame>) {
+        let Some(kind) = self.pick_request.take() else {
+            return;
+        };
+        if self.pending_pick.is_some() {
+            return;
+        }
+        let dir = crate::dialogs::start_dir(&self.prefs.recent_inputs);
+        match crate::dialogs::start(kind, frame, dir.as_deref(), ctx.clone()) {
+            Ok(p) => {
+                self.pending_pick = Some(p);
+                self.status = format!("{} …", kind.title());
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
+    /// Collect what a closed dialog picked.
+    fn poll_pick(&mut self) {
+        let Some((kind, paths)) = self
+            .pending_pick
+            .as_ref()
+            .and_then(|p| p.take().map(|v| (p.kind, v)))
+        else {
+            return;
+        };
+        self.pending_pick = None;
+        if paths.is_empty() {
+            self.status = format!("{}: nothing chosen", kind.title());
+            return;
+        }
+        let mut added = 0usize;
+        let mut genomes = 0usize;
+        for p in &paths {
+            if self.add_input_path(p) {
+                added += 1;
+                genomes += self.input_count(p).unwrap_or(0);
+            }
+        }
+        self.show_inputs = true;
+        self.status = if added == 0 {
+            "already in the list".to_string()
+        } else {
+            format!(
+                "added {added} item(s) with {} — {} in the list",
+                crate::dialogs::count_text(Some(genomes)),
+                crate::dialogs::count_text(Some(self.input_genome_total()))
+            )
+        };
+        self.save_prefs();
+    }
+
+    /// Genomes in all inputs together, as far as they could be counted.
+    pub(crate) fn input_genome_total(&self) -> usize {
+        self.inputs
+            .iter()
+            .filter_map(|p| self.input_counts.get(p).copied().flatten())
+            .sum()
     }
 }
 
@@ -1100,6 +1190,7 @@ impl eframe::App for InfinityApp {
         self.poll_restart(ctx);
         self.poll_open();
         self.poll_png();
+        self.poll_pick();
         self.handle_dropped_files(ctx);
         self.refresh_layout(now);
         self.step_animation(now);
@@ -1114,7 +1205,7 @@ impl eframe::App for InfinityApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Panels are shown in the order that carves the window up the way the
         // mock-up of section 8 lays it out: the full-width bars first, then the
         // two sides, then the map across what is left, and the tree in the
@@ -1151,6 +1242,7 @@ impl eframe::App for InfinityApp {
         crate::settings_panel::show(&ctx, self);
         crate::outlier_dialog::show(&ctx, self);
         crate::tree_window::show(&ctx, self);
+        self.open_requested_pick(&ctx, Some(frame));
     }
 }
 

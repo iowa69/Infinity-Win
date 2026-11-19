@@ -18,6 +18,7 @@
 //! | [`fmt`] | number formatting and the 0-based to 1-based conversion |
 //! | [`colors`] | the visual vocabulary of focus levels, clusters and variants |
 //! | [`prefs`] | remembered folders and parameters, as JSON in the config dir |
+//! | [`dialogs`] | the native Add files / Add folder dialogs, off the UI thread |
 //! | [`export`] | the files of section 9, written from the UI model or copied from the run |
 //! | [`annotate`] | the annotated tree for FigTree (NEXUS) and iTOL datasets |
 //! | [`svg`] | the tree view as a vector picture |
@@ -61,6 +62,7 @@ mod annotate;
 mod app;
 mod chrome;
 mod colors;
+mod dialogs;
 mod export;
 mod fmt;
 mod genome_panel;
@@ -111,8 +113,8 @@ fn main() -> eframe::Result {
             .with_inner_size([1480.0, 920.0])
             .with_min_inner_size([940.0, 560.0])
             .with_title(format!("Infinity-Win {}", infinity_core::VERSION))
-            // Genome folders are dropped onto the window: there is no native
-            // file dialog, and that is deliberate (see `chrome::toolbar`).
+            // Genomes come in through the Add files / Add folder dialogs,
+            // by typing a path, or by dropping files and folders here.
             .with_drag_and_drop(true),
         ..Default::default()
     };
