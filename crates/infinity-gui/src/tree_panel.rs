@@ -124,6 +124,7 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mut fit_now = false;
     let mut zoom_by: Option<f32> = None;
     let mut picked: Option<u32> = None;
+    let mut open_window = false;
 
     // Wrapped rather than one long row: at the smallest window the controls
     // flow onto a second line instead of running under the side panel.
@@ -225,7 +226,21 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
             ui.checkbox(&mut app.tree.aligned_tips, "Aligned tip labels");
             ui.checkbox(&mut app.tree.color_strip, "Cluster colour strip");
         });
+        if ui
+            .button("⛶ Tree window")
+            .on_hover_text(
+                "the whole tree in a window of its own, on white, ready for a figure: \
+                 pan, zoom, save PNG or SVG",
+            )
+            .clicked()
+        {
+            open_window = true;
+        }
     });
+    if open_window {
+        let ctx = ui.ctx().clone();
+        crate::tree_window::open(app, &ctx);
+    }
     // The pairwise readout gets a line of its own: it is the longest thing in
     // the header and the one that changes most.
     let mut open_hidden = false;

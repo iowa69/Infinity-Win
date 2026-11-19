@@ -323,6 +323,123 @@ pub fn render(l: &TreeLayout, model: &UiModel, o: &SvgOptions) -> String {
     s
 }
 
+/// Write a list of drawing primitives (the tree window's publication-style
+/// figure, see [`crate::pubtree`]) as a complete SVG document of `size`
+/// pixels on a white page. The window paints the same list, so the file is
+/// what the window shows.
+pub fn from_scene(prims: &[crate::pubtree::Prim], size: egui::Vec2) -> String {
+    use crate::pubtree::{HAlign, Prim};
+    let (w, h) = (size.x.ceil(), size.y.ceil());
+    let mut s = String::with_capacity(96 * prims.len() + 512);
+    let _ = writeln!(
+        s,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" font-family="{FONT}">"#
+    );
+    let _ = writeln!(
+        s,
+        r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##
+    );
+    for p in prims {
+        match p {
+            Prim::Line {
+                a,
+                b,
+                width,
+                color,
+                dash,
+            } => {
+                let dash = dash
+                    .map(|d| format!(r#" stroke-dasharray="{d:.1} {d:.1}""#))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    s,
+                    r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}"{} stroke-width="{width:.2}"{dash}/>"#,
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y,
+                    rgbu(*color),
+                    opacity("stroke-opacity", *color)
+                );
+            }
+            Prim::Circle { c, r, fill, stroke } => {
+                let st = stroke
+                    .map(|(w, col)| format!(r#" stroke="{}" stroke-width="{w:.2}""#, rgbu(col)))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    s,
+                    r#"<circle cx="{:.1}" cy="{:.1}" r="{r:.1}" fill="{}"{}{st}/>"#,
+                    c.x,
+                    c.y,
+                    rgbu(*fill),
+                    opacity("fill-opacity", *fill)
+                );
+            }
+            Prim::Rect { r, fill, rounding } => {
+                let _ = writeln!(
+                    s,
+                    r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" rx="{rounding:.1}" fill="{}"{}/>"#,
+                    r.left(),
+                    r.top(),
+                    r.width(),
+                    r.height(),
+                    rgbu(*fill),
+                    opacity("fill-opacity", *fill)
+                );
+            }
+            Prim::Poly { pts, fill, stroke } => {
+                let pts: Vec<String> = pts
+                    .iter()
+                    .map(|p| format!("{:.1},{:.1}", p.x, p.y))
+                    .collect();
+                let _ = writeln!(
+                    s,
+                    r#"<polygon points="{}" fill="{}"{} stroke="{}" stroke-width="{:.2}"/>"#,
+                    pts.join(" "),
+                    rgbu(*fill),
+                    opacity("fill-opacity", *fill),
+                    rgbu(stroke.1),
+                    stroke.0
+                );
+            }
+            Prim::Text {
+                pos,
+                align,
+                text,
+                size,
+                color,
+                bold,
+            } => {
+                let anchor = match align {
+                    HAlign::Left => "start",
+                    HAlign::Center => "middle",
+                };
+                let weight = if *bold { r#" font-weight="bold""# } else { "" };
+                let _ = writeln!(
+                    s,
+                    r#"<text x="{:.1}" y="{:.1}" font-size="{size:.1}" text-anchor="{anchor}" dominant-baseline="central" fill="{}"{weight}>{}</text>"#,
+                    pos.x,
+                    pos.y,
+                    rgbu(*color),
+                    esc(text)
+                );
+            }
+        }
+    }
+    s.push_str("</svg>\n");
+    s
+}
+
+/// An SVG opacity attribute for a colour that is not fully opaque.
+fn opacity(attr: &str, c: Color32) -> String {
+    let a = c.to_srgba_unmultiplied()[3];
+    if a == 255 {
+        String::new()
+    } else {
+        format!(r#" {attr}="{:.3}""#, f32::from(a) / 255.0)
+    }
+}
+
 /// One branch segment in a focus style.
 fn line(s: &mut String, a: (f32, f32), b: (f32, f32), style: &colors::FocusStyle) {
     let dash = if style.dashed {
@@ -344,6 +461,13 @@ fn line(s: &mut String, a: (f32, f32), b: (f32, f32), style: &colors::FocusStyle
 
 fn rgb(c: Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
+/// The colour itself, without the premultiplied alpha `Color32` stores: a
+/// translucent wash keeps its hue and gets its alpha as an opacity attribute.
+fn rgbu(c: Color32) -> String {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 /// Escape text for an SVG text node or attribute.

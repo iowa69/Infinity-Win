@@ -115,6 +115,10 @@ pub struct InfinityApp {
     /// A run was cancelled to start again without some genomes; it starts as
     /// soon as the old one has stopped.
     pub(crate) restart_pending: bool,
+    /// The tree window (white, publication style) is open.
+    pub(crate) show_tree_window: bool,
+    /// What the main window and the tree window share.
+    pub(crate) tree_window: crate::tree_window::SharedRef,
 }
 
 /// Pan, zoom and decoration state of the tree panel.
@@ -243,6 +247,8 @@ impl InfinityApp {
             outliers_prompted: false,
             outliers_acknowledged: false,
             restart_pending: false,
+            show_tree_window: false,
+            tree_window: crate::tree_window::new_shared(),
         };
         app.validate_params();
         app
@@ -1144,6 +1150,7 @@ impl eframe::App for InfinityApp {
         let ctx = ui.ctx().clone();
         crate::settings_panel::show(&ctx, self);
         crate::outlier_dialog::show(&ctx, self);
+        crate::tree_window::show(&ctx, self);
     }
 }
 
