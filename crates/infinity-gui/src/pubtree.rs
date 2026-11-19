@@ -1274,6 +1274,9 @@ pub fn footer_height(
 
 /// The footer, in `area`: scale bars first, then the legend of what the
 /// scene drew. `rule` draws a hairline along its top edge.
+// The picture's inputs (shape, marks, geometry, what was drawn, ink) plus
+// where to put it; a struct for them would only move the same values.
+#[allow(clippy::too_many_arguments)]
 pub fn footer(
     l: &TreeLayout,
     m: &Marks,

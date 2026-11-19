@@ -1,14 +1,15 @@
 //! Colours and line styles: the visual vocabulary of focus levels, clusters and
 //! variant kinds (section 8).
 //!
-//! Focus must always be distinguishable, because a Focus 0 branch length and a
-//! Focus 2 branch length are different kinds of number and rule 8 of section 0
-//! forbids letting one pass for the other. The three styles therefore differ in
-//! *three* ways at once — colour, weight and dashing — so that they survive a
-//! greyscale printout and a colour-blind reader alike.
+//! Focus must always be distinguishable, because a Focus 0 number and a
+//! Focus 2 number are different kinds of number and rule 8 of section 0 forbids
+//! letting one pass for the other. The three styles differ in colour, weight
+//! and dashing; the genome list and the pairwise readout take their colours
+//! from here. The tree itself is drawn as a publication figure
+//! ([`crate::pubtree`]): exact branches in ink, estimates in grey, every
+//! estimated number with `≈`.
 //!
-//! `Color32` and `Stroke` are plain data, so this module is testable without a
-//! window.
+//! `Color32` is plain data, so this module is testable without a window.
 
 use egui::Color32;
 use infinity_core::variant::VariantKind;

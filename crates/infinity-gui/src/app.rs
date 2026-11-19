@@ -1069,10 +1069,10 @@ impl InfinityApp {
 
     /// Genomes an input holds; counted on first use when it was put in the
     /// list some other way (the command line, a test).
-    pub(crate) fn input_count(&mut self, path: &PathBuf) -> Option<usize> {
+    pub(crate) fn input_count(&mut self, path: &std::path::Path) -> Option<usize> {
         *self
             .input_counts
-            .entry(path.clone())
+            .entry(path.to_path_buf())
             .or_insert_with(|| crate::dialogs::count_genomes(path))
     }
 

@@ -1,12 +1,13 @@
 //! The window's chrome: the toolbar along the top and the status bar along the
 //! bottom (section 8).
 //!
-//! The toolbar is one line: the menus, the three things that must be reachable
-//! at any moment (genomes, run, stop), the cluster distance (the one parameter
-//! section 8 requires to act immediately, shown with its % identity), and on
-//! the right the Settings window and the side-panel toggle. Every other
-//! parameter lives in Settings. Below it, the "Genomes" drawer holds the input
-//! paths and the output folder: everything a run needs, in one place.
+//! The toolbar is one line: the menus, the things that must be reachable at
+//! any moment (Add files…, Add folder…, the Inputs drawer, Run, Stop), the
+//! cluster distance (the one parameter section 8 requires to act immediately,
+//! shown with its % identity), and on the right the Settings window and the
+//! side-panel toggle. Every other parameter lives in Settings. Below it, the
+//! Inputs drawer lists every file and folder with the genomes it holds, plus a
+//! typed path and the output folder: everything a run needs, in one place.
 
 use eframe::egui;
 use egui::RichText;

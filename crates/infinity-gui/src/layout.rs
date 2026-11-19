@@ -1,8 +1,8 @@
 //! Turning a tree into positions on screen (section 8, "Tree panel").
 //!
-//! egui has no tree widget, so the rectangular layout, the collapsed-cluster
-//! triangles, the scale bar and the 300 ms move animation are all computed
-//! here. Nothing in this module touches `egui::Ui` or a `Painter`: it maps data
+//! egui has no tree widget, so the rectangular layout, the size of the
+//! collapsed-cluster wedges, the scale bar and the 300 ms move animation are
+//! all computed here (the drawing itself is [`crate::pubtree`]). Nothing in this module touches `egui::Ui` or a `Painter`: it maps data
 //! to data, which is what makes the geometry testable without a window.
 //!
 //! # Units
