@@ -25,8 +25,8 @@ use std::path::PathBuf;
 
 use infinity_core::counters::Counters;
 use infinity_core::events::{
-    ClusterFocusInfo, ClusterInfo, Event, GenomeScannedInfo, MapUpdateInfo, MemberNumbers,
-    OutlierInfo,
+    ClusterDetailInfo, ClusterFocusInfo, ClusterInfo, Event, GenomeScannedInfo, MapUpdateInfo,
+    MemberNumbers, OutlierInfo,
 };
 use infinity_core::summary::RunSummary;
 use infinity_core::tree::{parse_newick, Tree};
@@ -176,6 +176,9 @@ pub struct UiModel {
     /// Genomes the engine flagged as divergent (another species,
     /// contamination, an incomplete assembly), in the engine's order.
     pub outliers: Vec<OutlierInfo>,
+    /// Cluster id to the engine's distance matrix for it (`ClusterDetail`),
+    /// which the multi-genome selection summary reads.
+    pub details: HashMap<u32, ClusterDetailInfo>,
 
     /// Cluster distance threshold in force, as last reported by the engine.
     pub threshold: f64,
@@ -343,9 +346,19 @@ impl UiModel {
                 });
                 self.outliers = list;
             }
-            // Matrices, Focus 1 maps and per-variant filters are written to the
-            // output folder; the panels do not draw them yet.
-            Event::ClusterDetail(_) | Event::Focus1Map(_) | Event::MapFilters { .. } => {}
+            // A later, sharper matrix replaces an earlier one.
+            Event::ClusterDetail(d) => {
+                let keep = self
+                    .details
+                    .get(&d.cluster)
+                    .map_or(true, |old| old.focus <= d.focus || old.names != d.names);
+                if keep {
+                    self.details.insert(d.cluster, *d);
+                }
+            }
+            // Focus 1 maps and per-variant filters are written to the output
+            // folder; the panels do not draw them yet.
+            Event::Focus1Map(_) | Event::MapFilters { .. } => {}
         }
     }
 
@@ -517,6 +530,23 @@ impl UiModel {
                 }
             }
         }
+        // A matrix belongs to a membership, not to a cluster number: after a
+        // re-clustering only the ones whose cluster kept its members stay.
+        let clusters = &self.clusters;
+        let index = &self.cluster_index;
+        self.details.retain(|cid, d| {
+            index.get(cid).is_some_and(|&ci| {
+                let mut a: Vec<&str> = clusters[ci]
+                    .member_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let mut b: Vec<&str> = d.names.iter().map(String::as_str).collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            })
+        });
         if new_clusters > 0 {
             self.notes.push(Note {
                 t_ms,

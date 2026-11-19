@@ -14,6 +14,7 @@
 //! | [`layout`] | turns a tree into node positions, plus the move animation |
 //! | [`map`] | the pivot axis: contig offsets, covered spans, row planning |
 //! | [`pairwise`] | recomputes 6.9 from two members' variant lists |
+//! | [`selection`] | the selected genomes and the click rules (Ctrl, Shift, Ctrl+A) |
 //! | [`fmt`] | number formatting and the 0-based to 1-based conversion |
 //! | [`colors`] | the visual vocabulary of focus levels, clusters and variants |
 //! | [`prefs`] | remembered folders and parameters, as JSON in the config dir |
@@ -67,6 +68,7 @@ mod open;
 mod pairwise;
 mod prefs;
 mod run;
+mod selection;
 mod settings;
 mod settings_panel;
 mod side_panel;

@@ -13,9 +13,12 @@
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
+use std::collections::HashMap;
+
 use crate::app::{InfinityApp, TreeMode, TreeView};
 use crate::layout::{self, NodeKind, TreeLayout};
 use crate::pairwise::PairSource;
+use crate::selection::{ClickMods, Selection};
 use crate::state::UiModel;
 use crate::{colors, fmt, theme};
 
@@ -74,6 +77,38 @@ impl View {
 enum Hover {
     Genome(u32),
     Cluster(u32),
+    /// The "n selected" badge on a collapsed cluster: clicking opens it.
+    SelectedBadge(u32),
+}
+
+/// The genome ids in the tree's row order, for a Shift-click range. A
+/// collapsed cluster stands for all of its members, in the order the cluster
+/// lists them, so a range drawn across a triangle includes what it hides.
+pub(crate) fn row_order(l: &TreeLayout, model: &UiModel) -> Vec<u32> {
+    let mut out = Vec::with_capacity(l.leaves.len());
+    for &i in &l.leaves {
+        match &l.nodes[i].kind {
+            NodeKind::Genome { id, .. } if *id != u32::MAX => out.push(*id),
+            NodeKind::ClusterCollapsed { id, .. } => {
+                if let Some(c) = model.cluster(*id) {
+                    out.extend(c.members.iter().copied());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// How many selected genomes each cluster holds.
+fn selected_per_cluster(model: &UiModel, sel: &Selection) -> HashMap<u32, usize> {
+    let mut out = HashMap::new();
+    for &g in sel.ids() {
+        if let Some(c) = model.cluster_of(g) {
+            *out.entry(c).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp) {
@@ -193,7 +228,36 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     });
     // The pairwise readout gets a line of its own: it is the longest thing in
     // the header and the one that changes most.
-    ui.horizontal_wrapped(|ui| pair_readout(ui, app));
+    let mut open_hidden = false;
+    ui.horizontal_wrapped(|ui| {
+        pair_readout(ui, app);
+        let hidden = app.hidden_selected();
+        if !hidden.is_empty() {
+            let n: usize = hidden.iter().map(|h| h.1).sum();
+            let p = theme::palette(ui);
+            if ui
+                .small_button(
+                    egui::RichText::new(format!(
+                        "⤢ show {n} selected in {} collapsed cluster{}",
+                        hidden.len(),
+                        if hidden.len() == 1 { "" } else { "s" }
+                    ))
+                    .color(p.accent),
+                )
+                .on_hover_text("open the clusters that hold selected genomes")
+                .clicked()
+            {
+                open_hidden = true;
+            }
+        }
+    });
+    if open_hidden {
+        app.expand_selected();
+        for &(c, _) in &app.hidden_selected() {
+            // Clusters without a tree yet cannot open; ask for them first.
+            app.set_cluster(c, true);
+        }
+    }
 
     if let Some(f) = zoom_by {
         app.tree.zoom_request = Some(f);
@@ -248,6 +312,25 @@ fn pair_readout(ui: &mut egui::Ui, app: &InfinityApp) {
                 PairSource::Unavailable => app.pair_hint(),
             });
         }
+        None if app.selection.len() > 2 => {
+            let s = app.selection_summary();
+            let approx = s.snps.is_some_and(|r| r.approximate);
+            let focus = if approx {
+                fmt::FOCUS_BLOCKS
+            } else {
+                fmt::FOCUS_EXACT
+            };
+            let colour = if s.snps.is_some() {
+                colors::focus_color(focus, ui.visuals().dark_mode)
+            } else {
+                theme::palette(ui).text
+            };
+            ui.label(egui::RichText::new(s.text()).small().color(colour))
+                .on_hover_text(
+                    "SNP distances are counted only between genomes of the same cluster; \
+                     select exactly two for their full pairwise numbers.",
+                );
+        }
         None => {
             theme::hint(ui, app.pair_hint());
         }
@@ -290,7 +373,11 @@ struct Draw<'a> {
     strong: Color32,
     text: Color32,
     model: &'a UiModel,
-    selection: &'a [u32],
+    selection: &'a Selection,
+    /// Selected genomes per cluster, for the badges on collapsed clusters.
+    selected_in: HashMap<u32, usize>,
+    /// The selection colour: the theme accent, as in the genome list.
+    accent: Color32,
     search_hit: Option<u32>,
     /// Node positions in layout coordinates, parallel to `TreeLayout::nodes`,
     /// mid-animation when the tree is moving.
@@ -333,7 +420,7 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
         None
     };
     let clicked = resp.clicked();
-    let additive = ui.ctx().input(|i| i.modifiers.command);
+    let mods = ui.ctx().input(|i| ClickMods::from_modifiers(&i.modifiers));
     let scroll = ui.ctx().input(|i| i.smooth_scroll_delta);
 
     // --- interaction first, so this frame draws the result ------------------
@@ -407,6 +494,8 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
             text: text_col,
             model: &app.model,
             selection: &app.selection,
+            selected_in: selected_per_cluster(&app.model, &app.selection),
+            accent: pal.accent,
             search_hit: app.tree.search_hit,
             positions: &app.positions,
             opts: &app.tree,
@@ -429,6 +518,13 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
             tooltip = match h {
                 Hover::Genome(id) => genome_tooltip(d.model, *id),
                 Hover::Cluster(id) => cluster_tooltip(d.model, *id),
+                Hover::SelectedBadge(id) => vec![
+                    format!(
+                        "{} selected genome(s) inside cluster {id}",
+                        d.selected_in.get(id).copied().unwrap_or(0)
+                    ),
+                    "click to open the cluster and show them".to_string(),
+                ],
             };
         }
     }
@@ -438,21 +534,33 @@ fn canvas(ui: &mut egui::Ui, app: &mut InfinityApp) {
     }
 
     // --- clicks, applied after the read-only pass ---------------------------
-    let mut click: Option<(Hover, bool)> = None;
+    let mut click: Option<Hover> = None;
     if clicked {
         if let Some(p) = pointer {
             click = hits
                 .iter()
                 .rev()
                 .find(|(_, r)| r.contains(p))
-                .map(|(h, _)| (h.clone(), additive));
+                .map(|(h, _)| h.clone());
         }
     }
-    if let Some((h, add)) = click {
-        match h {
-            Hover::Genome(id) => app.select_genome(id, add),
-            Hover::Cluster(id) => app.toggle_cluster(id),
+    match click {
+        Some(Hover::Genome(id)) => {
+            let order = app
+                .tree_layout
+                .as_ref()
+                .map(|l| row_order(l, &app.model))
+                .unwrap_or_default();
+            app.click_genome(id, mods, &order);
         }
+        Some(Hover::Cluster(id)) => app.toggle_cluster(id),
+        Some(Hover::SelectedBadge(id)) => {
+            app.expanded.insert(id);
+            app.set_cluster(id, true);
+        }
+        // A click on empty canvas keeps the selection: a long hand-picked
+        // selection is too easy to lose that way. Escape clears it.
+        None => {}
     }
     ui.ctx().output_mut(|o| {
         o.cursor_icon = if hover.is_some() {
@@ -616,11 +724,27 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
         }
         match &n.kind {
             NodeKind::Genome { id, name } => {
+                let selected = d.selection.contains(*id);
+                if selected {
+                    // A band across the whole row, with a solid tick at the
+                    // left edge: visible at any zoom, even with no labels.
+                    let h = d.view.px_per_row.max(2.0);
+                    let band = Rect::from_min_size(
+                        Pos2::new(d.rect.left(), y - h * 0.5),
+                        Vec2::new(d.rect.width(), h),
+                    );
+                    d.painter.rect_filled(band, 0, colors::wash(d.accent, 52));
+                    d.painter.rect_filled(
+                        Rect::from_min_size(band.min, Vec2::new(3.0, h)),
+                        0,
+                        d.accent,
+                    );
+                }
                 if !show_labels {
                     d.painter
                         .circle_filled(s, 1.0, colors::focus_color(n.focus, d.dark));
-                    if d.selection.contains(id) {
-                        d.painter.circle_filled(s, 2.2, colors::SELECTED);
+                    if selected {
+                        d.painter.circle_filled(s, 2.4, d.accent);
                     }
                     hits.push((
                         Hover::Genome(*id),
@@ -628,22 +752,17 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                     ));
                     continue;
                 }
-                let selected = d.selection.contains(id);
                 let colour = d
                     .model
                     .genome(*id)
                     .and_then(|g| g.cluster)
                     .map(|c| colors::cluster_color(c, d.dark))
                     .unwrap_or(weak);
+                d.painter
+                    .circle_filled(s, if selected { 3.0 } else { 2.0 }, colour);
                 if selected {
-                    let r = Rect::from_min_size(
-                        Pos2::new(d.rect.left(), y - d.view.px_per_row * 0.5),
-                        Vec2::new(d.rect.width(), d.view.px_per_row),
-                    );
-                    d.painter
-                        .rect_filled(r, 0, colors::wash(colors::SELECTED, 46));
+                    d.painter.circle_stroke(s, 4.6, Stroke::new(1.6, d.accent));
                 }
-                d.painter.circle_filled(s, 2.0, colour);
                 if Some(*id) == d.search_hit {
                     d.painter
                         .circle_stroke(s, 5.0, Stroke::new(1.4, colors::HOVERED));
@@ -675,10 +794,28 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                 let tr = d.painter.text(
                     Pos2::new(lx, y),
                     Align2::LEFT_CENTER,
-                    text,
+                    text.clone(),
                     label_font.clone(),
                     if selected { strong } else { text_col },
                 );
+                if selected {
+                    // Drawn a second time, half a pixel over: a bold label
+                    // without a second font, and an underline in the accent.
+                    d.painter.text(
+                        Pos2::new(lx + 0.6, y),
+                        Align2::LEFT_CENTER,
+                        text,
+                        label_font.clone(),
+                        strong,
+                    );
+                    d.painter.line_segment(
+                        [
+                            Pos2::new(tr.left(), tr.bottom() - 0.5),
+                            Pos2::new(tr.right(), tr.bottom() - 0.5),
+                        ],
+                        Stroke::new(1.2, d.accent),
+                    );
+                }
                 hits.push((
                     Hover::Genome(*id),
                     Rect::from_min_max(s - Vec2::splat(3.0), tr.max + Vec2::new(2.0, 3.0)),
@@ -694,10 +831,27 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                 ];
                 let base_x = tri[1].x;
                 let colour = colors::cluster_color(*id, d.dark);
+                let inside = d.selected_in.get(id).copied().unwrap_or(0);
+                if inside > 0 {
+                    let h = d.view.px_per_row.max(2.0);
+                    let band = Rect::from_min_size(
+                        Pos2::new(d.rect.left(), y - h * 0.5),
+                        Vec2::new(d.rect.width(), h),
+                    );
+                    d.painter.rect_filled(band, 0, colors::wash(d.accent, 30));
+                    d.painter.rect_filled(
+                        Rect::from_min_size(band.min, Vec2::new(3.0, h)),
+                        0,
+                        d.accent,
+                    );
+                }
                 d.painter.add(egui::Shape::convex_polygon(
                     tri.to_vec(),
                     colors::wash(colour, 110),
-                    Stroke::new(1.2, colour),
+                    Stroke::new(
+                        if inside > 0 { 2.0 } else { 1.2 },
+                        if inside > 0 { d.accent } else { colour },
+                    ),
                 ));
                 let (focus, approx) = d
                     .model
@@ -719,8 +873,23 @@ fn draw_nodes(d: &Draw<'_>, l: &TreeLayout) -> Vec<(Hover, Rect)> {
                         colour,
                     );
                     hits.push((Hover::Cluster(*id), tri_rect.union(tr)));
+                    if inside > 0 {
+                        let badge = selected_badge(
+                            &d.painter,
+                            Pos2::new(tr.right() + 6.0, y),
+                            inside,
+                            small_font.clone(),
+                            d.accent,
+                            d.dark,
+                        );
+                        hits.push((Hover::SelectedBadge(*id), badge));
+                    }
                 } else {
                     hits.push((Hover::Cluster(*id), tri_rect));
+                    if inside > 0 {
+                        d.painter
+                            .circle_filled(Pos2::new(base_x + 4.0, y), 2.6, d.accent);
+                    }
                 }
             }
             NodeKind::ClusterRoot { id, members, focus } => {
@@ -865,6 +1034,30 @@ fn draw_branch_labels(d: &Draw<'_>, l: &TreeLayout) {
     }
 }
 
+/// The "3 selected ⤢" pill drawn after a collapsed cluster's label. Returns
+/// its rectangle, which is a click target that opens the cluster.
+fn selected_badge(
+    painter: &egui::Painter,
+    left_centre: Pos2,
+    n: usize,
+    font: FontId,
+    accent: Color32,
+    dark: bool,
+) -> Rect {
+    let text = format!("{n} selected ⤢");
+    let on = if dark {
+        Color32::from_rgb(8, 20, 24)
+    } else {
+        Color32::WHITE
+    };
+    let galley = painter.layout_no_wrap(text, font, on);
+    let size = galley.size() + Vec2::new(10.0, 2.0);
+    let rect = Rect::from_min_size(Pos2::new(left_centre.x, left_centre.y - size.y / 2.0), size);
+    painter.rect_filled(rect, size.y / 2.0, accent);
+    painter.galley(rect.min + Vec2::new(5.0, 1.0), galley, on);
+    rect
+}
+
 /// A dotted horizontal leader from a tip to its aligned label.
 fn dotted(painter: &egui::Painter, x0: f32, x1: f32, y: f32, colour: Color32) {
     painter.extend(egui::Shape::dashed_line(
@@ -945,7 +1138,7 @@ fn genome_tooltip(model: &UiModel, id: u32) -> Vec<String> {
         }
         None => out.push("no numbers yet".to_string()),
     }
-    out.push("click to select · ctrl-click for a pair".to_string());
+    out.push("click to select · Ctrl-click to add or remove · Shift-click for a range".to_string());
     out
 }
 
@@ -1017,6 +1210,50 @@ mod tests {
         assert!(huge.px_per_row <= MAX_PX_PER_ROW);
         assert!(huge.px_per_unit <= MAX_PX_PER_UNIT);
         assert!(huge.px_per_row.is_finite() && huge.origin.x.is_finite());
+    }
+
+    #[test]
+    fn the_row_order_expands_collapsed_clusters_into_their_members() {
+        let mut m = UiModel::default();
+        for i in 0..5u32 {
+            m.apply(0.0, crate::state::scan_event(i, &format!("g{i}"), 1000, 1));
+        }
+        m.apply(
+            0.0,
+            crate::state::clustered_event(&[(0, 0, &[0, 1, 2]), (1, 3, &[3, 4])]),
+        );
+        m.apply(
+            0.0,
+            infinity_core::events::Event::BackboneTree {
+                newick: "(g0:0.001,g3:0.002);".into(),
+                pivots: vec!["g0".into(), "g3".into()],
+            },
+        );
+        m.apply(
+            0.0,
+            infinity_core::events::Event::ClusterFocus(infinity_core::events::ClusterFocusInfo {
+                cluster: 1,
+                focus: 2,
+                approximate: false,
+                newick: "(g4:1,g3:2);".into(),
+                members: vec![],
+            }),
+        );
+        let open: std::collections::HashSet<u32> = [1u32].into_iter().collect();
+        let l = layout::layout(&m.display_tree(&open).unwrap());
+        let order = row_order(&l, &m);
+        assert_eq!(order.len(), 5, "{order:?}");
+        // The collapsed cluster 0 contributes its members as one block, and
+        // the opened cluster 1 its leaves in row order.
+        let pos0 = order.iter().position(|&g| g == 0).unwrap();
+        assert_eq!(&order[pos0..pos0 + 3], &[0, 1, 2]);
+        assert!(order.contains(&3) && order.contains(&4));
+
+        let mut sel = Selection::default();
+        sel.extend([1, 2, 4]);
+        let per = selected_per_cluster(&m, &sel);
+        assert_eq!(per.get(&0), Some(&2));
+        assert_eq!(per.get(&1), Some(&1));
     }
 
     #[test]

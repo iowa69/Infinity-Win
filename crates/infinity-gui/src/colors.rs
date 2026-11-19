@@ -159,8 +159,8 @@ pub fn variant_color(kind: VariantKind) -> Color32 {
     }
 }
 
-/// Selection and hover accents.
-pub const SELECTED: Color32 = Color32::from_rgb(30, 140, 200);
+/// The search-hit marker in the tree. (Selection uses the theme accent, so
+/// the list, the tree and the map highlight a selected genome alike.)
 pub const HOVERED: Color32 = Color32::from_rgb(250, 200, 60);
 
 #[cfg(test)]
