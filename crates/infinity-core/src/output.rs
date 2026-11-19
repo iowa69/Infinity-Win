@@ -29,6 +29,7 @@ use crate::variant::VariantKind;
 pub fn write_tables(dir: &Path, results: &RunResults) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     write_genomes(dir, results)?;
+    write_outliers(dir, results)?;
     write_clusters(dir, results)?;
     write_tree(dir, results)?;
     for c in &results.clusters {
@@ -92,6 +93,32 @@ pub fn write_genomes(dir: &Path, r: &RunResults) -> std::io::Result<()> {
                 .get(&g.id)
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "NA".to_string())
+        )?;
+    }
+    w.flush()
+}
+
+/// `outliers.tsv`: the genomes flagged as divergent (another species,
+/// contamination, an incomplete assembly), one per row. Written on every run,
+/// header only when nothing was flagged, so its absence never has to be
+/// interpreted.
+pub fn write_outliers(dir: &Path, r: &RunResults) -> std::io::Result<()> {
+    let mut w = writer(dir, "outliers.tsv")?;
+    writeln!(
+        w,
+        "id\tname\tlength\tgc\tnearest_dist\tnearest_name\treasons"
+    )?;
+    for o in &r.outliers {
+        writeln!(
+            w,
+            "{}\t{}\t{}\t{:.6}\t{:.6}\t{}\t{}",
+            o.id,
+            o.name,
+            o.length,
+            o.gc,
+            o.nearest_dist,
+            or_dash(&o.nearest_name),
+            o.reasons.join("; ").replace(['\t', '\n'], " ")
         )?;
     }
     w.flush()

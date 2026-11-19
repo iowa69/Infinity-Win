@@ -14,20 +14,24 @@
 //! | [`layout`] | turns a tree into node positions, plus the move animation |
 //! | [`map`] | the pivot axis: contig offsets, covered spans, row planning |
 //! | [`pairwise`] | recomputes 6.9 from two members' variant lists |
+//! | [`selection`] | the selected genomes and the click rules (Ctrl, Shift, Ctrl+A) |
 //! | [`fmt`] | number formatting and the 0-based to 1-based conversion |
 //! | [`colors`] | the visual vocabulary of focus levels, clusters and variants |
 //! | [`prefs`] | remembered folders and parameters, as JSON in the config dir |
 //! | [`export`] | the files of section 9, written from the UI model or copied from the run |
 //! | [`annotate`] | the annotated tree for FigTree (NEXUS) and iTOL datasets |
 //! | [`svg`] | the tree view as a vector picture |
+//! | [`pubtree`] | the publication-style figure of the tree window, as primitives |
 //! | [`run`] | starting the engine and waking the interface from its threads |
 //! | [`open`] | reading a finished output folder back through the same fold |
+//! | [`outlier_dialog`] | the divergent-assembly warning and "exclude and restart" |
 //! | [`settings`] | the Resolution and SNP-rule settings, mirrored for the engine |
 //! | [`theme`] | palette, spacing, typography and the shared building blocks |
 //!
 //! The remaining modules are renderers over that model: [`chrome`] (toolbar and
 //! status bar), [`genome_panel`], [`tree_panel`], [`map_panel`],
-//! [`side_panel`] (the Run panel) and [`settings_panel`] (the Settings window).
+//! [`side_panel`] (the Run panel), [`settings_panel`] (the Settings window),
+//! [`outlier_dialog`] and [`tree_window`] (a second native window).
 //! [`app`] holds them together and owns the repaint policy.
 //!
 //! # Responsiveness
@@ -64,9 +68,12 @@ mod layout;
 mod map;
 mod map_panel;
 mod open;
+mod outlier_dialog;
 mod pairwise;
 mod prefs;
+mod pubtree;
 mod run;
+mod selection;
 mod settings;
 mod settings_panel;
 mod side_panel;
@@ -74,6 +81,7 @@ mod state;
 mod svg;
 mod theme;
 mod tree_panel;
+mod tree_window;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -111,7 +111,8 @@ pub fn complement(uncovered: &[Iv], total: u64) -> Vec<Iv> {
 /// Why the map is showing the rows it is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RowReason {
-    /// The genomes the user selected, restricted to this cluster.
+    /// The genomes the user selected first (restricted to this cluster), then
+    /// the rest of the cluster.
     Selection,
     /// Nothing selected, so the cluster's members, up to a cap.
     WholeCluster,
@@ -125,52 +126,50 @@ pub enum RowReason {
 pub struct RowPlan {
     pub genomes: Vec<u32>,
     pub reason: RowReason,
-    /// True when `WholeCluster` had to drop rows to stay drawable.
+    /// How many of the first rows are selected genomes.
+    pub selected: usize,
+    /// True when rows had to be dropped to stay drawable.
     pub truncated: bool,
     pub available: usize,
 }
 
-/// Members of `cluster` that have map data, capped so that a cluster of a
-/// thousand genomes cannot ask for a thousand rows in a 180 px panel.
+/// Members of `cluster` that have map data: the selected ones first, in the
+/// order they were selected, then the others in id order. Capped so that a
+/// cluster of a thousand genomes cannot ask for a thousand rows in a 180 px
+/// panel; selected rows are never dropped by the cap.
 pub fn plan_rows(model: &UiModel, cluster: Option<u32>, selection: &[u32], cap: usize) -> RowPlan {
     let Some(cid) = cluster else {
-        return RowPlan {
-            genomes: Vec::new(),
-            reason: RowReason::NoData,
-            truncated: false,
-            available: 0,
-        };
+        return RowPlan::default();
     };
     let mapped = model.mapped_members(cid);
     if mapped.is_empty() {
-        return RowPlan {
-            genomes: Vec::new(),
-            reason: RowReason::NoData,
-            truncated: false,
-            available: 0,
-        };
+        return RowPlan::default();
     }
-    let chosen: Vec<u32> = selection
+    let available = mapped.len();
+    let mut genomes: Vec<u32> = selection
         .iter()
-        .filter(|g| mapped.contains(g))
+        .filter(|g| mapped.binary_search(g).is_ok())
         .copied()
         .collect();
-    if !chosen.is_empty() {
-        return RowPlan {
-            genomes: chosen,
-            reason: RowReason::Selection,
-            truncated: false,
-            available: mapped.len(),
-        };
+    let selected = genomes.len();
+    let limit = cap.max(selected);
+    for g in mapped {
+        if genomes.len() >= limit {
+            break;
+        }
+        if !genomes[..selected].contains(&g) {
+            genomes.push(g);
+        }
     }
-    let mut genomes = mapped;
-    let available = genomes.len();
-    let truncated = genomes.len() > cap;
-    genomes.truncate(cap);
     RowPlan {
+        truncated: genomes.len() < available,
         genomes,
-        reason: RowReason::WholeCluster,
-        truncated,
+        reason: if selected > 0 {
+            RowReason::Selection
+        } else {
+            RowReason::WholeCluster
+        },
+        selected,
         available,
     }
 }
@@ -292,22 +291,32 @@ mod tests {
     }
 
     #[test]
-    fn a_selection_restricts_the_rows_to_that_cluster() {
+    fn selected_members_come_first_then_the_rest_of_the_cluster() {
         let mut m = UiModel::default();
-        for g in 0..4 {
+        for g in 0..6 {
             m.apply(0.0, crate::state::scan_event(g, &format!("g{g}"), 100, 1));
         }
-        m.apply(0.0, crate::state::clustered_event(&[(0, 0, &[0, 1, 2, 3])]));
+        m.apply(
+            0.0,
+            crate::state::clustered_event(&[(0, 0, &[0, 1, 2, 3]), (1, 4, &[4, 5])]),
+        );
         for g in 0..4 {
             m.apply(
                 0.0,
                 infinity_core::events::Event::MapUpdate(Box::new(member(0, g, vec![]))),
             );
         }
-        let plan = plan_rows(&m, Some(0), &[2], 10);
-        assert_eq!(plan.genomes, vec![2]);
+        // Genome 5 is selected too, but belongs to another cluster.
+        let plan = plan_rows(&m, Some(0), &[3, 5, 1], 10);
+        assert_eq!(plan.genomes, vec![3, 1, 0, 2]);
+        assert_eq!(plan.selected, 2);
         assert_eq!(plan.reason, RowReason::Selection);
         assert_eq!(plan.available, 4);
+        assert!(!plan.truncated);
+        // The cap drops unselected rows, never selected ones.
+        let plan = plan_rows(&m, Some(0), &[3, 1, 2], 2);
+        assert_eq!(plan.genomes, vec![3, 1, 2]);
+        assert!(plan.truncated);
     }
 
     #[test]

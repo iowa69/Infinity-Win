@@ -152,10 +152,20 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
             fit_now = true;
         }
         ui.separator();
-        let plan = map::plan_rows(&app.model, app.selected_cluster, &app.selection, ROW_CAP);
+        let plan = map::plan_rows(
+            &app.model,
+            app.selected_cluster,
+            app.selection.ids(),
+            ROW_CAP,
+        );
         match plan.reason {
             map::RowReason::Selection => {
-                ui.weak(format!("{} selected member(s)", plan.genomes.len()));
+                let rest = plan.genomes.len() - plan.selected;
+                ui.weak(format!(
+                    "{} selected first, then {rest} of {} other member(s)",
+                    plan.selected,
+                    plan.available - plan.selected
+                ));
             }
             map::RowReason::WholeCluster => {
                 if plan.truncated {
@@ -210,7 +220,12 @@ fn body(ui: &mut egui::Ui, app: &mut InfinityApp) {
     );
 
     let cluster = app.selected_cluster.unwrap_or(u32::MAX);
-    let plan = map::plan_rows(&app.model, app.selected_cluster, &app.selection, ROW_CAP);
+    let plan = map::plan_rows(
+        &app.model,
+        app.selected_cluster,
+        app.selection.ids(),
+        ROW_CAP,
+    );
     let ids = plan.genomes.clone();
     let total = app
         .model
@@ -308,6 +323,14 @@ fn body(ui: &mut egui::Ui, app: &mut InfinityApp) {
             }
             let band =
                 Rect::from_min_size(Pos2::new(rect.left(), top), Vec2::new(rect.width(), ROW_H));
+            if app.selection.contains(row.genome) {
+                painter.rect_filled(band, 0, colors::wash(pal.accent, 40));
+                painter.rect_filled(
+                    Rect::from_min_size(band.min, Vec2::new(3.0, ROW_H)),
+                    0,
+                    pal.accent,
+                );
+            }
             draw_row(&painter, row, &view, band, plot, dark, weak);
             if let Some(p) = pointer {
                 if band.contains(p) {
@@ -333,8 +356,10 @@ fn body(ui: &mut egui::Ui, app: &mut InfinityApp) {
     if let Some(g) = clicked {
         // Clicking a row selects that member, which is what links the map back
         // to the tree and the genome list.
-        let additive = ui.ctx().input(|i| i.modifiers.command);
-        app.select_genome(g, additive);
+        let mods = ui
+            .ctx()
+            .input(|i| crate::selection::ClickMods::from_modifiers(&i.modifiers));
+        app.click_genome(g, mods, &ids);
     }
 }
 

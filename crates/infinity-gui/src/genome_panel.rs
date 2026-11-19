@@ -9,6 +9,7 @@ use eframe::egui;
 use egui::{Align, Layout, RichText, Sense, Vec2};
 
 use crate::app::InfinityApp;
+use crate::selection::ClickMods;
 use crate::state::{sorted_indices, SortColumn};
 use crate::{colors, fmt, theme};
 
@@ -38,10 +39,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut InfinityApp, total_w: f32) {
 fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let mut found: Option<u32> = None;
     let mut clear_sel = false;
+    let mut select_all = false;
     let mut sort_by: Option<SortColumn> = None;
     let p = theme::palette(ui);
     theme::panel_header(ui, "Genomes", |ui| {
         ui.label(RichText::new(fmt::count(app.model.genome_count() as u64)).color(p.text_weak));
+        if app.model.genome_count() > 0
+            && app.selection.len() < app.model.genome_count()
+            && ui
+                .small_button("all")
+                .on_hover_text("select every genome the list shows (Ctrl+A)")
+                .clicked()
+        {
+            select_all = true;
+        }
         if !app.selection.is_empty() {
             ui.label(RichText::new(format!("· {} selected", app.selection.len())).color(p.accent));
             if ui
@@ -99,6 +110,9 @@ fn header(ui: &mut egui::Ui, app: &mut InfinityApp) {
     column_headers(ui, app);
     if clear_sel {
         app.clear_selection();
+    }
+    if select_all {
+        app.select_all_visible();
     }
     if let Some(id) = found {
         app.select_genome(id, false);
@@ -188,7 +202,7 @@ fn column_headers(ui: &mut egui::Ui, app: &mut InfinityApp) {
 
 fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
     let order = sorted_indices(&app.model.genomes, &app.filter, &app.sort);
-    let selected = app.selection.clone();
+    let selected = &app.selection;
     let dark = ui.visuals().dark_mode;
     let total = order.len();
 
@@ -206,7 +220,7 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
 
     // Filled in by the row closure, applied afterwards: the closure only needs
     // to read the model, never to mutate the app.
-    let mut click: Option<(u32, bool, bool)> = None;
+    let mut click: Option<(u32, ClickMods, bool)> = None;
 
     let model = &app.model;
     let accent = theme::palette(ui).accent;
@@ -216,7 +230,7 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
             ui.set_min_width(ui.available_width());
             for i in range {
                 let g = &model.genomes[order[i]];
-                let is_selected = selected.contains(&g.id);
+                let is_selected = selected.contains(g.id);
                 let colour = g
                     .cluster
                     .map(|c| colors::cluster_color(c, dark))
@@ -235,7 +249,11 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
                     painter.rect_filled(rect, 3, ui.visuals().faint_bg_color);
                 } else if i % 2 == 1 {
                     // A faint zebra stripe keeps a long list readable.
-                    painter.rect_filled(rect, 0, theme::with_alpha(ui.visuals().faint_bg_color, 120));
+                    painter.rect_filled(
+                        rect,
+                        0,
+                        theme::with_alpha(ui.visuals().faint_bg_color, 120),
+                    );
                 }
                 let mut x = rect.left() + 2.0;
                 painter.text(
@@ -249,8 +267,8 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 painter.circle_filled(pos(x + 5.0, rect.center().y), 4.5, colour);
                 x += W_SWATCH;
 
-                let name_w = (rect.width() - W_ID - W_SWATCH - W_LEN - W_CONTIGS - W_FOCUS - 12.0)
-                    .max(40.0);
+                let name_w =
+                    (rect.width() - W_ID - W_SWATCH - W_LEN - W_CONTIGS - W_FOCUS - 12.0).max(40.0);
                 let name_colour = if g.is_pivot {
                     ui.visuals().strong_text_color()
                 } else {
@@ -287,11 +305,7 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 x += W_CONTIGS;
                 // The focus column carries the "≈" marker whenever the numbers
                 // behind it are estimates (section 0 rule 8).
-                let focus_text = format!(
-                    "F{}{}",
-                    g.focus,
-                    if g.approximate { "≈" } else { "" }
-                );
+                let focus_text = format!("F{}{}", g.focus, if g.approximate { "≈" } else { "" });
                 painter.text(
                     pos(x + W_FOCUS - 4.0, rect.center().y),
                     egui::Align2::RIGHT_CENTER,
@@ -301,11 +315,11 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
                 );
 
                 if resp.clicked() {
-                    let additive = ui.ctx().input(|i| i.modifiers.command);
-                    click = Some((g.id, additive, false));
+                    let mods = ui.ctx().input(|i| ClickMods::from_modifiers(&i.modifiers));
+                    click = Some((g.id, mods, false));
                 }
                 if resp.double_clicked() {
-                    click = Some((g.id, false, true));
+                    click = Some((g.id, ClickMods::PLAIN, true));
                 }
                 resp.on_hover_ui(|ui| {
                     ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
@@ -347,14 +361,18 @@ fn list(ui: &mut egui::Ui, app: &mut InfinityApp) {
                             ui.weak("no numbers yet");
                         }
                         ui.separator();
-                        ui.weak("click to select, ctrl-click for a pair, double-click to open its cluster");
+                        ui.weak(
+                            "click to select · Ctrl-click to add or remove · Shift-click for a \
+                             range · Ctrl+A for all · double-click to open its cluster",
+                        );
                     });
                 });
             }
         });
 
-    if let Some((id, additive, open_cluster)) = click {
-        app.select_genome(id, additive);
+    if let Some((id, mods, open_cluster)) = click {
+        let ids: Vec<u32> = order.iter().map(|&i| app.model.genomes[i].id).collect();
+        app.click_genome(id, mods, &ids);
         if open_cluster {
             if let Some(c) = app.model.cluster_of(id) {
                 if !app.expanded.contains(&c) {

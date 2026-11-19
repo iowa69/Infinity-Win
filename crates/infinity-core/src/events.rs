@@ -110,6 +110,28 @@ pub struct MapUpdateInfo {
     pub pivot_contig_lens: Vec<u64>,
 }
 
+/// A genome that does not look like the rest of the input: probably another
+/// species, a mislabelled genome, a contaminated or an incomplete assembly
+/// (see [`crate::outlier`]). Reported once, after scanning, so that a consumer
+/// can offer to leave it out before the comparison has gone far.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutlierInfo {
+    pub id: u32,
+    /// The genome's name as in `genomes.tsv` (the file name without its
+    /// extensions): the name `--exclude` takes.
+    pub name: String,
+    pub length: u64,
+    /// GC fraction, 0 to 1.
+    pub gc: f64,
+    /// Sketch distance to the closest other genome (about 1 - identity).
+    pub nearest_dist: f64,
+    /// Name of that closest genome; empty when there is none.
+    pub nearest_name: String,
+    /// Why it was flagged, in words.
+    pub reasons: Vec<String>,
+}
+
 /// The stages a run passes through, named for the status bar.
 pub mod stage {
     pub const DISCOVER: &str = "discover";
@@ -172,6 +194,12 @@ pub enum Event {
     /// The backbone recomputed from exact pivot-to-pivot comparisons, with
     /// branch lengths in SNPs. Replaces the sketch backbone of `BackboneTree`.
     BackboneExact(Box<BackboneExactInfo>),
+    /// Genomes that look divergent from the rest (another species,
+    /// contamination, an incomplete assembly), found after scanning and before
+    /// any refinement. Emitted only when at least one genome is flagged; the
+    /// run carries on regardless, and a consumer may cancel and start again
+    /// with `Parameters::exclude`.
+    Outliers(Vec<OutlierInfo>),
 }
 
 /// Largest cluster whose full matrix travels in a `ClusterDetail` event.
@@ -254,6 +282,7 @@ impl Envelope {
             Event::Focus1Map(_) => "focus1_map",
             Event::MapFilters { .. } => "map_filters",
             Event::BackboneExact(_) => "backbone_exact",
+            Event::Outliers(_) => "outliers",
         }
     }
 }
@@ -485,6 +514,15 @@ mod tests {
                 elapsed_ms: 3,
             },
             Event::Warning { text: "w".into() },
+            Event::Outliers(vec![OutlierInfo {
+                id: 3,
+                name: "odd".into(),
+                length: 2_000_000,
+                gc: 0.65,
+                nearest_dist: 1.0,
+                nearest_name: "g".into(),
+                reasons: vec!["no close relative".into()],
+            }]),
             Event::Finished(Box::new(RunSummary::new(
                 "t",
                 crate::params::Parameters::default(),

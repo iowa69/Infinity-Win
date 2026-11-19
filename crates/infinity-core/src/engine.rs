@@ -113,6 +113,12 @@ pub struct RunResults {
     pub full_tree_snps: Tree,
     /// Whether the between-cluster branches of `full_tree_snps` are exact.
     pub backbone_is_exact: bool,
+
+    // --- input checks ---
+    /// Genomes that look divergent from the rest (`outliers.tsv`).
+    pub outliers: Vec<crate::events::OutlierInfo>,
+    /// Genome names left out because `Parameters::exclude` named them.
+    pub excluded: Vec<String>,
 }
 
 /// Start the engine on a background thread.
@@ -230,13 +236,39 @@ pub fn run(
             cfg.inputs
         ));
     }
+    // Genomes the user asked to leave out go before anything reads them, so
+    // they cost nothing and appear in no file except the notes.
+    let (files, excluded, unmatched) = crate::outlier::apply_exclusions(files, &params.exclude);
+    let mut exclusion_notes = Vec::new();
+    if !excluded.is_empty() {
+        exclusion_notes.push(format!(
+            "excluded by request ({}): {}",
+            excluded.len(),
+            excluded.join(", ")
+        ));
+    }
+    if !unmatched.is_empty() {
+        exclusion_notes.push(format!(
+            "asked to exclude {} name(s) that match no input genome: {}",
+            unmatched.len(),
+            unmatched.join(", ")
+        ));
+    }
+    for n in &exclusion_notes {
+        sink.warn(n.clone());
+    }
+    results.excluded = excluded;
+    if files.is_empty() {
+        return Err("every input genome was excluded: nothing left to compare".to_string());
+    }
     sink.progress(stage::DISCOVER, files.len() as u64, files.len() as u64);
 
     // ---- scan (6.11.1) ----
     let scanned = scan_all(&pool, &files, &params, &sink, &controls)?;
     results.records = scanned.records;
     results.contig_names = scanned.contig_names;
-    let mut notes = scanned.notes;
+    let mut notes = exclusion_notes;
+    notes.extend(scanned.notes);
     let mut scan_ms_total = scanned.elapsed_ms;
 
     // The small-genome rule of 6.1 can only be judged once the lengths are
@@ -267,6 +299,23 @@ pub fn run(
     if controls.cancelled() {
         return Ok(finish(results, &sink, started));
     }
+
+    // ---- divergent assemblies, before any refinement ----
+    // From the sketches, lengths and GC the scan already has: no file is read
+    // again. Reported early so a consumer can cancel and start again without
+    // them; the run itself carries on.
+    let outliers = pool.install(|| {
+        crate::outlier::find(
+            &results.records,
+            params.k,
+            &crate::outlier::OutlierThresholds::default(),
+        )
+    });
+    if !outliers.is_empty() {
+        results.notes.extend(crate::outlier::notes_for(&outliers));
+        sink.emit(Event::Outliers(outliers.clone()));
+    }
+    results.outliers = outliers;
 
     // ---- cluster (6.11.2) ----
     let t = Instant::now();

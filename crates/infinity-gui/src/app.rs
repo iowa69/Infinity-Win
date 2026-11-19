@@ -27,6 +27,7 @@ use crate::open::OpenHandle;
 use crate::pairwise::{self, PairView};
 use crate::prefs::{Prefs, MAX_RECENT};
 use crate::run::{RunHandle, BATCH};
+use crate::selection::{ClickMods, Selection};
 use crate::state::{SortSpec, Source, UiModel};
 use crate::{export, open, prefs, run};
 
@@ -58,7 +59,8 @@ pub struct InfinityApp {
     png_result: Arc<Mutex<Option<Result<PathBuf, String>>>>,
 
     // --- selection --------------------------------------------------------
-    pub(crate) selection: Vec<u32>,
+    /// Any number of genomes; see [`crate::selection`] for the click rules.
+    pub(crate) selection: Selection,
     pub(crate) selected_cluster: Option<u32>,
     pub(crate) expanded: HashSet<u32>,
 
@@ -102,6 +104,21 @@ pub struct InfinityApp {
     /// The cluster distance the slider last sent, so dragging it does not queue
     /// a re-clustering per pixel.
     last_dist_sent: f64,
+
+    // --- divergent assemblies ----------------------------------------------
+    /// The warning dialog, while it is open.
+    pub(crate) outlier_dialog: Option<crate::outlier_dialog::OutlierDialog>,
+    /// The dialog was offered for this run already (it opens once per run).
+    pub(crate) outliers_prompted: bool,
+    /// "Continue anyway" was chosen: the Run panel keeps a warning.
+    pub(crate) outliers_acknowledged: bool,
+    /// A run was cancelled to start again without some genomes; it starts as
+    /// soon as the old one has stopped.
+    pub(crate) restart_pending: bool,
+    /// The tree window (white, publication style) is open.
+    pub(crate) show_tree_window: bool,
+    /// What the main window and the tree window share.
+    pub(crate) tree_window: crate::tree_window::SharedRef,
 }
 
 /// Pan, zoom and decoration state of the tree panel.
@@ -199,7 +216,7 @@ impl InfinityApp {
             results: None,
             opening: None,
             png_result: Arc::new(Mutex::new(None)),
-            selection: Vec::new(),
+            selection: Selection::default(),
             selected_cluster: None,
             expanded: HashSet::new(),
             filter: String::new(),
@@ -226,6 +243,12 @@ impl InfinityApp {
             theme_installed: false,
             dark: true,
             last_dist_sent: params.cluster_dist,
+            outlier_dialog: None,
+            outliers_prompted: false,
+            outliers_acknowledged: false,
+            restart_pending: false,
+            show_tree_window: false,
+            tree_window: crate::tree_window::new_shared(),
         };
         app.validate_params();
         app
@@ -273,30 +296,76 @@ impl InfinityApp {
 
     // --- selection ---------------------------------------------------------
 
-    /// Select a genome. `additive` keeps the existing selection, which is how two
-    /// leaves are chosen for the pairwise readout.
+    /// Select a genome. `additive` adds or removes it (Ctrl-click) instead of
+    /// replacing the selection.
     pub(crate) fn select_genome(&mut self, id: u32, additive: bool) {
-        if additive {
-            if let Some(pos) = self.selection.iter().position(|&g| g == id) {
-                self.selection.remove(pos);
-            } else {
-                self.selection.push(id);
-            }
+        let mods = if additive {
+            ClickMods::TOGGLE
         } else {
-            self.selection = vec![id];
-        }
-        // Keep the pair view usable: only the last two count.
-        if self.selection.len() > 2 {
-            let n = self.selection.len();
-            self.selection.drain(0..n - 2);
-        }
-        if let Some(cid) = self.model.cluster_of(id) {
-            self.set_cluster(cid, false);
+            ClickMods::PLAIN
+        };
+        self.click_genome(id, mods, &[]);
+    }
+
+    /// A click on a genome in a view whose rows are in `order` (needed for a
+    /// Shift-click range). The clicked genome's cluster becomes the one the
+    /// map shows, when the click left it selected.
+    pub(crate) fn click_genome(&mut self, id: u32, mods: ClickMods, order: &[u32]) {
+        self.selection.click(id, mods, order);
+        if self.selection.contains(id) {
+            if let Some(cid) = self.model.cluster_of(id) {
+                self.set_cluster(cid, false);
+            }
         }
     }
 
     pub(crate) fn clear_selection(&mut self) {
         self.selection.clear();
+    }
+
+    /// The genome ids of the list, in the order and with the filter it shows.
+    pub(crate) fn list_order(&self) -> Vec<u32> {
+        crate::state::sorted_indices(&self.model.genomes, &self.filter, &self.sort)
+            .into_iter()
+            .map(|i| self.model.genomes[i].id)
+            .collect()
+    }
+
+    /// Ctrl+A: every genome the list shows (after the filter).
+    pub(crate) fn select_all_visible(&mut self) {
+        let order = self.list_order();
+        self.selection.select_all(&order);
+    }
+
+    /// Selected genomes the tree cannot show because their cluster is drawn
+    /// collapsed: `(cluster, how many)`, in cluster order.
+    pub(crate) fn hidden_selected(&self) -> Vec<(u32, usize)> {
+        if self.selection.is_empty() || self.single_cluster().is_some() {
+            return Vec::new();
+        }
+        let mut out: Vec<(u32, usize)> = Vec::new();
+        for c in &self.model.clusters {
+            let opened = self.expanded.contains(&c.id) && (c.tree.is_some() || c.size() <= 1);
+            if opened {
+                continue;
+            }
+            let n = c
+                .members
+                .iter()
+                .filter(|&&g| self.selection.contains(g))
+                .count();
+            if n > 0 {
+                out.push((c.id, n));
+            }
+        }
+        out
+    }
+
+    /// Open every collapsed cluster that holds a selected genome.
+    pub(crate) fn expand_selected(&mut self) {
+        for (c, _) in self.hidden_selected() {
+            self.expanded.insert(c);
+        }
     }
 
     /// Make a cluster the one the tree, the map and the parameters talk about.
@@ -367,6 +436,9 @@ impl InfinityApp {
                 self.save_prefs();
                 self.model = UiModel::new(Source::Live);
                 self.results = None;
+                self.outlier_dialog = None;
+                self.outliers_prompted = false;
+                self.outliers_acknowledged = false;
                 self.selection.clear();
                 self.expanded.clear();
                 self.selected_cluster = None;
@@ -388,6 +460,47 @@ impl InfinityApp {
             r.cancel();
             self.status =
                 "cancellation requested; the engine stops after the current genome".to_string();
+        }
+    }
+
+    /// Leave `names` out from now on and start the same run again: cancel the
+    /// one that is going, and start the new one as soon as it has stopped
+    /// (both write to the same folder, so they must not overlap).
+    pub(crate) fn exclude_and_restart(&mut self, names: &[String], ctx: &Context) {
+        let added = crate::outlier_dialog::add_exclusions(&mut self.prefs.params.exclude, names);
+        self.save_prefs();
+        if self.running() {
+            self.stop_run();
+            self.restart_pending = true;
+            self.status = format!(
+                "excluding {added} genome(s): restarting as soon as the current run has stopped"
+            );
+            ctx.request_repaint();
+        } else {
+            self.start_run(ctx);
+        }
+    }
+
+    /// Open the divergent-assembly dialog once per live run, as soon as the
+    /// engine reports flagged genomes.
+    fn poll_outliers(&mut self) {
+        if self.outliers_prompted || self.model.outliers.is_empty() {
+            return;
+        }
+        self.outliers_prompted = true;
+        if self.model.source == Source::Live && !self.restart_pending {
+            self.outlier_dialog = Some(crate::outlier_dialog::OutlierDialog::new(
+                self.model.outliers.clone(),
+            ));
+        }
+    }
+
+    /// Start the run a "restart without these genomes" is waiting for, once
+    /// the cancelled one has really stopped.
+    fn poll_restart(&mut self, ctx: &Context) {
+        if self.restart_pending && !self.running() && self.opening.is_none() {
+            self.restart_pending = false;
+            self.start_run(ctx);
         }
     }
 
@@ -581,7 +694,7 @@ impl InfinityApp {
         if self.selection.len() != 2 {
             return None;
         }
-        let (a, b) = (self.selection[0], self.selection[1]);
+        let (a, b) = (self.selection.ids()[0], self.selection.ids()[1]);
         let ca = self.model.cluster_of(a)?;
         if Some(ca) != self.model.cluster_of(b) {
             return None;
@@ -608,14 +721,23 @@ impl InfinityApp {
         Some(pairwise::pair_from_maps(ma, mb, a, b, focus))
     }
 
+    /// What the header says about more than two selected genomes: clusters
+    /// involved and the SNP range among those that share a cluster.
+    pub(crate) fn selection_summary(&self) -> crate::selection::Summary {
+        crate::selection::summarise(&self.model, self.results.as_ref(), self.selection.ids())
+    }
+
     /// Why the pairwise readout is empty, in words.
     pub(crate) fn pair_hint(&self) -> &'static str {
         match self.selection.len() {
-            0 => "Select two genomes (ctrl-click) to see their distance.",
-            1 => "Select one more genome to see a pairwise distance.",
+            0 => {
+                "Select two genomes (Ctrl-click) to see their distance; Shift-click selects a \
+                 range, Ctrl+A all."
+            }
+            1 => "Select one more genome (Ctrl-click) to see a pairwise distance.",
             _ => match (
-                self.model.cluster_of(self.selection[0]),
-                self.model.cluster_of(self.selection[1]),
+                self.model.cluster_of(self.selection.ids()[0]),
+                self.model.cluster_of(self.selection.ids()[1]),
             ) {
                 (Some(a), Some(b)) if a != b => {
                     "The two genomes are in different clusters: no pairwise number exists."
@@ -629,7 +751,7 @@ impl InfinityApp {
 
     /// A cheap signature of what the tree panel shows: the set of opened
     /// clusters, or, in single-cluster mode, which cluster.
-    fn expanded_signature(&self) -> u64 {
+    pub(crate) fn expanded_signature(&self) -> u64 {
         let mut ids: Vec<u32> = self.expanded.iter().copied().collect();
         ids.sort_unstable();
         let mut h = 0x9E37_79B9_7F4A_7C15u64;
@@ -891,6 +1013,23 @@ impl Startup {
 }
 
 impl InfinityApp {
+    /// Ctrl+A selects every genome the list shows, Escape clears the
+    /// selection; neither while a text field has the keyboard.
+    fn selection_keys(&mut self, ctx: &Context) {
+        if ctx.egui_wants_keyboard_input() || self.outlier_dialog.is_some() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+            self.select_all_visible();
+            self.status = format!("{} genomes selected", self.selection.len());
+        }
+        if !self.selection.is_empty()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.clear_selection();
+        }
+    }
+
     fn apply_startup(&mut self, ctx: &Context) {
         if self.startup == Startup::default() {
             return;
@@ -956,7 +1095,9 @@ impl eframe::App for InfinityApp {
         }
         let now = ctx.input(|i| i.time);
         let more = self.drain_events();
+        self.poll_outliers();
         self.poll_run();
+        self.poll_restart(ctx);
         self.poll_open();
         self.poll_png();
         self.handle_dropped_files(ctx);
@@ -987,6 +1128,7 @@ impl eframe::App for InfinityApp {
         // five were shown inside one `CentralPanel`, so the tree header and
         // canvas could widen past the right-hand panel and paint over it.)
         self.dark = ui.visuals().dark_mode;
+        self.selection_keys(ui.ctx());
         crate::chrome::toolbar(ui, self);
         crate::chrome::status_bar(ui, self);
         let total_w = ui.available_width();
@@ -1007,6 +1149,8 @@ impl eframe::App for InfinityApp {
             });
         let ctx = ui.ctx().clone();
         crate::settings_panel::show(&ctx, self);
+        crate::outlier_dialog::show(&ctx, self);
+        crate::tree_window::show(&ctx, self);
     }
 }
 
@@ -1089,18 +1233,137 @@ mod tests {
     }
 
     #[test]
-    fn selection_keeps_at_most_two_genomes_and_the_latest_wins() {
+    fn selection_holds_any_number_of_genomes() {
         let mut app = app_with_two_clusters();
         app.select_genome(0, false);
         app.select_genome(1, true);
         assert_eq!(app.selection, vec![0, 1]);
         app.select_genome(2, true);
-        assert_eq!(app.selection, vec![1, 2], "the oldest drops off");
+        app.select_genome(3, true);
+        assert_eq!(app.selection, vec![0, 1, 2, 3], "nothing drops off");
         // Clicking a selected genome again deselects it.
         app.select_genome(2, true);
-        assert_eq!(app.selection, vec![1]);
+        assert_eq!(app.selection, vec![0, 1, 3]);
+        // A plain click starts again.
+        app.select_genome(2, false);
+        assert_eq!(app.selection, vec![2]);
         app.clear_selection();
         assert!(app.selection.is_empty());
+    }
+
+    #[test]
+    fn shift_click_in_the_list_follows_the_lists_order_and_filter() {
+        let mut app = app_with_two_clusters();
+        // Sorted by name descending: g3, g2, g1, g0.
+        app.sort = SortSpec {
+            column: crate::state::SortColumn::Name,
+            ascending: false,
+        };
+        let order = app.list_order();
+        assert_eq!(order, vec![3, 2, 1, 0]);
+        app.click_genome(2, ClickMods::PLAIN, &order);
+        app.click_genome(0, ClickMods::RANGE, &order);
+        assert_eq!(app.selection, vec![2, 1, 0]);
+        // Ctrl+A takes what the filter shows, nothing more.
+        app.filter = "g3".into();
+        app.select_all_visible();
+        assert_eq!(app.selection, vec![3]);
+        app.filter.clear();
+        app.select_all_visible();
+        assert_eq!(app.selection.len(), 4);
+    }
+
+    #[test]
+    fn selected_genomes_in_collapsed_clusters_are_counted_and_can_be_opened() {
+        let mut app = app_with_two_clusters();
+        app.model.apply(
+            0.0,
+            Event::ClusterFocus(infinity_core::events::ClusterFocusInfo {
+                cluster: 0,
+                focus: 2,
+                approximate: false,
+                newick: "(g0:1,g1:2);".into(),
+                members: vec![],
+            }),
+        );
+        app.select_genome(0, false);
+        app.select_genome(1, true);
+        app.select_genome(3, true);
+        assert_eq!(app.hidden_selected(), vec![(0, 2), (1, 1)]);
+        app.expand_selected();
+        // Cluster 0 has a tree and opens; cluster 1 has none yet and stays a
+        // triangle, so its selected genome is still counted as hidden.
+        assert_eq!(app.hidden_selected(), vec![(1, 1)]);
+        assert!(app.expanded.contains(&0));
+    }
+
+    fn outliers_event() -> Event {
+        Event::Outliers(vec![infinity_core::events::OutlierInfo {
+            id: 3,
+            name: "g3".into(),
+            length: 1000,
+            gc: 0.65,
+            nearest_dist: 1.0,
+            nearest_name: String::new(),
+            reasons: vec!["no close relative".into()],
+        }])
+    }
+
+    #[test]
+    fn flagged_genomes_open_the_dialog_once_per_live_run() {
+        let mut app = app_with_two_clusters();
+        app.model.source = Source::Live;
+        app.poll_outliers();
+        assert!(app.outlier_dialog.is_none(), "nothing flagged yet");
+        app.model.apply(0.0, outliers_event());
+        app.poll_outliers();
+        let d = app.outlier_dialog.as_ref().expect("the dialog opens");
+        assert_eq!(d.ticked_names(), vec!["g3"]);
+        // Closed ("Continue anyway"), it does not come back by itself.
+        app.outlier_dialog = None;
+        app.outliers_acknowledged = true;
+        app.poll_outliers();
+        assert!(app.outlier_dialog.is_none());
+        // The warning is in the notes, where the Run panel lists it.
+        assert!(app
+            .model
+            .notes
+            .iter()
+            .any(|n| n.text.contains("divergent assembl") && n.text.contains("g3")));
+    }
+
+    #[test]
+    fn an_opened_folder_never_pops_the_dialog() {
+        let mut app = app_with_two_clusters();
+        app.model.source = Source::Folder(PathBuf::from("/results"));
+        app.model.apply(0.0, outliers_event());
+        app.poll_outliers();
+        assert!(app.outlier_dialog.is_none());
+        assert_eq!(app.model.outliers.len(), 1, "but the warning stays");
+    }
+
+    #[test]
+    fn a_restart_waits_for_the_cancelled_run_and_nothing_else() {
+        let mut app = app_with_two_clusters();
+        // Nothing is running, so a pending restart starts at once; with no
+        // genomes to compare it reports that instead of running.
+        app.restart_pending = true;
+        app.poll_restart(&Context::default());
+        assert!(!app.restart_pending);
+        assert!(app.status.contains("nothing to compare") || app.params_error.is_some());
+    }
+
+    #[test]
+    fn more_than_two_genomes_get_a_summary_instead_of_a_pair() {
+        let mut app = app_with_two_clusters();
+        for g in [0, 1, 2] {
+            app.select_genome(g, true);
+        }
+        assert!(app.pair_view().is_none());
+        let s = app.selection_summary();
+        assert_eq!(s.n, 3);
+        assert_eq!(s.clusters, vec![(0, 2), (1, 1)]);
+        assert_eq!(s.pairs, 1);
     }
 
     #[test]
