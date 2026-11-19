@@ -178,7 +178,7 @@ jobs:
             echo
             echo "Built from commit ${GITHUB_SHA} by the \`release\` workflow."
           } > "$NOTES_FILE"
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "Infinity-Win ${GITHUB_REF_NAME}" \
             --notes-file "$NOTES_FILE" \
             release/*.zip release/SHA256SUMS.txt
