@@ -11,6 +11,11 @@ access to it.
 
 ![Infinity-Win after a run](docs/screenshots/finished-run.png)
 
+*After a run: one cluster opened into its exact SNP tree, the five others
+collapsed. After every name, the SNPs on that genome's own branch (`+3`); shaded
+bands are SNP groups (genomes linked by at most 5 SNPs, set with the slider above
+the tree); the scale bar and legend sit under the tree.*
+
 ## What it does
 
 - **Groups your genomes into clusters** of close relatives, from a quick sketch
@@ -28,12 +33,36 @@ per genome, contigs are fine.
 
 1. Unzip the download anywhere and double-click **Infinity-Win.exe**. (Windows
    may warn that the program is not signed: *More info → Run anyway*.)
-2. Click **+ Genomes**, or drag a folder of genomes onto the window.
+2. Click **＋ Add files…** or **＋ Add folder…** (or drag files and folders onto
+   the window). The list under **Inputs** shows how many genomes each holds.
 3. Click **Run**.
 
-Clusters appear within seconds as blurry triangles and turn into exact SNP
+Clusters appear within seconds as collapsed wedges and turn into exact SNP
 trees one by one. Click a cluster to open it, select two genomes to see their
 SNP distance, and use the **Run** panel on the right to export.
+
+## Reading the tree
+
+- **Branch length = SNPs.** Dark branches are exact SNP counts inside a
+  cluster; grey branches are estimates (between clusters, or a cluster still
+  being refined, marked `≈`).
+- **The number after a name** (`isolate_12  +3`) is the number of SNPs on that
+  genome's own branch: differences its closest relatives do not share. `+0`
+  means none of its own.
+- **SNP groups.** The slider above the tree (0–100 SNPs, with 5 / 10 / 20 one
+  click away) shades the genomes linked by chains of at most that many SNPs,
+  as `G3 · 4 genomes ≤5 SNPs`. The groups follow the slider live, are listed in
+  the Run panel (click one to select its genomes) and export as CSV.
+- **How to read** in the tree header explains all of this in the program.
+
+![SNP groups at 5 SNPs](docs/screenshots/snp-groups.png)
+
+*One cluster on its own (**Cluster**), SNP groups at 5 SNPs.*
+
+**⛶ Tree window** opens the whole tree as a figure on white, to save as PNG or
+SVG:
+
+![The tree window](docs/screenshots/tree-window.png)
 
 ## The one setting that matters: cluster distance
 
