@@ -239,8 +239,8 @@ does not: see `DECISIONS.md` D16.
 | `clusters.tsv` | Cluster id, pivot, pivot name, size, focus, core genome bp. |
 | `tree.nwk` | The full tree, branch lengths in **SNPs**. Between clusters these are exact for pivots within 1% of each other and sketch estimates beyond. |
 | `tree.subs_per_site.nwk` | The same tree in substitutions per site. |
-| `tree.svg` | A picture of the full tree with an SNP scale bar, tips coloured by cluster. |
-| `results.xlsx` | Excel workbook: Summary (settings), Genomes, Clusters, one SNP matrix per cluster, Between clusters, Variants. |
+| `tree.svg` | A print-ready picture of the full tree: each name is followed by the SNPs on its own branch (`+3`; `+0` = identical to its sister), clusters are marked by a coloured strip, SNP groups at the smallest threshold are shaded, estimated lengths are light grey, and an SNP scale bar. When the branches between clusters are far longer than those inside them, they are shortened (drawn with `//` and their length written on them) so the clusters stay readable; the scale bar then measures the inside of the clusters. |
+| `results.xlsx` | Excel workbook, opening on **Summary**: the run in a few lines, possible problems (divergent assemblies; clusters whose core genome is under 85% of the pivot, which suggests lowering the cluster distance), one row per cluster (core genome, min/median/max SNPs, SNP groups per threshold) and the closest pairs (up to 500, within the largest threshold). Then Genomes, Clusters, SNP groups (every group of 2 or more genomes with its members), one coloured SNP matrix per cluster (green 0, yellow median, red maximum; rows and columns in tree order so relatives form blocks), Between clusters, Variants and Settings (every parameter except the thread count). |
 | `snp_clusters.tsv` | SNP-cluster label of every genome at each `--snp-thresholds` cut-off. |
 | `cluster_<id>.snp_matrix.tsv` | Square SNP matrix after the SNP rules; `.raw_snp_matrix.tsv` before them. |
 | `cluster_<id>.vcf` | SNPs against the pivot, one sample column per genome, `FILTER` and per-call `FT` reasons. |
