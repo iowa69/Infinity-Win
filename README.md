@@ -5,9 +5,7 @@ seconds to minutes, and watch the tree sharpen while it works.**
 
 ### [⬇ Download for Windows (portable zip)](https://github.com/iowa69/Infinity-Win/releases/latest/download/Infinity-Win-windows-x64.zip) · [Linux](https://github.com/iowa69/Infinity-Win/releases/latest/download/Infinity-Win-linux-x64.zip)
 
-Nothing to install: unzip and double-click `Infinity-Win.exe`. While this
-repository is private, the links work only when you are signed in to GitHub with
-access to it.
+Nothing to install: unzip and double-click `Infinity-Win.exe`.
 
 ![Infinity-Win after a run](docs/screenshots/finished-run.png)
 
@@ -158,6 +156,25 @@ identity) before clicking Run, or with `--cluster-dist` on the command line.
 | `cluster_<id>.vcf`, `cluster_<id>.core_snps.fasta` | SNPs as VCF, and the core SNP alignment for IQ-TREE or Gubbins |
 
 The desktop program also exports NEXUS (FigTree), iTOL datasets, SVG and PNG.
+
+**The Excel workbook** opens on a Summary sheet: the settings in plain words, a
+"possible problems" box (divergent assemblies, clusters too diverse), one row
+per cluster, and the closest pairs.
+
+![Excel summary sheet](docs/screenshots/excel-summary.png)
+
+Every cluster gets a SNP matrix coloured from green (identical) through yellow
+(the cluster's median) to red (its maximum), with rows and columns in tree order
+so that related genomes form blocks.
+
+![Colour-scaled SNP matrix](docs/screenshots/excel-matrix.png)
+
+**The tree picture** (`tree.svg`) is ready for a report or a paper: SNPs on each
+genome's own branch, SNP groups shaded, clusters marked on the right, and very
+long branches between clusters shortened (`//`) with their real length written
+on them.
+
+![Tree picture](docs/screenshots/tree-picture.png)
 
 ## How accurate is it
 
