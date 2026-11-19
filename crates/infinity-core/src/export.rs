@@ -1,6 +1,7 @@
 //! Result files for people and for other tools: square SNP matrices, SNP
 //! clusters at fixed thresholds, a VCF and a core-SNP alignment per cluster, a
-//! tree picture, and one Excel workbook holding the tables.
+//! tree picture ([`svg`]), and one Excel workbook holding the tables
+//! ([`workbook`]).
 //!
 //! Every writer reads only [`RunResults`] and walks it in sorted order, so the
 //! files are byte-identical whatever the thread count (section 0 rule 3).
@@ -14,7 +15,6 @@ use std::path::Path;
 use crate::engine::RunResults;
 use crate::filter::PASS;
 use crate::profile::DistanceMatrix;
-use crate::tree::Tree;
 use crate::variant::VariantKind;
 
 fn writer(dir: &Path, name: &str) -> std::io::Result<BufWriter<File>> {
@@ -361,159 +361,14 @@ pub fn write_core_alignment(dir: &Path, r: &RunResults, cluster: u32) -> std::io
 }
 
 // ---------------------------------------------------------------------------
-// Tree picture
+// Tree picture and Excel workbook
 // ---------------------------------------------------------------------------
 
-/// Colour per cluster, the same palette order as the desktop program.
-pub const CLUSTER_COLOURS: [&str; 10] = [
-    "#e05d5d", "#5d8de0", "#7cc46b", "#d9a441", "#a46be0", "#3fb8b0", "#e07db8", "#9aa04a",
-    "#6b7fe0", "#e0875d",
-];
+mod svg;
+mod workbook;
 
-/// A rectangular phylogram of the full tree with branch lengths in SNPs, tip
-/// labels coloured by cluster, and a scale bar in SNPs.
-pub fn tree_svg(r: &RunResults) -> String {
-    let t = &r.full_tree_snps;
-    let leaves = t.leaf_count().max(1);
-    let row = 16.0;
-    let width = 1100.0;
-    let label_w = 260.0;
-    let top = 40.0;
-    let left = 20.0;
-    let depth = max_depth(t).max(1e-9);
-    let sx = (width - left - label_w) / depth;
-    let height = top + row * leaves as f64 + 70.0;
-    let mut colour_of: BTreeMap<String, &str> = BTreeMap::new();
-    for c in &r.clusters {
-        let col = CLUSTER_COLOURS[c.id as usize % CLUSTER_COLOURS.len()];
-        for &m in &c.members {
-            colour_of.insert(name(r, m), col);
-        }
-    }
-    let mut body = String::new();
-    let mut next_row = 0usize;
-    draw(
-        t,
-        0.0,
-        &mut next_row,
-        &mut body,
-        left,
-        top,
-        sx,
-        row,
-        &colour_of,
-    );
-    // scale bar: a round number of SNPs about a fifth of the width
-    let target = depth / 5.0;
-    let bar = nice(target);
-    let bar_px = bar * sx;
-    let y = top + row * leaves as f64 + 30.0;
-    let unit = if r.backbone_is_exact {
-        "SNPs"
-    } else {
-        "SNPs (≈ between clusters)"
-    };
-    body.push_str(&format!(
-        "<line x1=\"{left}\" y1=\"{y}\" x2=\"{x2}\" y2=\"{y}\" stroke=\"#222\" stroke-width=\"2\"/>\
-         <text x=\"{left}\" y=\"{ty}\" font-size=\"12\" fill=\"#222\">{bar} {unit}</text>",
-        x2 = left + bar_px,
-        ty = y + 16.0,
-        bar = fmt_num(bar),
-    ));
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
-         viewBox=\"0 0 {width} {height}\" font-family=\"Helvetica, Arial, sans-serif\">\n\
-         <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n\
-         <text x=\"{left}\" y=\"22\" font-size=\"14\" font-weight=\"bold\" fill=\"#222\">\
-         Infinity-Win tree ({leaves} genomes, {nc} clusters, branch lengths in SNPs)</text>\n{body}\n</svg>\n",
-        nc = r.clusters.len(),
-    )
-}
-
-fn max_depth(t: &Tree) -> f64 {
-    match t {
-        Tree::Leaf { len, .. } => len.max(0.0),
-        Tree::Internal { len, children } => {
-            len.max(0.0) + children.iter().map(max_depth).fold(0.0, f64::max)
-        }
-    }
-}
-
-/// Draw `t` whose parent ends at x = `x0` (in SNPs); returns the node's y.
-#[allow(clippy::too_many_arguments)]
-fn draw(
-    t: &Tree,
-    x0: f64,
-    next_row: &mut usize,
-    out: &mut String,
-    left: f64,
-    top: f64,
-    sx: f64,
-    row: f64,
-    colour_of: &BTreeMap<String, &str>,
-) -> f64 {
-    let x1 = x0 + t.len().max(0.0);
-    let (px0, px1) = (left + x0 * sx, left + x1 * sx);
-    match t {
-        Tree::Leaf { name, .. } => {
-            let y = top + row * (*next_row as f64) + row / 2.0;
-            *next_row += 1;
-            let col = colour_of.get(name).copied().unwrap_or("#222");
-            out.push_str(&format!(
-                "<line x1=\"{px0:.1}\" y1=\"{y:.1}\" x2=\"{px1:.1}\" y2=\"{y:.1}\" stroke=\"#333\" stroke-width=\"1.2\"/>\
-                 <circle cx=\"{px1:.1}\" cy=\"{y:.1}\" r=\"2.5\" fill=\"{col}\"/>\
-                 <text x=\"{tx:.1}\" y=\"{ty:.1}\" font-size=\"11\" fill=\"{col}\">{n}</text>\n",
-                tx = px1 + 6.0,
-                ty = y + 4.0,
-                n = xml_escape(name),
-            ));
-            y
-        }
-        Tree::Internal { children, .. } => {
-            let ys: Vec<f64> = children
-                .iter()
-                .map(|c| draw(c, x1, next_row, out, left, top, sx, row, colour_of))
-                .collect();
-            if ys.is_empty() {
-                return top;
-            }
-            let (ymin, ymax) = (ys[0], ys[ys.len() - 1]);
-            let y = (ymin + ymax) / 2.0;
-            out.push_str(&format!(
-                "<line x1=\"{px1:.1}\" y1=\"{ymin:.1}\" x2=\"{px1:.1}\" y2=\"{ymax:.1}\" stroke=\"#333\" stroke-width=\"1.2\"/>\
-                 <line x1=\"{px0:.1}\" y1=\"{y:.1}\" x2=\"{px1:.1}\" y2=\"{y:.1}\" stroke=\"#333\" stroke-width=\"1.2\"/>\n"
-            ));
-            y
-        }
-    }
-}
-
-fn nice(x: f64) -> f64 {
-    if x <= 0.0 || !x.is_finite() {
-        return 1.0;
-    }
-    let p = 10f64.powf(x.log10().floor());
-    let m = x / p;
-    let n = if m < 1.5 {
-        1.0
-    } else if m < 3.5 {
-        2.0
-    } else if m < 7.5 {
-        5.0
-    } else {
-        10.0
-    };
-    (n * p).max(1.0)
-}
-
-fn fmt_num(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-9 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{v}")
-    }
-}
+pub use svg::{tree_svg, CLUSTER_COLOURS};
+pub use workbook::write_xlsx;
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -526,285 +381,100 @@ pub fn write_tree_svg(dir: &Path, r: &RunResults) -> std::io::Result<()> {
     std::fs::write(dir.join("tree.svg"), tree_svg(r))
 }
 
-// ---------------------------------------------------------------------------
-// Excel workbook
-// ---------------------------------------------------------------------------
+/// A small finished run for the tests of this module and its children: two
+/// clusters (a0..a3 and b0, b1), a long estimated backbone, one pair without
+/// shared sequence (a2-a3), a divergent assembly (a3) and a cluster whose core
+/// genome is 70% of its pivot (cluster 1).
+#[cfg(test)]
+fn fixture() -> RunResults {
+    use crate::cluster::Cluster;
+    use crate::genome::{GenomeRecord, GenomeStats};
+    use crate::tree::parse_newick;
 
-/// Excel's limits: rows per sheet and columns per sheet.
-const XLSX_MAX_ROWS: u32 = 1_048_576;
-const XLSX_MAX_COLS: usize = 16_384;
-
-pub fn write_xlsx(dir: &Path, r: &RunResults) -> Result<(), rust_xlsxwriter::XlsxError> {
-    use rust_xlsxwriter::{Format, Workbook};
-    let mut wb = Workbook::new();
-    let bold = Format::new().set_bold();
-
-    // --- Summary ---
-    let ws = wb.add_worksheet().set_name("Summary")?;
-    let p = &r.params;
-    let rows: Vec<(&str, String)> = vec![
-        ("Program", format!("Infinity-Win {}", crate::VERSION)),
-        ("Genomes", r.records.len().to_string()),
-        ("Clusters", r.clusters.len().to_string()),
-        ("Resolution", p.resolution.as_str().to_string()),
-        (
-            "Cluster distance (sketch)",
-            format!(
-                "{} (≈ {:.2}% identity)",
-                p.cluster_dist,
-                (1.0 - p.cluster_dist) * 100.0
-            ),
-        ),
-        (
-            "SNP thresholds",
-            p.snp_thresholds
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
-        (
-            "SNP rules",
-            if p.snp_filter.enabled {
-                "on".into()
-            } else {
-                "off".into()
+    let names = ["a0", "a1", "a2", "a3", "b0", "b1"];
+    let mut r = RunResults {
+        names: names.iter().map(|s| s.to_string()).collect(),
+        ..RunResults::default()
+    };
+    for (i, n) in names.iter().enumerate() {
+        let stats = GenomeStats {
+            length: 1_000_000,
+            ..GenomeStats::default()
+        };
+        let mut g = GenomeRecord::new(
+            i as u32,
+            n.to_string(),
+            std::path::PathBuf::from(format!("{n}.fasta")),
+            stats,
+            Vec::new(),
+        );
+        g.cluster = if i < 4 { 0 } else { 1 };
+        g.is_pivot = i == 0 || i == 4;
+        g.focus = 2;
+        r.records.push(g);
+    }
+    r.clusters = vec![
+        Cluster {
+            id: 0,
+            pivot: 0,
+            members: vec![0, 1, 2, 3],
+        },
+        Cluster {
+            id: 1,
+            pivot: 4,
+            members: vec![4, 5],
+        },
+    ];
+    let snps0 = vec![
+        vec![0, 0, 3, 7],
+        vec![0, 0, 3, 7],
+        vec![3, 3, 0, 8],
+        vec![7, 7, 8, 0],
+    ];
+    let mut comparable0 = vec![vec![900_000u64; 4]; 4];
+    comparable0[2][3] = 0;
+    comparable0[3][2] = 0;
+    let snps1 = vec![vec![0, 3], vec![3, 0]];
+    for (id, ids, snps, comparable, core) in [
+        (0u32, vec![0u32, 1, 2, 3], snps0, comparable0, 950_000u64),
+        (1, vec![4, 5], snps1, vec![vec![600_000u64; 2]; 2], 700_000),
+    ] {
+        r.snp_groups.insert(
+            id,
+            crate::filter::snp_groups(&snps, &r.params.snp_thresholds),
+        );
+        r.matrices.insert(
+            id,
+            DistanceMatrix {
+                ids,
+                snps,
+                comparable,
+                ..DistanceMatrix::default()
             },
-        ),
-        ("Core genome only", p.snp_filter.core.to_string()),
-        (
-            "Minimum contig length (bp)",
-            p.snp_filter.min_contig_len.to_string(),
-        ),
-        (
-            "Contig-end margin (bp)",
-            p.snp_filter.end_margin.to_string(),
-        ),
-        ("High-copy ratio", p.snp_filter.high_copy_ratio.to_string()),
-        (
-            "SNP-cluster window (bp)",
-            p.snp_filter.scan_window.to_string(),
-        ),
-        ("SNP-cluster alpha", p.snp_filter.scan_alpha.to_string()),
-        (
-            "Between-cluster distances",
-            if r.backbone_is_exact {
-                "exact (SNPs)".into()
-            } else {
-                "sketch estimate".into()
-            },
-        ),
-        ("k", p.k.to_string()),
-    ];
-    ws.write_string_with_format(0, 0, "Setting", &bold)?;
-    ws.write_string_with_format(0, 1, "Value", &bold)?;
-    for (i, (k, v)) in rows.iter().enumerate() {
-        ws.write_string(i as u32 + 1, 0, *k)?;
-        ws.write_string(i as u32 + 1, 1, v)?;
+        );
+        r.cluster_focus.insert(id, 2);
+        r.core_bp.insert(id, core);
+        r.pivot_len.insert(id, 1_000_000);
     }
-    ws.set_column_width(0, 32)?;
-    ws.set_column_width(1, 40)?;
-
-    // --- Genomes ---
-    let ws = wb.add_worksheet().set_name("Genomes")?;
-    let head = [
-        "id",
-        "name",
-        "length",
-        "contigs",
-        "N50",
-        "GC",
-        "cluster",
-        "pivot",
-        "focus",
-        "SNPs vs pivot (all)",
-        "SNPs vs pivot (pass)",
-        "indels vs pivot",
-        "uncovered bp",
-        "novel bp",
-    ];
-    for (c, h) in head.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &bold)?;
-    }
-    let labels = snp_cluster_labels(r);
-    for (c, t) in p.snp_thresholds.iter().enumerate() {
-        ws.write_string_with_format(
-            0,
-            (head.len() + c) as u16,
-            format!("SNP cluster ≤{t}"),
-            &bold,
-        )?;
-    }
-    for (i, g) in r.records.iter().enumerate() {
-        let row = i as u32 + 1;
-        ws.write_number(row, 0, g.id as f64)?;
-        ws.write_string(row, 1, name(r, g.id))?;
-        ws.write_number(row, 2, g.stats.length as f64)?;
-        ws.write_number(row, 3, g.stats.contigs as f64)?;
-        ws.write_number(row, 4, g.stats.n50 as f64)?;
-        ws.write_number(row, 5, g.stats.gc)?;
-        if g.cluster != u32::MAX {
-            ws.write_number(row, 6, g.cluster as f64)?;
-        }
-        ws.write_boolean(row, 7, g.is_pivot)?;
-        ws.write_number(row, 8, g.focus as f64)?;
-        ws.write_number(row, 9, g.snps_vs_pivot as f64)?;
-        if let Some(&n) = r.pass_snps.get(&g.id) {
-            ws.write_number(row, 10, n as f64)?;
-        }
-        ws.write_number(row, 11, g.indels_vs_pivot as f64)?;
-        ws.write_number(row, 12, g.uncovered_bp as f64)?;
-        ws.write_number(row, 13, g.novel_bp as f64)?;
-        if let Some(l) = labels.get(&g.id) {
-            for (c, v) in l.iter().enumerate() {
-                ws.write_string(row, (head.len() + c) as u16, v)?;
-            }
-        }
-    }
-    ws.set_column_width(1, 28)?;
-
-    // --- Clusters ---
-    let ws = wb.add_worksheet().set_name("Clusters")?;
-    for (c, h) in ["cluster", "pivot", "size", "focus", "core genome (bp)"]
-        .iter()
-        .enumerate()
-    {
-        ws.write_string_with_format(0, c as u16, *h, &bold)?;
-    }
-    for (i, id) in sorted_cluster_ids(r).iter().enumerate() {
-        let Some(c) = r.clusters.iter().find(|c| c.id == *id) else {
-            continue;
-        };
-        let row = i as u32 + 1;
-        ws.write_number(row, 0, c.id as f64)?;
-        ws.write_string(row, 1, name(r, c.pivot))?;
-        ws.write_number(row, 2, c.size() as f64)?;
-        ws.write_number(row, 3, r.cluster_focus.get(id).copied().unwrap_or(0) as f64)?;
-        if let Some(&b) = r.core_bp.get(id) {
-            ws.write_number(row, 4, b as f64)?;
-        }
-    }
-    ws.set_column_width(1, 28)?;
-
-    // --- one SNP matrix per exact cluster ---
-    for id in sorted_cluster_ids(r) {
-        if r.cluster_focus.get(&id).copied().unwrap_or(0) < 2 {
-            continue;
-        }
-        let Some(m) = r.matrices.get(&id) else {
-            continue;
-        };
-        if m.ids.len() + 1 > XLSX_MAX_COLS || m.ids.len() < 2 {
-            continue;
-        }
-        let ws = wb.add_worksheet().set_name(format!("Cluster {id} SNPs"))?;
-        ws.write_string_with_format(0, 0, "SNPs", &bold)?;
-        for (j, &g) in m.ids.iter().enumerate() {
-            ws.write_string_with_format(0, j as u16 + 1, name(r, g), &bold)?;
-            ws.write_string_with_format(j as u32 + 1, 0, name(r, g), &bold)?;
-        }
-        for i in 0..m.ids.len() {
-            for j in 0..m.ids.len() {
-                if i != j && m.comparable[i][j] == 0 {
-                    ws.write_string(i as u32 + 1, j as u16 + 1, "NA")?;
-                } else {
-                    ws.write_number(i as u32 + 1, j as u16 + 1, m.snps[i][j] as f64)?;
-                }
-            }
-        }
-        ws.set_column_width(0, 24)?;
-        ws.set_freeze_panes(1, 1)?;
-    }
-
-    // --- between-cluster SNPs ---
-    if let Some(bb) = &r.backbone_exact {
-        if bb.names.len() + 1 <= XLSX_MAX_COLS {
-            let ws = wb.add_worksheet().set_name("Between clusters")?;
-            ws.write_string_with_format(0, 0, "pivot SNPs", &bold)?;
-            for (j, n) in bb.names.iter().enumerate() {
-                ws.write_string_with_format(0, j as u16 + 1, n, &bold)?;
-                ws.write_string_with_format(j as u32 + 1, 0, n, &bold)?;
-                for i in 0..bb.names.len() {
-                    ws.write_number(j as u32 + 1, i as u16 + 1, bb.snps[j][i] as f64)?;
-                }
-            }
-            ws.set_column_width(0, 24)?;
-        }
-    }
-
-    // --- variants ---
-    let ws = wb.add_worksheet().set_name("Variants")?;
-    let vh = [
-        "genome",
-        "cluster",
-        "pivot contig",
-        "pivot pos",
-        "ref",
-        "alt",
-        "type",
-        "filter",
-    ];
-    for (c, h) in vh.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &bold)?;
-    }
-    let mut row = 1u32;
-    'outer: for id in sorted_cluster_ids(r) {
-        let Some(c) = r.clusters.iter().find(|c| c.id == id) else {
-            continue;
-        };
-        let empty = Vec::new();
-        let cnames = r.pivot_contig_names.get(&id).unwrap_or(&empty);
-        let mut mids: Vec<u32> = c.members.clone();
-        mids.sort_unstable();
-        for mid in mids {
-            let Some(cmp) = r.comparisons.get(&mid) else {
-                continue;
-            };
-            let why = r.filter_reasons.get(&mid);
-            for (i, v) in cmp.variants.iter().enumerate() {
-                if row >= XLSX_MAX_ROWS {
-                    break 'outer;
-                }
-                ws.write_string(row, 0, name(r, mid))?;
-                ws.write_number(row, 1, id as f64)?;
-                ws.write_string(
-                    row,
-                    2,
-                    cnames
-                        .get(v.pivot_contig as usize)
-                        .cloned()
-                        .unwrap_or_else(|| v.pivot_contig.to_string()),
-                )?;
-                ws.write_number(row, 3, (v.pivot_start + 1) as f64)?;
-                ws.write_string(row, 4, truncate(&v.ref_allele))?;
-                ws.write_string(row, 5, truncate(&v.alt_allele))?;
-                ws.write_string(row, 6, v.kind.as_str())?;
-                ws.write_string(
-                    row,
-                    7,
-                    why.and_then(|w| w.get(i))
-                        .map(String::as_str)
-                        .unwrap_or(PASS),
-                )?;
-                row += 1;
-            }
-        }
-    }
-    ws.set_column_width(0, 24)?;
-    ws.set_column_width(2, 36)?;
-
-    wb.save(dir.join("results.xlsx"))
-}
-
-/// Excel cells hold at most 32,767 characters; long indel alleles are cut.
-fn truncate(s: &str) -> String {
-    if s.is_empty() {
-        "-".to_string()
-    } else if s.len() > 200 {
-        format!("{}… ({} bp)", &s[..200], s.len())
-    } else {
-        s.to_string()
-    }
+    r.cluster_snp_trees.insert(
+        0,
+        parse_newick("((a0:0,a1:0):1,a2:2,a3:6);").expect("newick"),
+    );
+    r.cluster_snp_trees
+        .insert(1, parse_newick("(b0:1,b1:2);").expect("newick"));
+    r.full_tree_snps =
+        parse_newick("(((a0:0,a1:0):1,a2:2,a3:6):5000,(b0:1,b1:2):5000);").expect("newick");
+    r.backbone_is_exact = false;
+    r.outliers.push(crate::events::OutlierInfo {
+        id: 3,
+        name: "a3".into(),
+        length: 1_000_000,
+        gc: 0.5,
+        nearest_dist: 0.03,
+        nearest_name: "a2".into(),
+        reasons: vec!["GC content far from the others".into()],
+    });
+    r
 }
 
 #[cfg(test)]
@@ -813,6 +483,7 @@ mod tests {
 
     #[test]
     fn scale_bars_are_round_numbers() {
+        use svg::nice;
         assert_eq!(nice(0.3), 1.0);
         assert_eq!(nice(3.0), 2.0);
         assert_eq!(nice(4.0), 5.0);
