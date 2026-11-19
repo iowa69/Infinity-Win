@@ -14,6 +14,7 @@
 //! | [`seq`] | 6.2 encoding, the anchor hash, level thresholds |
 //! | [`fasta`] | 6.2.1 input, 9 accepted files |
 //! | [`genome`] | 6.2 scan, per-genome statistics |
+//! | [`outlier`] | divergent assemblies (another species, contamination) |
 //! | [`blocks`] | 6.3 nested blocks and their strand-independent hashes |
 //! | [`sketch`] | 6.4 sketches and the sketch distance |
 //! | [`cluster`] | 6.4 greedy clustering and the backbone tree |
@@ -57,6 +58,7 @@ pub mod fasta;
 pub mod filter;
 pub mod genome;
 pub mod interval;
+pub mod outlier;
 pub mod output;
 pub mod params;
 pub mod pivot;

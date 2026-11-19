@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use infinity_core::counters::Counters;
 use infinity_core::events::{
     ClusterFocusInfo, ClusterInfo, Event, GenomeScannedInfo, MapUpdateInfo, MemberNumbers,
+    OutlierInfo,
 };
 use infinity_core::summary::RunSummary;
 use infinity_core::tree::{parse_newick, Tree};
@@ -171,6 +172,10 @@ pub struct UiModel {
 
     /// What the backbone's branch lengths are measured in.
     pub backbone_unit: BackboneUnit,
+
+    /// Genomes the engine flagged as divergent (another species,
+    /// contamination, an incomplete assembly), in the engine's order.
+    pub outliers: Vec<OutlierInfo>,
 
     /// Cluster distance threshold in force, as last reported by the engine.
     pub threshold: f64,
@@ -320,6 +325,23 @@ impl UiModel {
                 let exact = (0..n).all(|i| (0..n).all(|j| i == j || b.comparable[i][j] > 0));
                 self.on_backbone(t_ms, b.newick, b.pivots);
                 self.backbone_unit = BackboneUnit::Snps { exact };
+            }
+            Event::Outliers(list) => {
+                self.notes.push(Note {
+                    t_ms,
+                    text: format!(
+                        "{} divergent assembl{} flagged (another species, contamination or an \
+                         incomplete assembly): {}",
+                        list.len(),
+                        if list.len() == 1 { "y" } else { "ies" },
+                        list.iter()
+                            .map(|o| o.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    local: false,
+                });
+                self.outliers = list;
             }
             // Matrices, Focus 1 maps and per-variant filters are written to the
             // output folder; the panels do not draw them yet.

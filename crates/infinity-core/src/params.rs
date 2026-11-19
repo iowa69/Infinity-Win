@@ -126,6 +126,15 @@ pub struct Parameters {
     /// junctions), so fragmented assemblies lose less coverage.
     #[serde(default = "default_true")]
     pub break_extension: bool,
+
+    // --- input selection ---
+    /// Genomes to leave out, by name: the file name without its sequence
+    /// extensions, exactly as `genomes.tsv` and the outlier warning print it.
+    /// Excluded files are dropped before scanning and listed in `run.json`'s
+    /// notes. Typically filled from the divergent-assembly warning
+    /// ([`crate::outlier`]).
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 impl Default for Parameters {
@@ -152,6 +161,7 @@ impl Default for Parameters {
             snp_thresholds: default_snp_thresholds(),
             refine_backbone: true,
             break_extension: true,
+            exclude: Vec::new(),
         }
     }
 }

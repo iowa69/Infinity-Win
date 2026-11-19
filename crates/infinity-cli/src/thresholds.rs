@@ -39,6 +39,9 @@ pub struct ThresholdArgs {
     /// distance is too tight for it.
     #[arg(long, default_value_t = 50)]
     max_snps: u64,
+
+    #[command(flatten)]
+    exclude: crate::ExcludeArgs,
 }
 
 /// Thresholds tried, as sketch distances (1 - identity).
@@ -56,14 +59,22 @@ const NOISE_FLOOR: f64 = 0.001;
 const DIVERGENCE_CEILING: f64 = 0.01;
 
 pub fn cmd_thresholds(args: ThresholdArgs) -> i32 {
+    let exclude = match args.exclude.names() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("infinity thresholds: {e}");
+            return 2;
+        }
+    };
     let params = Parameters {
         threads: args.threads,
         resolution: Resolution::Sketch,
         refine_backbone: false,
+        exclude,
         ..Default::default()
     };
     eprintln!("sketching the genomes ...");
-    let (results, _) = match run_collecting(RunConfig {
+    let (results, events) = match run_collecting(RunConfig {
         inputs: args.inputs.clone(),
         params: params.clone(),
         outdir: None,
@@ -74,6 +85,20 @@ pub fn cmd_thresholds(args: ThresholdArgs) -> i32 {
             return 1;
         }
     };
+    // The same input checks a run makes: which genomes were left out, and
+    // which ones look divergent (they distort every number below).
+    for env in &events {
+        match &env.event {
+            infinity_core::events::Event::Warning { text } if text.contains("exclude") => {
+                println!("note: {text}");
+            }
+            infinity_core::events::Event::Outliers(list) => {
+                println!("{}", crate::outlier_warning(list, false));
+                println!();
+            }
+            _ => {}
+        }
+    }
     let recs = &results.records;
     let n = recs.len();
     if n < 2 {

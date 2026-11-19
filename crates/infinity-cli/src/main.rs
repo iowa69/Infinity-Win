@@ -13,7 +13,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use infinity_core::engine::{run, RunConfig};
-use infinity_core::events::{event_bus, Command, Envelope, Event};
+use infinity_core::events::{event_bus, Command, Envelope, Event, OutlierInfo};
 use infinity_core::filter::SnpFilter;
 use infinity_core::params::{Parameters, Resolution};
 use infinity_core::seq::LEVELS;
@@ -204,6 +204,86 @@ struct RunArgs {
     /// Reject a site incompatible with at least this many neighbours.
     #[arg(long, default_value_t = 2)]
     incompat_min: u32,
+
+    #[command(flatten)]
+    exclude: ExcludeArgs,
+}
+
+/// Leaving genomes out of a run, typically the ones the divergent-assembly
+/// warning lists.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct ExcludeArgs {
+    /// Genomes to leave out, by name (the file name without `.fasta`/`.gz`, as
+    /// in `genomes.tsv`), comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    exclude: Vec<String>,
+
+    /// A file with genome names to leave out, one per line (`#` starts a
+    /// comment). Combined with `--exclude`.
+    #[arg(long)]
+    exclude_file: Option<PathBuf>,
+}
+
+impl ExcludeArgs {
+    /// Every name to exclude, from both options, in order and without
+    /// duplicates.
+    pub fn names(&self) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |n: &str| {
+            let n = n.trim();
+            if !n.is_empty() && !out.iter().any(|o| o == n) {
+                out.push(n.to_string());
+            }
+        };
+        for n in &self.exclude {
+            push(n);
+        }
+        if let Some(path) = &self.exclude_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read --exclude-file {}: {e}", path.display()))?;
+            for n in infinity_core::outlier::parse_name_list(&text) {
+                push(&n);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The terminal warning for divergent assemblies: which genomes, why, and the
+/// exact option that leaves them out.
+pub fn outlier_warning(list: &[OutlierInfo], written_to_tsv: bool) -> String {
+    let mut s = format!(
+        "WARNING: {} genome{} look{} divergent from the rest (another species, contamination \
+         or an incomplete assembly). Results may be compromised:",
+        list.len(),
+        if list.len() == 1 { "" } else { "s" },
+        if list.len() == 1 { "s" } else { "" }
+    );
+    for o in list {
+        s.push_str(&format!(
+            "\n  - {}  ({:.2} Mb, GC {:.1}%, nearest {} at {:.3})",
+            o.name,
+            o.length as f64 / 1e6,
+            o.gc * 100.0,
+            if o.nearest_name.is_empty() {
+                "none"
+            } else {
+                o.nearest_name.as_str()
+            },
+            o.nearest_dist
+        ));
+        for r in &o.reasons {
+            s.push_str(&format!("\n      {r}"));
+        }
+    }
+    s.push_str(&format!(
+        "\n  To leave them out, run again with:  {}",
+        infinity_core::outlier::exclude_option(list.iter().map(|o| o.name.as_str()))
+    ));
+    if written_to_tsv {
+        s.push_str("\n  (the list is also in outliers.tsv in the output folder)");
+    }
+    s
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -304,7 +384,15 @@ fn main() {
 }
 
 fn cmd_run(args: RunArgs) -> i32 {
+    let exclude = match args.exclude.names() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("infinity: {e}");
+            return 2;
+        }
+    };
     let params = Parameters {
+        exclude,
         k: args.k,
         densities: args.densities,
         sketch_level: args.sketch_level,
@@ -434,6 +522,9 @@ fn render(env: &Envelope, verbosity: Verbosity, last_stage: &mut String) -> Opti
             })
         }
         Event::Warning { text } => Some(format!("[{t:8.2}s] warning: {text}")),
+        // Shown at every verbosity, like any warning: it can change whether
+        // the results are usable at all.
+        Event::Outliers(list) => Some(format!("[{t:8.2}s] {}", outlier_warning(list, true))),
         Event::Clustered {
             threshold,
             clusters,
@@ -618,5 +709,82 @@ fn cmd_simulate(args: SimulateArgs) -> i32 {
             eprintln!("infinity: simulation failed: {e}");
             1
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_outlier_warning_names_every_genome_and_the_option_to_drop_them() {
+        let list = vec![
+            OutlierInfo {
+                id: 0,
+                name: "a".into(),
+                length: 2_000_000,
+                gc: 0.65,
+                nearest_dist: 1.0,
+                nearest_name: String::new(),
+                reasons: vec!["no close relative".into()],
+            },
+            OutlierInfo {
+                id: 1,
+                name: "b".into(),
+                length: 3_900_000,
+                gc: 0.33,
+                nearest_dist: 0.002,
+                nearest_name: "c".into(),
+                reasons: vec!["length".into(), "GC".into()],
+            },
+        ];
+        let w = outlier_warning(&list, true);
+        assert!(w.starts_with("WARNING: 2 genomes look divergent"), "{w}");
+        assert!(w.contains("- a  (2.00 Mb, GC 65.0%, nearest none at 1.000)"));
+        assert!(w.contains("nearest c at 0.002"));
+        assert!(w.contains("      no close relative"));
+        assert!(w.contains("run again with:  --exclude a,b"));
+    }
+
+    #[test]
+    fn exclusions_combine_the_option_and_the_file() {
+        let dir = std::env::temp_dir().join(format!("infinity-cli-excl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("names.txt");
+        std::fs::write(&f, "# from outliers.tsv\nb\nc\n\n").unwrap();
+        let args = ExcludeArgs {
+            exclude: vec!["a".into(), "b".into()],
+            exclude_file: Some(f),
+        };
+        assert_eq!(args.names().unwrap(), vec!["a", "b", "c"]);
+        let missing = ExcludeArgs {
+            exclude: vec![],
+            exclude_file: Some(dir.join("nope.txt")),
+        };
+        assert!(missing.names().unwrap_err().contains("--exclude-file"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_command_line_accepts_both_exclusion_options() {
+        let cli = Cli::try_parse_from([
+            "infinity",
+            "run",
+            "g/",
+            "-o",
+            "out",
+            "--exclude",
+            "x,y",
+            "--exclude-file",
+            "list.txt",
+        ])
+        .unwrap();
+        let Cmd::Run(args) = cli.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.exclude.exclude, vec!["x", "y"]);
+        assert_eq!(
+            args.exclude.exclude_file.as_deref(),
+            Some(std::path::Path::new("list.txt"))
+        );
     }
 }
