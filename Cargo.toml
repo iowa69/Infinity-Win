@@ -13,7 +13,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.77"
 license = "MIT"
-authors = ["Infinity-Win contributors"]
+authors = ["iowa69"]
 description = "Progressive, cluster-first, position-aware comparison of nearly identical genomes"
 
 [workspace.dependencies]

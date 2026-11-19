@@ -153,6 +153,10 @@ infinity run genomes/ -o results/ --cluster-dist 0.003 --snp-thresholds 5,20
 Infinity-Win --open results/                      # explore a finished run
 ```
 
+## Author
+
+Infinity-Win is written and maintained by [iowa69](https://github.com/iowa69). MIT licence.
+
 ## More
 
 - [docs/USER_GUIDE.md](docs/USER_GUIDE.md): every option, file and column
